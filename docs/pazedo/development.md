@@ -81,7 +81,9 @@ Three layers, cheapest first. UI work that was only compiled, never looked at, i
    it also opens that agent's session from the live test daemon in a tab and captures it
    (`agent-session.png`); `PAZEDO_SCREENSHOT_SEND="text"` types and sends a message
    (`agent-session-sent.png`), and `PAZEDO_SCREENSHOT_CLICK=x,y` clicks a point in window
-   coordinates, e.g. a permission button (`agent-session-clicked.png`). Real socket I/O runs
+   coordinates, e.g. a permission button (`agent-session-clicked.png`), and
+   `PAZEDO_SCREENSHOT_EXTERNAL_SEND="text"` sends a message as another client would
+   (`agent-session-external.png`). Real socket I/O runs
    while the deterministic scheduler is pumped, so this works with the screen locked. With
    `new`, set `PAZEDO_AGENT_PROVIDER=mock` (and a mock model) or a real agent is created.
 3. **The real app** against the test daemon (`script/pazedo/run-dev`, then
@@ -95,7 +97,8 @@ Terminal.app, granted 2026-11-14):
 
 ```sh
 script/pazedo/ui click 120 95      # coordinates as seen in a script/pazedo/screenshot image
-script/pazedo/ui key 53            # a macOS key code (53 is Escape)
+script/pazedo/ui key 53            # a macOS key code (53 is Escape, 36 is Return)
+script/pazedo/ui type "some text"  # types into the focused field
 script/pazedo/ui frame             # window position and size in points
 ```
 

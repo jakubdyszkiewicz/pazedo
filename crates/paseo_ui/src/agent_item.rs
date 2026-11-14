@@ -72,6 +72,14 @@ impl PaseoAgentItem {
     }
 }
 
+impl PaseoAgentItem {
+    /// For the screenshot runner's consistency checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn conversation_view(&self) -> &Entity<ConversationView> {
+        &self.conversation_view
+    }
+}
+
 impl Item for PaseoAgentItem {
     type Event = ();
 

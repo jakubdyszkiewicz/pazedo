@@ -216,6 +216,7 @@ mod screenshots {
         // History and live state arrive over the network; give the view time to fill.
         wait(cx, Duration::from_secs(8))?;
         capture(cx, window, path)?;
+        dump_thread(window, cx)?;
 
         // Typing into the message editor and pressing enter sends through Paseo, like a user.
         if let Ok(message) = std::env::var("PAZEDO_SCREENSHOT_SEND") {
@@ -227,6 +228,7 @@ mod screenshots {
                 "{}",
                 path.with_file_name("agent-session-sent.png").display()
             );
+            dump_thread(window, cx)?;
         }
         // `x,y` in window points (the PNGs are captured at that scale), e.g. a permission button.
         if let Ok(click) = std::env::var("PAZEDO_SCREENSHOT_CLICK") {
@@ -247,7 +249,78 @@ mod screenshots {
                 "{}",
                 path.with_file_name("agent-session-clicked.png").display()
             );
+            dump_thread(window, cx)?;
         }
+        // A message from another client while the tab is open, like `paseo send` from the CLI.
+        if let Ok(message) = std::env::var("PAZEDO_SCREENSHOT_EXTERNAL_SEND") {
+            let client = store
+                .read_with(cx, |store, _| store.client())
+                .context("not connected")?;
+            let agent_id = agent_id.to_string();
+            let send = cx.background_executor.spawn(async move {
+                client
+                    .request(&paseo_client::protocol::SendAgentMessage {
+                        agent_id,
+                        text: message,
+                        message_id: None,
+                        active_turn_behavior: None,
+                    })
+                    .await
+            });
+            pump(cx, Duration::from_secs(10), |_| send.is_ready())?;
+            wait(cx, Duration::from_secs(4))?;
+            capture(
+                cx,
+                window,
+                &path.with_file_name("agent-session-external.png"),
+            )?;
+            println!(
+                "{}",
+                path.with_file_name("agent-session-external.png").display()
+            );
+            dump_thread(window, cx)?;
+        }
+        Ok(())
+    }
+
+    /// Prints the thread's entries and how many rows the view's list has for them.
+    fn dump_thread(
+        window: WindowHandle<MultiWorkspace>,
+        cx: &mut VisualTestAppContext,
+    ) -> Result<()> {
+        window.update(cx, |multi_workspace, _, cx| {
+            let workspace = multi_workspace.workspace().read(cx);
+            for item in workspace.items_of_type::<PaseoAgentItem>(cx) {
+                let Some(thread_view) = item.read(cx).conversation_view().read(cx).active_thread()
+                else {
+                    continue;
+                };
+                let thread_view = thread_view.read(cx);
+                let thread = thread_view.thread.read(cx);
+                println!(
+                    "thread entries: {}, view list items: {}",
+                    thread.entries().len(),
+                    thread_view.list_state.item_count()
+                );
+                if std::env::var("PAZEDO_SCREENSHOT_DUMP_ENTRIES").is_ok() {
+                    let view_state = thread_view.entry_view_state.read(cx);
+                    for (index, entry) in thread.entries().iter().enumerate() {
+                        let kind = format!("{entry:?}");
+                        let kind = kind.split('(').next().unwrap_or_default().to_string();
+                        let user_text = entry
+                            .user_message()
+                            .map(|message| message.content.to_markdown(cx));
+                        let view_editor = view_state
+                            .entry(index)
+                            .and_then(|entry| entry.message_editor())
+                            .map(|editor| editor.read(cx).text(cx));
+                        println!(
+                            "  {index}: {kind} user={user_text:?} view_editor={view_editor:?}"
+                        );
+                    }
+                }
+            }
+        })?;
         Ok(())
     }
 

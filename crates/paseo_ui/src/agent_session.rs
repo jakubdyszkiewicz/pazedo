@@ -531,6 +531,11 @@ fn handle_store_event(
                     return;
                 };
                 if session.holds > 0 {
+                    log::debug!(
+                        "holding Paseo event seq={:?} (holds={})",
+                        stream.seq,
+                        session.holds
+                    );
                     session.held.push(stream.clone());
                     false
                 } else {
@@ -637,6 +642,12 @@ fn apply_stream(
     cx: &mut App,
 ) {
     let event = stream.event();
+    log::debug!(
+        "Paseo agent {} event seq={:?} {:?}",
+        stream.agent_id,
+        stream.seq,
+        stream.event_type()
+    );
     let (thread, updates) = {
         let mut sessions = sessions.borrow_mut();
         let Some(session) = sessions.get_mut(&stream.agent_id) else {
@@ -659,7 +670,9 @@ fn apply_stream(
         let Some(thread) = session.thread.upgrade() else {
             return;
         };
-        (thread, session.stream.updates(&event))
+        let updates = session.stream.updates(&event);
+        log::debug!("  -> {updates:?}");
+        (thread, updates)
     };
     apply_updates(&thread, updates, cx);
 

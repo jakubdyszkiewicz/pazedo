@@ -65,6 +65,15 @@ same features.
 - A new agent created from Zed appeared in the sidebar, and its first message streamed live
   into the tab, which took the agent's title.
 
+Also verified in the running app (2026-11-14, `script/pazedo/run-dev`, clicks and typing through
+`script/pazedo/ui`): opening an agent from the sidebar, sending a message with Return, answering
+the plan approval by clicking Implement, and a turn started with `paseo-test send` from the CLI
+streaming into the already-open tab. When checking a screenshot, remember the view follows the
+bottom of a running turn: a long mock turn scrolls earlier user messages out of view, and the
+mock's own text runs one cycle into the next without a line break. The runner's
+`PAZEDO_SCREENSHOT_DUMP_ENTRIES=1` prints the thread's entries next to the view's, which
+settles whether something is missing or just scrolled away.
+
 ## Known gaps
 
 - Only the last 200 timeline entries are loaded; no "load older" yet.
@@ -77,5 +86,3 @@ same features.
 - `agent_ui`'s `ThreadMetadataStore` records every `ConversationView`, so Paseo sessions also
   land in Zed's own thread history database. Not filtered yet (would need a small upstream
   edit).
-- Not yet checked in the running app (the screen was locked); the off-screen runner exercised
-  the same code against the live test daemon.
