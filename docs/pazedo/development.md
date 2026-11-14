@@ -80,6 +80,28 @@ Three layers, cheapest first. UI work that was only compiled, never looked at, i
    `script/pazedo/screenshot`): for what fixtures cannot show, such as the live connection,
    updates arriving, and opening real directories. Needs the window in front (see below).
 
+## Driving the running app
+
+`script/pazedo/ui` raises the dev build and sends input (Accessibility permission for
+Terminal.app, granted 2026-11-14):
+
+```sh
+script/pazedo/ui click 120 95      # coordinates as seen in a script/pazedo/screenshot image
+script/pazedo/ui key 53            # a macOS key code (53 is Escape)
+script/pazedo/ui frame             # window position and size in points
+```
+
+Clicks are real CoreGraphics mouse events (`click.swift`). System Events' `click at` does
+nothing in Zed because it goes through the accessibility tree, which gpui windows do not expose.
+Verified 2026-11-14 against the test daemon: a mock agent started with `paseo-test run`
+appeared in the running app with a spinner without a restart, and clicking its workspace row
+opened `~/dev/pazedo-sandbox` (title bar, branch and project panel switched). The dev window
+comes to the front whenever these scripts run.
+
+The test daemon is a child of whichever shell started it. When the real daemon restarts, agent
+shells die with it, and so does a test daemon started from one; start it again with the
+command above.
+
 ## Screenshots of the running app
 
 Agents on this machine can check the real app on screen:
