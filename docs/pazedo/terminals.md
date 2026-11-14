@@ -7,7 +7,7 @@ and keeps running when the tab closes.
 
 - The sidebar lists a workspace's terminals under its agents once the workspace has been
   opened in the window (terminal lists are subscribed per workspace, see below). Clicking one
-  attaches to it in a center-pane tab.
+  attaches to it in a tab of the Paseo panel, next to the agent tabs.
 - The **+** menu on a workspace row starts with **New Terminal**: the daemon starts a shell in
   the workspace's directory and the tab opens.
 - When the shell exits (`exit`, or killed from another client), the tab closes, like a local

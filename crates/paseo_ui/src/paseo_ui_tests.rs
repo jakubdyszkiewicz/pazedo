@@ -1,5 +1,5 @@
 use crate::{
-    PaseoSidebar, PaseoStore, PaseoTerminalItem,
+    PaseoPanel, PaseoSidebar, PaseoStore, PaseoTerminalItem,
     store::{DirectorySnapshot, DirectorySubscriptions},
 };
 use fs::FakeFs;
@@ -536,5 +536,54 @@ async fn test_terminal_tab_shows_the_restored_screen_then_output(cx: &mut TestAp
     item.read_with(cx, |item, cx| {
         let content = item.terminal().read(cx).get_content();
         assert_eq!(content.trim_end(), "$ echo hi\nhi\n$ ls");
+    });
+}
+
+#[gpui::test]
+async fn test_paseo_tabs_open_in_the_paseo_panel(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let store = cx.new(|cx| PaseoStore::new(None, cx));
+        PaseoStore::set_global(store, cx);
+    });
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let weak_workspace = workspace.weak_handle();
+        let project = workspace.project().clone();
+        let panel = cx.new(|cx| PaseoPanel::new(weak_workspace, project, window, cx));
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    });
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
+        PaseoTerminalItem::open(workspace, "term-2".into(), "server".into(), window, cx);
+        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
+    });
+    cx.run_until_parked();
+
+    let pane = panel.read_with(cx, |panel, _| panel.pane().clone());
+    pane.read_with(cx, |pane, cx| {
+        assert_eq!(pane.items_len(), 2, "reopening a tab activates it");
+        let active = pane
+            .active_item()
+            .and_then(|item| item.downcast::<PaseoTerminalItem>())
+            .expect("a Paseo terminal is active");
+        assert_eq!(active.read(cx).terminal_id(), "term-1");
+    });
+    workspace.read_with(cx, |workspace, cx| {
+        assert_eq!(
+            workspace.items_of_type::<PaseoTerminalItem>(cx).count(),
+            0,
+            "nothing opens in the center pane"
+        );
+        assert!(workspace.panel::<PaseoPanel>(cx).is_some());
     });
 }

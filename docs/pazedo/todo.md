@@ -39,6 +39,14 @@ done; record decisions where the code or docs that implement them live.
 - Archive or hide finished agents; the sidebar gets long.
 - Several daemons (hosts) in one sidebar; the brief groups by host.
 
+## Paseo panel
+
+- One pane only: no splits inside the panel yet (Zed's terminal panel has them).
+- The panel's dock position is not persisted; moving it to the right lasts until restart.
+- Closed agents open with an empty history: the daemon returns no timeline entries for them
+  (`fetch_agent_timeline_request` gave 0 entries for a closed mock agent). Find out how Paseo's
+  app shows a closed agent's history, or hide closed agents from the sidebar.
+
 ## Terminals (see terminals.md)
 
 - Not verified: two clients resizing the same terminal; a reconnect with terminal tabs open.

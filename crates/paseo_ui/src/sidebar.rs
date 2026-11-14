@@ -30,6 +30,7 @@ use workspace::{
 use crate::{
     agent_item::PaseoAgentItem,
     agent_session::{NewAgent, PROVIDER_ENV_VAR},
+    panel::PaseoPanel,
     store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry},
     terminal_item::PaseoTerminalItem,
 };
@@ -122,6 +123,7 @@ impl PaseoSidebar {
         };
         cx.spawn_in(window, async move |_, cx| {
             let workspace = activate.await?;
+            PaseoPanel::wait_for_panel(&workspace, cx).await;
             workspace.update_in(cx, |workspace, window, cx| {
                 PaseoAgentItem::open(workspace, agent_id, new_agent, title, window, cx);
             })?;
@@ -144,6 +146,7 @@ impl PaseoSidebar {
         };
         cx.spawn_in(window, async move |_, cx| {
             let workspace = activate.await?;
+            PaseoPanel::wait_for_panel(&workspace, cx).await;
             workspace.update_in(cx, |workspace, window, cx| {
                 PaseoTerminalItem::open(workspace, terminal_id, name, window, cx);
             })?;

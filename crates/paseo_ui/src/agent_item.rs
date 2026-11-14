@@ -10,7 +10,10 @@ use ui::prelude::*;
 use util::path_list::PathList;
 use workspace::{Item, Workspace};
 
-use crate::agent_session::{NewAgent, PASEO_AGENT_ID, PaseoAgentServer, PaseoConnection};
+use crate::{
+    agent_session::{NewAgent, PASEO_AGENT_ID, PaseoAgentServer, PaseoConnection},
+    panel::PaseoPanel,
+};
 
 /// A Paseo agent session in a center-pane tab, rendered by Zed's thread UI.
 pub struct PaseoAgentItem {
@@ -25,8 +28,8 @@ pub struct PaseoAgentItem {
 }
 
 impl PaseoAgentItem {
-    /// Opens the agent's tab in `workspace`, or focuses it if it is already open. With no agent
-    /// id it starts a new agent with `new_agent`'s provider and model.
+    /// Opens the agent's tab in the workspace's Paseo panel, or focuses it if it is already
+    /// open. With no agent id it starts a new agent with `new_agent`'s provider and model.
     pub fn open(
         workspace: &mut Workspace,
         agent_id: Option<String>,
@@ -36,11 +39,11 @@ impl PaseoAgentItem {
         cx: &mut Context<Workspace>,
     ) {
         if let Some(agent_id) = &agent_id {
-            let existing = workspace
-                .items_of_type::<PaseoAgentItem>(cx)
-                .find(|item| item.read(cx).agent_id(cx).as_ref() == Some(agent_id));
+            let existing = PaseoPanel::find_item::<PaseoAgentItem>(workspace, cx, |item, cx| {
+                item.agent_id(cx).as_ref() == Some(agent_id)
+            });
             if let Some(existing) = existing {
-                workspace.activate_item(&existing, true, true, window, cx);
+                PaseoPanel::show_item(workspace, Box::new(existing), window, cx);
                 return;
             }
         } else {
@@ -71,7 +74,7 @@ impl PaseoAgentItem {
                 conversation_view,
             }
         });
-        workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        PaseoPanel::show_item(workspace, Box::new(item), window, cx);
     }
 
     fn agent_id(&self, cx: &App) -> Option<String> {

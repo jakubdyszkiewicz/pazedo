@@ -20,7 +20,10 @@ use ui::prelude::*;
 use util::{ResultExt as _, paths::PathStyle};
 use workspace::{Item, Workspace, WorkspaceId, item::ItemEvent, searchable::SearchableItemHandle};
 
-use crate::store::{PaseoStore, PaseoStoreEvent};
+use crate::{
+    panel::PaseoPanel,
+    store::{PaseoStore, PaseoStoreEvent},
+};
 
 /// A terminal owned by the Paseo daemon in a center-pane tab, rendered by Zed's terminal view.
 /// The shell keeps running when the tab closes, like in Paseo's own apps.
@@ -40,7 +43,8 @@ pub struct PaseoTerminalItem {
 }
 
 impl PaseoTerminalItem {
-    /// Opens the terminal's tab in `workspace`, or focuses it if it is already open.
+    /// Opens the terminal's tab in the workspace's Paseo panel, or focuses it if it is already
+    /// open.
     pub fn open(
         workspace: &mut Workspace,
         terminal_id: String,
@@ -48,11 +52,11 @@ impl PaseoTerminalItem {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let existing = workspace
-            .items_of_type::<PaseoTerminalItem>(cx)
-            .find(|item| item.read(cx).terminal_id == terminal_id);
+        let existing = PaseoPanel::find_item::<PaseoTerminalItem>(workspace, cx, |item, _| {
+            item.terminal_id == terminal_id
+        });
         if let Some(existing) = existing {
-            workspace.activate_item(&existing, true, true, window, cx);
+            PaseoPanel::show_item(workspace, Box::new(existing), window, cx);
             return;
         }
         let weak_workspace = workspace.weak_handle();
@@ -69,7 +73,7 @@ impl PaseoTerminalItem {
                 cx,
             )
         });
-        workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        PaseoPanel::show_item(workspace, Box::new(item), window, cx);
     }
 
     fn new(
@@ -306,6 +310,11 @@ impl PaseoTerminalItem {
     #[cfg(any(test, feature = "test-support"))]
     pub fn terminal(&self) -> &Entity<Terminal> {
         &self.terminal
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn terminal_id(&self) -> &str {
+        &self.terminal_id
     }
 }
 

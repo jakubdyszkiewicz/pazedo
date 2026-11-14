@@ -1,6 +1,8 @@
 # Paseo agent sessions in Zed
 
-Clicking an agent in the Paseo sidebar opens its session in a center-pane tab rendered by
+Clicking an agent in the Paseo sidebar opens its session in a tab of the Paseo panel (a dock
+panel, left by default, that holds Paseo agent and terminal tabs apart from the files in the
+center; `paseo_ui::PaseoPanel`, replacing Zed's agent panel) rendered by
 Zed's own thread UI (`agent_ui::ConversationView`): streaming markdown, reasoning, tool call
 cards (edits as real diffs), plans, permission prompts, the message editor, queueing and the
 stop button. The composer's dropdowns change the agent's model, thinking level and mode. The **+** button on
