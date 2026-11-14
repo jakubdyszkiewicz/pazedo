@@ -705,6 +705,11 @@ mod screenshots {
                     "title": "Paseo terminals",
                     "worktreeSlug": "terminals",
                     "gitRuntime": {"currentBranch": "pazedo/terminals"},
+                    "githubRuntime": {"pullRequest": {
+                        "number": 42, "url": "https://github.com/example/pazedo/pull/42",
+                        "title": "Paseo terminals", "state": "OPEN", "baseRefName": "main",
+                        "headRefName": "pazedo/terminals", "isMerged": false, "isDraft": false,
+                    }},
                     "createdAt": ago(90),
                     "activityAt": ago(1),
                 }),
