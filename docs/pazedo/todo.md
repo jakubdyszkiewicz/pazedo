@@ -35,17 +35,20 @@ done; record decisions where the code or docs that implement them live.
 - Opening an agent whose workspace is the pazedo repository itself switches the window to that
   repository; trust it only if rust-analyzer may build there.
 
-- Kill and rename terminals from the sidebar.
-- Archive or hide finished agents; the sidebar gets long.
+- The sidebar lists every workspace, including ones without agents; consider hiding or
+  archiving idle workspaces.
 - Several daemons (hosts) in one sidebar; the brief groups by host.
 
 ## Paseo panel
 
 - One pane only: no splits inside the panel yet (Zed's terminal panel has them).
 - The panel's dock position is not persisted; moving it to the right lasts until restart.
-- Closed agents open with an empty history: the daemon returns no timeline entries for them
-  (`fetch_agent_timeline_request` gave 0 entries for a closed mock agent). Find out how Paseo's
-  app shows a closed agent's history, or hide closed agents from the sidebar.
+- Closed agents (status `closed`, e.g. after a daemon restart) get tabs but open with an empty
+  history: the daemon returns no timeline entries for them. Paseo's app probably reloads them
+  with `refresh_agent_request`, which restarts the provider session; decide whether opening a
+  closed agent's tab should do that.
+- The panel's tab bar scrolls when a workspace has many agents; there is no overview of them.
+- Rename terminals from the panel.
 
 ## Terminals (see terminals.md)
 

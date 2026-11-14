@@ -1,17 +1,25 @@
 use agent_settings::AgentSettings;
 use anyhow::Result;
+use collections::HashSet;
 use gpui::{
-    Action as _, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Pixels, Render, Subscription, WeakEntity, Window, actions,
+    Action as _, App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Pixels, Render, SharedString, Subscription, WeakEntity, Window, actions,
 };
+use paseo_client::protocol::{Agent, ProviderEntry, ProviderStatus};
 use settings::Settings as _;
-use std::{sync::Arc, time::Duration};
-use ui::{Tooltip, prelude::*};
+use std::{path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use ui::{ContextMenu, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
+use util::path_list::PathList;
 use workspace::{
     Pane, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     item::{Item, ItemHandle},
     pane,
+};
+
+use crate::{
+    PaseoAgentItem, PaseoStore, PaseoTerminalItem,
+    agent_session::{NewAgent, PROVIDER_ENV_VAR},
 };
 
 actions!(
@@ -26,16 +34,24 @@ actions!(
 /// (see `ensure_agent_panel_for_workspace` in `crates/zed/src/zed.rs`).
 pub const REPLACES_ZED_AGENT_PANEL: bool = true;
 
-/// How long opening an agent or terminal waits for a just-created workspace to add its panels,
-/// which Zed does asynchronously, before falling back to the center pane.
+/// How long opening a workspace waits for a just-created Zed workspace to add its panels,
+/// which Zed does asynchronously.
 const PANEL_WAIT: Duration = Duration::from_secs(2);
 
-/// A dock panel with its own tab bar for Paseo agent sessions and terminals, so they sit apart
-/// from the files in the center pane. Each Zed workspace has its own, so it shows the tabs of
-/// the Paseo workspace that is open.
+/// A dock panel whose tabs are the agents and terminals of the Paseo workspace open in this Zed
+/// workspace, kept in step with the daemon: agents and terminals started anywhere (the phone,
+/// the CLI, other agents) get a tab, and closing a tab archives the agent or kills the terminal.
 pub struct PaseoPanel {
     pane: Entity<Pane>,
     workspace: WeakEntity<Workspace>,
+    store: Entity<PaseoStore>,
+    /// The Paseo workspace whose tabs are shown, when the Zed workspace's folder is one.
+    paseo_workspace_id: Option<String>,
+    /// Agents and terminals that had a tab here. One that disappears from the store was closed
+    /// or archived elsewhere, unlike a just-created agent the store does not know yet.
+    known_items: HashSet<String>,
+    /// Set while the panel adds and removes tabs itself, which must not close the dock.
+    syncing: bool,
     position: DockPosition,
     _subscriptions: Vec<Subscription>,
 }
@@ -61,6 +77,8 @@ impl PaseoPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let panel = cx.entity().downgrade();
+        let new_menu = PopoverMenuHandle::default();
         let pane = cx.new(|cx| {
             let mut pane = Pane::new(
                 workspace.clone(),
@@ -83,23 +101,39 @@ impl PaseoPanel {
             pane.set_close_pane_if_empty(false, cx);
             pane.set_zoom_out_on_close(false);
             pane.set_can_split(Some(Arc::new(|_, _, _, _| false)));
-            pane.set_render_tab_bar_buttons(cx, |pane, _window, cx| {
-                let zoomed = pane.is_zoomed();
-                let zoom = IconButton::new("paseo-panel-zoom", IconName::Maximize)
-                    .icon_size(IconSize::Small)
-                    .toggle_state(zoomed)
-                    .selected_icon(IconName::Minimize)
-                    .on_click(cx.listener(|pane, _, window, cx| {
-                        pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
-                    }))
-                    .tooltip(move |_window, cx| {
-                        Tooltip::for_action(
-                            if zoomed { "Zoom Out" } else { "Zoom In" },
-                            &workspace::ToggleZoom,
-                            cx,
-                        )
-                    });
-                (None, Some(zoom.into_any_element()))
+            pane.set_render_tab_bar_buttons(cx, {
+                let new_menu = new_menu.clone();
+                move |pane, _window, cx| {
+                    let zoomed = pane.is_zoomed();
+                    let buttons = h_flex()
+                        .gap(DynamicSpacing::Base02.rems(cx))
+                        .child(new_item_menu(
+                            "paseo-panel-new",
+                            panel.clone(),
+                            new_menu.clone(),
+                            true,
+                            IconButton::new("paseo-panel-new-button", IconName::Plus)
+                                .icon_size(IconSize::Small),
+                            "New Agent or Terminal",
+                        ))
+                        .child(
+                            IconButton::new("paseo-panel-zoom", IconName::Maximize)
+                                .icon_size(IconSize::Small)
+                                .toggle_state(zoomed)
+                                .selected_icon(IconName::Minimize)
+                                .on_click(cx.listener(|pane, _, window, cx| {
+                                    pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+                                }))
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::for_action(
+                                        if zoomed { "Zoom Out" } else { "Zoom In" },
+                                        &workspace::ToggleZoom,
+                                        cx,
+                                    )
+                                }),
+                        );
+                    (None, Some(buttons.into_any_element()))
+                }
             });
             if let Some(callbacks) = cx.try_global::<workspace::PaneSearchBarCallbacks>() {
                 let languages = Some(project.read(cx).languages().clone());
@@ -109,13 +143,22 @@ impl PaseoPanel {
             pane
         });
 
+        let store = PaseoStore::global(cx);
         let subscriptions = vec![
             cx.subscribe_in(&pane, window, Self::handle_pane_event),
             cx.observe(&pane, |_, _, cx| cx.notify()),
+            cx.observe_in(&store, window, |this, _, window, cx| {
+                this.sync_tabs(window, cx)
+            }),
         ];
+        cx.defer_in(window, |this, window, cx| this.sync_tabs(window, cx));
         Self {
             pane,
             workspace,
+            store,
+            paseo_workspace_id: None,
+            known_items: HashSet::default(),
+            syncing: false,
             position: DockPosition::Left,
             _subscriptions: subscriptions,
         }
@@ -138,11 +181,14 @@ impl PaseoPanel {
                     });
                 }
             }
-            // Like the terminal panel: closing the last tab closes the dock and returns focus to
-            // the center, instead of leaving an empty pane where the next close-tab keystroke
-            // closes the window.
-            pane::Event::RemovedItem { .. } if pane.read(cx).items_len() == 0 => {
-                cx.emit(PanelEvent::Close);
+            // After the last tab closes the panel shows its New Agent / New Terminal screen.
+            // Focus moves to the center, or the next close-tab keystroke in the empty pane would
+            // close the window.
+            pane::Event::RemovedItem { .. } if !self.syncing && pane.read(cx).items_len() == 0 => {
+                if let Some(workspace) = self.workspace.upgrade() {
+                    let center = workspace.read(cx).active_pane().focus_handle(cx);
+                    window.focus(&center, cx);
+                }
             }
             pane::Event::ZoomIn => cx.emit(PanelEvent::ZoomIn),
             pane::Event::ZoomOut => cx.emit(PanelEvent::ZoomOut),
@@ -150,8 +196,220 @@ impl PaseoPanel {
         }
     }
 
-    /// The open item of type `T` that matches, in the Paseo panel or (for tabs opened before
-    /// the panel existed) the center pane.
+    /// The single folder of this Zed workspace, which names its Paseo workspace.
+    fn directory(&self, cx: &App) -> Option<PathBuf> {
+        let workspace = self.workspace.upgrade()?;
+        match workspace.read(cx).root_paths(cx).as_slice() {
+            [path] => Some(path.to_path_buf()),
+            _ => None,
+        }
+    }
+
+    /// Makes the tabs match the Paseo workspace's agents and terminals: adds a tab for each one
+    /// without a tab, and removes tabs of agents and terminals that were archived, killed, or
+    /// belong to another Paseo workspace of the same folder.
+    fn sync_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(directory) = self.directory(cx) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let (paseo_workspace_id, watching, agents, terminals) = {
+            let store = self.store.read(cx);
+            let Some(paseo_workspace) = store.workspace_for_directory(&directory) else {
+                if self.paseo_workspace_id.take().is_some() {
+                    cx.notify();
+                }
+                return;
+            };
+            let id = paseo_workspace.id.clone();
+            let agents: Vec<(String, SharedString)> = store
+                .workspace_agents(&id)
+                .into_iter()
+                .map(|agent| (agent.id.clone(), agent_title(agent)))
+                .collect();
+            let terminals: Vec<(String, SharedString)> = store
+                .workspace_terminals(&id)
+                .into_iter()
+                .map(|terminal| (terminal.id.clone(), terminal.name.clone().into()))
+                .collect();
+            (
+                id.clone(),
+                store.is_watching_terminals(&id),
+                agents,
+                terminals,
+            )
+        };
+        if self.paseo_workspace_id.as_ref() != Some(&paseo_workspace_id) {
+            self.paseo_workspace_id = Some(paseo_workspace_id.clone());
+            cx.notify();
+        }
+        if !watching {
+            let store = self.store.clone();
+            cx.defer(move |cx| {
+                store.update(cx, |store, cx| {
+                    store.watch_terminals(&paseo_workspace_id, cx)
+                });
+            });
+        }
+
+        let store = self.store.read(cx);
+        let mut stale = Vec::new();
+        for item in self.pane.read(cx).items() {
+            if let Some(agent_item) = item.downcast::<PaseoAgentItem>()
+                && let Some(agent_id) = agent_item.read(cx).agent_id(cx)
+                && !agents.iter().any(|(id, _)| *id == agent_id)
+                && (store.agent(&agent_id).is_some() || self.known_items.contains(&agent_id))
+            {
+                agent_item.read(cx).detach();
+                stale.push(item.item_id());
+            } else if let Some(terminal_item) = item.downcast::<PaseoTerminalItem>() {
+                let terminal_id = terminal_item.read(cx).terminal_id();
+                if !terminals.iter().any(|(id, _)| id == terminal_id)
+                    && (store.terminal(terminal_id).is_some()
+                        || self.known_items.contains(terminal_id))
+                {
+                    terminal_item.read(cx).detach();
+                    stale.push(item.item_id());
+                }
+            }
+        }
+
+        // Not `PaseoAgentItem::find`: that looks the panel up through the workspace, and this
+        // panel is being updated.
+        let workspace_ref = workspace.read(cx);
+        let pane = self.pane.read(cx);
+        let missing_agents: Vec<_> = agents
+            .iter()
+            .filter(|(id, _)| {
+                let matches = |item: &Entity<PaseoAgentItem>| {
+                    item.read(cx).agent_id(cx).as_deref() == Some(id.as_str())
+                };
+                !pane
+                    .items_of_type::<PaseoAgentItem>()
+                    .any(|item| matches(&item))
+                    && !workspace_ref
+                        .items_of_type::<PaseoAgentItem>(cx)
+                        .any(|item| matches(&item))
+            })
+            .cloned()
+            .collect();
+        let missing_terminals: Vec<_> = terminals
+            .iter()
+            .filter(|(id, _)| {
+                let matches =
+                    |item: &Entity<PaseoTerminalItem>| item.read(cx).terminal_id() == id.as_str();
+                !pane
+                    .items_of_type::<PaseoTerminalItem>()
+                    .any(|item| matches(&item))
+                    && !workspace_ref
+                        .items_of_type::<PaseoTerminalItem>(cx)
+                        .any(|item| matches(&item))
+            })
+            .cloned()
+            .collect();
+        self.known_items
+            .extend(agents.into_iter().map(|(id, _)| id));
+        self.known_items
+            .extend(terminals.into_iter().map(|(id, _)| id));
+        if stale.is_empty() && missing_agents.is_empty() && missing_terminals.is_empty() {
+            return;
+        }
+
+        let weak_workspace = workspace.downgrade();
+        let workspace_ref = workspace.read(cx);
+        let project = workspace_ref.project().clone();
+        let work_dirs = PathList::new(&workspace_ref.root_paths(cx));
+        let database_id = workspace_ref.database_id();
+        let mut new_items: Vec<Box<dyn ItemHandle>> = Vec::new();
+        for (agent_id, title) in missing_agents {
+            new_items.push(Box::new(cx.new(|cx| {
+                PaseoAgentItem::new(
+                    Some(agent_id),
+                    None,
+                    title,
+                    weak_workspace.clone(),
+                    project.clone(),
+                    work_dirs.clone(),
+                    cx,
+                )
+            })));
+        }
+        for (terminal_id, name) in missing_terminals {
+            let item = cx.new(|cx| {
+                PaseoTerminalItem::new(
+                    terminal_id,
+                    name,
+                    weak_workspace.clone(),
+                    database_id,
+                    project.downgrade(),
+                    window,
+                    cx,
+                )
+            });
+            new_items.push(Box::new(item));
+        }
+
+        self.syncing = true;
+        self.pane.update(cx, |pane, cx| {
+            for item_id in stale {
+                pane.remove_item(item_id, false, false, window, cx);
+            }
+            // Adding a tab activates it; background additions keep the tab the user is on.
+            let active = pane.active_item().map(|item| item.item_id());
+            for item in new_items {
+                pane.add_item(item, false, false, None, window, cx);
+            }
+            if let Some(index) = active.and_then(|id| item_index(pane, id)) {
+                pane.activate_item(index, false, false, window, cx);
+            }
+        });
+        self.syncing = false;
+    }
+
+    /// Opens a tab that starts a new agent. Takes the panel's workspace rather than the panel:
+    /// opening the tab looks the panel up, which must not happen while it is being updated.
+    fn new_agent(
+        workspace: &WeakEntity<Workspace>,
+        new_agent: NewAgent,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            PaseoAgentItem::open(
+                workspace,
+                None,
+                Some(new_agent),
+                "New Agent".into(),
+                window,
+                cx,
+            );
+        });
+    }
+
+    fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(paseo_workspace_id) = self.paseo_workspace_id.clone() else {
+            return;
+        };
+        let create = self.store.update(cx, |store, cx| {
+            store.create_terminal(&paseo_workspace_id, cx)
+        });
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let terminal = create.await?;
+            workspace.update_in(cx, |workspace, window, cx| {
+                PaseoTerminalItem::open(workspace, terminal.id, terminal.name.into(), window, cx);
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// The open item of type `T` that matches, in the Paseo panel or (for tabs dragged there)
+    /// the center pane.
     pub(crate) fn find_item<T: Item>(
         workspace: &Workspace,
         cx: &App,
@@ -170,6 +428,18 @@ impl PaseoPanel {
                 .items_of_type::<T>(cx)
                 .find(|item| matches(item.read(cx), cx))
         })
+    }
+
+    /// Whether the item is still in the Paseo panel or a center pane, e.g. after a drag.
+    pub(crate) fn is_open(workspace: &Workspace, item_id: EntityId, cx: &App) -> bool {
+        let in_panel = workspace
+            .panel::<Self>(cx)
+            .is_some_and(|panel| item_index(panel.read(cx).pane.read(cx), item_id).is_some());
+        in_panel
+            || workspace
+                .panes()
+                .iter()
+                .any(|pane| item_index(pane.read(cx), item_id).is_some())
     }
 
     /// Shows `item` in the Paseo panel, opening the panel, or in the center pane when the
@@ -199,31 +469,228 @@ impl PaseoPanel {
         });
     }
 
-    /// Waits until a just-opened workspace has added its Paseo panel (or gives up after
-    /// [`PANEL_WAIT`]), so the first agent opened in it lands in the panel.
-    pub(crate) async fn wait_for_panel(workspace: &Entity<Workspace>, cx: &mut AsyncWindowContext) {
+    /// Opens the Paseo panel of a workspace just opened from the sidebar. A new Zed workspace
+    /// adds its panels asynchronously, so this waits for the panel (or gives up after
+    /// [`PANEL_WAIT`]).
+    pub(crate) async fn reveal_when_ready(
+        workspace: &Entity<Workspace>,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<()> {
         let start = std::time::Instant::now();
         while start.elapsed() < PANEL_WAIT {
             let has_panel =
                 workspace.read_with(cx, |workspace, cx| workspace.panel::<Self>(cx).is_some());
             if has_panel {
-                return;
+                return workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.reveal_panel::<Self>(window, cx);
+                });
             }
             cx.background_executor()
                 .timer(Duration::from_millis(25))
                 .await;
         }
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn pane(&self) -> &Entity<Pane> {
         &self.pane
     }
+
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = cx.entity().downgrade();
+        let content = match &self.paseo_workspace_id {
+            None => v_flex().child(
+                Label::new(
+                    "Open a Paseo workspace from the sidebar to see its agents and terminals.",
+                )
+                .color(Color::Muted),
+            ),
+            Some(_) => v_flex()
+                .gap_2()
+                .w(px(220.))
+                .child(new_item_menu(
+                    "paseo-panel-empty-new-agent",
+                    panel,
+                    PopoverMenuHandle::default(),
+                    false,
+                    Button::new("paseo-panel-empty-new-agent-button", "New Agent")
+                        .full_width()
+                        .style(ButtonStyle::Outlined)
+                        .start_icon(Icon::new(IconName::Sparkle).size(IconSize::Small)),
+                    "Choose a provider and model",
+                ))
+                .child(
+                    Button::new("paseo-panel-empty-new-terminal", "New Terminal")
+                        .full_width()
+                        .style(ButtonStyle::Outlined)
+                        .start_icon(Icon::new(IconName::Terminal).size(IconSize::Small))
+                        .on_click(cx.listener(|this, _, window, cx| this.new_terminal(window, cx))),
+                ),
+        };
+        v_flex()
+            .absolute()
+            .inset_0()
+            .p_4()
+            .items_center()
+            .justify_center()
+            .bg(cx.theme().colors().panel_background)
+            .child(content)
+    }
+}
+
+/// A menu of "New Terminal" (when `with_terminal`) and one entry per provider model, opened by
+/// `trigger`.
+fn new_item_menu(
+    id: &'static str,
+    panel: WeakEntity<PaseoPanel>,
+    handle: PopoverMenuHandle<ContextMenu>,
+    with_terminal: bool,
+    trigger: impl ui::PopoverTrigger + ui::ButtonCommon,
+    tooltip: &'static str,
+) -> impl IntoElement {
+    PopoverMenu::new(id)
+        .with_handle(handle)
+        .anchor(gpui::Anchor::TopRight)
+        .trigger_with_tooltip(trigger, Tooltip::text(tooltip))
+        .on_open(Rc::new(|_, cx| {
+            let store = PaseoStore::global(cx);
+            store.update(cx, |store, cx| store.refresh_providers(cx));
+        }))
+        .menu(move |window, cx| {
+            let choices = new_agent_choices(PaseoStore::global(cx).read(cx).providers());
+            let panel = panel.clone();
+            Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                if with_terminal {
+                    let panel = panel.clone();
+                    menu = menu
+                        .entry("New Terminal", None, move |window, cx| {
+                            panel
+                                .update(cx, |panel, cx| panel.new_terminal(window, cx))
+                                .ok();
+                        })
+                        .separator();
+                }
+                if choices.is_empty() {
+                    return menu.header("No agent providers available yet");
+                }
+                let mut current_header = None;
+                for choice in choices {
+                    if current_header.as_ref() != Some(&choice.header) {
+                        menu = menu.header(choice.header.clone());
+                        current_header = Some(choice.header.clone());
+                    }
+                    let panel = panel.clone();
+                    let new_agent = choice.new_agent;
+                    menu = menu.entry(choice.label, None, move |window, cx| {
+                        if let Ok(workspace) =
+                            panel.read_with(cx, |panel, _| panel.workspace.clone())
+                        {
+                            PaseoPanel::new_agent(&workspace, new_agent.clone(), window, cx);
+                        }
+                    });
+                }
+                menu
+            }))
+        })
+}
+
+fn item_index(pane: &Pane, item_id: EntityId) -> Option<usize> {
+    pane.items().position(|item| item.item_id() == item_id)
 }
 
 fn is_paseo_item(item: &dyn ItemHandle) -> bool {
-    item.downcast::<crate::PaseoAgentItem>().is_some()
-        || item.downcast::<crate::PaseoTerminalItem>().is_some()
+    item.downcast::<PaseoAgentItem>().is_some() || item.downcast::<PaseoTerminalItem>().is_some()
+}
+
+pub(crate) fn agent_title(agent: &Agent) -> SharedString {
+    agent
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("{} agent", agent.provider))
+        .into()
+}
+
+pub(crate) struct NewAgentChoice {
+    pub(crate) header: SharedString,
+    pub(crate) label: SharedString,
+    pub(crate) new_agent: NewAgent,
+}
+
+/// One entry per selectable model, grouped by provider, default model first. The provider set
+/// with `PAZEDO_AGENT_PROVIDER` comes first, and is offered even if the daemon does not list it,
+/// since setting it is a deliberate override.
+pub(crate) fn new_agent_choices(providers: &[ProviderEntry]) -> Vec<NewAgentChoice> {
+    let mut choices = Vec::new();
+    let from_env = NewAgent::from_env();
+    if std::env::var(PROVIDER_ENV_VAR).is_ok()
+        && !providers
+            .iter()
+            .any(|provider| provider.provider == from_env.provider)
+    {
+        choices.push(NewAgentChoice {
+            header: format!("{} (from {PROVIDER_ENV_VAR})", from_env.provider).into(),
+            label: from_env
+                .model
+                .clone()
+                .unwrap_or_else(|| "Default model".into())
+                .into(),
+            new_agent: from_env.clone(),
+        });
+    }
+    // The provider chosen with the environment variable is listed first.
+    let mut providers: Vec<&ProviderEntry> = providers.iter().collect();
+    if std::env::var(PROVIDER_ENV_VAR).is_ok() {
+        providers.sort_by_key(|provider| provider.provider != from_env.provider);
+    }
+    for provider in providers {
+        if !provider.enabled
+            || matches!(
+                provider.status,
+                ProviderStatus::Unavailable | ProviderStatus::Error
+            )
+        {
+            continue;
+        }
+        let header: SharedString = if provider.status == ProviderStatus::Loading {
+            format!("{} (loading)", provider.label()).into()
+        } else {
+            provider.label().to_string().into()
+        };
+        let mut models: Vec<_> = provider
+            .models
+            .iter()
+            .filter(|model| model.is_selectable != Some(false))
+            .collect();
+        models.sort_by_key(|model| !model.is_default);
+        if models.is_empty() {
+            choices.push(NewAgentChoice {
+                header,
+                label: "Default model".into(),
+                new_agent: NewAgent {
+                    provider: provider.provider.clone(),
+                    model: None,
+                },
+            });
+            continue;
+        }
+        for model in models {
+            choices.push(NewAgentChoice {
+                header: header.clone(),
+                label: if model.is_default {
+                    format!("{} (default)", model.label).into()
+                } else {
+                    model.label.clone().into()
+                },
+                new_agent: NewAgent {
+                    provider: provider.provider.clone(),
+                    model: Some(model.id.clone()),
+                },
+            });
+        }
+    }
+    choices
 }
 
 impl EventEmitter<PanelEvent> for PaseoPanel {}
@@ -316,19 +783,6 @@ impl Render for PaseoPanel {
             .size_full()
             .relative()
             .child(self.pane.clone())
-            .when(is_empty, |this| {
-                this.child(
-                    v_flex()
-                        .absolute()
-                        .inset_0()
-                        .p_4()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Label::new("Agents and terminals opened from the sidebar show here.")
-                                .color(Color::Muted),
-                        ),
-                )
-            })
+            .when(is_empty, |this| this.child(self.render_empty_state(cx)))
     }
 }

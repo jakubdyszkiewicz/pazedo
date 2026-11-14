@@ -1,26 +1,18 @@
 use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WIDTH};
 use chrono::{DateTime, Utc};
-use collections::{HashMap, HashSet};
+use collections::HashSet;
 use gpui::{
     App, Context, Decorations, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, WeakEntity, Window, px,
+    ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, px,
 };
-use paseo_client::protocol::{
-    Agent, AgentStatus, AttentionReason, ProviderEntry, ProviderStatus, TerminalInfo, Workspace,
-    WorkspaceKind, WorkspaceStatus,
-};
+use paseo_client::protocol::{Workspace, WorkspaceKind, WorkspaceStatus};
 use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
 use settings::Settings as _;
-use std::{
-    cell::RefCell,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, CommonAnimationExt as _, ContextMenu, Indicator, PopoverMenu,
-    PopoverMenuHandle, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*,
-    utils::platform_title_bar_height,
+    AgentThreadStatus, Indicator, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind,
+    prelude::*, utils::platform_title_bar_height,
 };
 use util::path_list::PathList;
 use workspace::{
@@ -28,11 +20,8 @@ use workspace::{
 };
 
 use crate::{
-    agent_item::PaseoAgentItem,
-    agent_session::{NewAgent, PROVIDER_ENV_VAR},
     panel::PaseoPanel,
     store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry},
-    terminal_item::PaseoTerminalItem,
 };
 
 /// Lists the workspaces of a Paseo daemon, grouped by project, in place of Zed's threads
@@ -47,8 +36,6 @@ pub struct PaseoSidebar {
     /// Several Paseo workspaces can share a directory; this remembers which one was clicked so
     /// only it is highlighted.
     selected_workspace: Option<String>,
-    /// Keeps a row's + button shown while its menu is open, after the pointer left the row.
-    new_agent_menus: RefCell<HashMap<String, PopoverMenuHandle<ContextMenu>>>,
     scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -76,7 +63,6 @@ impl PaseoSidebar {
             collapsed_projects: HashSet::default(),
             hovered_workspace: None,
             selected_workspace: None,
-            new_agent_menus: RefCell::default(),
             scroll_handle: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
@@ -97,170 +83,22 @@ impl PaseoSidebar {
         )
     }
 
+    /// Opens the workspace's folder as the window's Zed workspace and shows its agents and
+    /// terminals in the Paseo panel.
     pub(crate) fn open_workspace(
         &mut self,
         workspace_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(task) = self.activate_workspace(workspace_id, window, cx) {
-            task.detach_and_log_err(cx);
-        }
-    }
-
-    /// Opens the agent's tab in its workspace. With no agent id, starts a new agent there.
-    fn open_agent(
-        &mut self,
-        workspace_id: &str,
-        agent_id: Option<String>,
-        new_agent: Option<NewAgent>,
-        title: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         let Some(activate) = self.activate_workspace(workspace_id, window, cx) else {
             return;
         };
         cx.spawn_in(window, async move |_, cx| {
             let workspace = activate.await?;
-            PaseoPanel::wait_for_panel(&workspace, cx).await;
-            workspace.update_in(cx, |workspace, window, cx| {
-                PaseoAgentItem::open(workspace, agent_id, new_agent, title, window, cx);
-            })?;
-            anyhow::Ok(())
+            PaseoPanel::reveal_when_ready(&workspace, cx).await
         })
         .detach_and_log_err(cx);
-    }
-
-    /// Opens the terminal's tab in its workspace.
-    fn open_terminal(
-        &mut self,
-        workspace_id: &str,
-        terminal_id: String,
-        name: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(activate) = self.activate_workspace(workspace_id, window, cx) else {
-            return;
-        };
-        cx.spawn_in(window, async move |_, cx| {
-            let workspace = activate.await?;
-            PaseoPanel::wait_for_panel(&workspace, cx).await;
-            workspace.update_in(cx, |workspace, window, cx| {
-                PaseoTerminalItem::open(workspace, terminal_id, name, window, cx);
-            })?;
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
-    }
-
-    /// Starts a shell in the workspace and opens it.
-    fn new_terminal(&mut self, workspace_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let create = self
-            .store
-            .update(cx, |store, cx| store.create_terminal(workspace_id, cx));
-        let workspace_id = workspace_id.to_string();
-        cx.spawn_in(window, async move |this, cx| {
-            let terminal = create.await?;
-            this.update_in(cx, |this, window, cx| {
-                this.open_terminal(
-                    &workspace_id,
-                    terminal.id.clone(),
-                    terminal.name.clone().into(),
-                    window,
-                    cx,
-                );
-            })
-        })
-        .detach_and_log_err(cx);
-    }
-
-    fn new_agent_menu_is_open(&self, workspace_id: &str) -> bool {
-        self.new_agent_menus
-            .borrow()
-            .get(workspace_id)
-            .is_some_and(PopoverMenuHandle::is_deployed)
-    }
-
-    /// The + button on a workspace row: a new terminal, or a new agent with one of the daemon's
-    /// providers and models.
-    fn render_new_agent_menu(&self, workspace_id: &str, cx: &mut Context<Self>) -> AnyElement {
-        let handle = self
-            .new_agent_menus
-            .borrow_mut()
-            .entry(workspace_id.to_string())
-            .or_default()
-            .clone();
-        let sidebar = cx.entity().downgrade();
-        let store = self.store.clone();
-        let workspace_id = workspace_id.to_string();
-        PopoverMenu::new(SharedString::from(format!(
-            "paseo-new-agent-{workspace_id}"
-        )))
-        .with_handle(handle)
-        .anchor(gpui::Anchor::TopRight)
-        .trigger_with_tooltip(
-            IconButton::new(
-                SharedString::from(format!("paseo-new-agent-button-{workspace_id}")),
-                IconName::Plus,
-            )
-            .icon_size(IconSize::Small),
-            Tooltip::text("New Agent or Terminal"),
-        )
-        .on_open(Rc::new({
-            let store = store.clone();
-            move |_, cx| store.update(cx, |store, cx| store.refresh_providers(cx))
-        }))
-        .menu(move |window, cx| {
-            let choices = new_agent_choices(store.read(cx).providers());
-            let sidebar = sidebar.clone();
-            let workspace_id = workspace_id.clone();
-            Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
-                menu = menu
-                    .entry("New Terminal", None, {
-                        let sidebar = sidebar.clone();
-                        let workspace_id = workspace_id.clone();
-                        move |window, cx| {
-                            sidebar
-                                .update(cx, |sidebar, cx| {
-                                    sidebar.new_terminal(&workspace_id, window, cx);
-                                })
-                                .ok();
-                        }
-                    })
-                    .separator();
-                if choices.is_empty() {
-                    return menu.header("No providers available yet");
-                }
-                let mut current_header = None;
-                for choice in choices {
-                    if current_header.as_ref() != Some(&choice.header) {
-                        menu = menu.header(choice.header.clone());
-                        current_header = Some(choice.header.clone());
-                    }
-                    let sidebar = sidebar.clone();
-                    let workspace_id = workspace_id.clone();
-                    let new_agent = choice.new_agent;
-                    menu = menu.entry(choice.label, None, move |window, cx| {
-                        sidebar
-                            .update(cx, |sidebar, cx| {
-                                sidebar.open_agent(
-                                    &workspace_id,
-                                    None,
-                                    Some(new_agent.clone()),
-                                    "New Agent".into(),
-                                    window,
-                                    cx,
-                                );
-                            })
-                            .ok();
-                    });
-                }
-                menu
-            }))
-        })
-        .into_any_element()
     }
 
     fn activate_workspace(
@@ -271,6 +109,8 @@ impl PaseoSidebar {
     ) -> Option<Task<anyhow::Result<Entity<workspace::Workspace>>>> {
         let directory = PathBuf::from(self.store.read(cx).workspace(workspace_id)?.directory());
         self.selected_workspace = Some(workspace_id.to_string());
+        self.store
+            .update(cx, |store, cx| store.select_workspace(workspace_id, cx));
         cx.notify();
         let multi_workspace = self.multi_workspace.upgrade()?;
         Some(multi_workspace.update(cx, |multi_workspace, cx| {
@@ -633,313 +473,27 @@ impl PaseoSidebar {
             },
         )
         .into();
-        let open_workspace_id = workspace.id.clone();
-        v_flex()
-            .w_full()
-            .child(
-                // The + button lives here rather than in the item's action slot: the item only
-                // renders its slot while hovered, and a popover closes when its trigger is no
-                // longer rendered, which would close the menu as soon as the pointer moved into it.
-                div()
-                    .id(SharedString::from(format!(
-                        "paseo-workspace-row-{}",
-                        workspace.id
-                    )))
-                    .relative()
-                    .w_full()
-                    .child(item)
-                    .on_hover(cx.listener({
-                        let workspace_id = workspace.id.clone();
-                        move |this, is_hovered: &bool, _window, cx| {
-                            if *is_hovered {
-                                this.hovered_workspace = Some(workspace_id.clone());
-                            } else if this.hovered_workspace.as_ref() == Some(&workspace_id) {
-                                this.hovered_workspace = None;
-                            }
-                            cx.notify();
-                        }
-                    }))
-                    .when(
-                        is_hovered || self.new_agent_menu_is_open(&workspace.id),
-                        |row| {
-                            row.child(
-                                div()
-                                    .absolute()
-                                    .top_1()
-                                    .right_2()
-                                    .child(self.render_new_agent_menu(&workspace.id, cx)),
-                            )
-                        },
-                    )
-                    .tooltip(Tooltip::text(tooltip)),
-            )
-            .children(entry.agents.iter().map(|agent| {
-                let workspace_id = open_workspace_id.clone();
-                let agent_id = agent.id.clone();
-                let title = agent_title(agent);
-                self.render_agent(agent, cx)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_agent(
-                            &workspace_id,
-                            Some(agent_id.clone()),
-                            None,
-                            title.clone(),
-                            window,
-                            cx,
-                        );
-                    }))
-                    .into_any_element()
-            }))
-            .children(entry.terminals.iter().map(|terminal| {
-                let workspace_id = open_workspace_id.clone();
-                let terminal_id = terminal.id.clone();
-                let name: SharedString = terminal.name.clone().into();
-                self.render_terminal(terminal, cx)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_terminal(
-                            &workspace_id,
-                            terminal_id.clone(),
-                            name.clone(),
-                            window,
-                            cx,
-                        );
-                    }))
-                    .into_any_element()
-            }))
-            .into_any_element()
-    }
-}
-
-impl PaseoSidebar {
-    /// One line per agent under its workspace: status, title and age. Clicking opens the
-    /// agent's session in a tab.
-    fn render_agent(&self, agent: &Agent, cx: &mut Context<Self>) -> Stateful<Div> {
-        let color = cx.theme().colors();
-        let waiting_for_permission = !agent.pending_permissions.is_empty()
-            || agent.attention_reason == Some(AttentionReason::Permission);
-        let failed = agent.status == AgentStatus::Error
-            || agent.attention_reason == Some(AttentionReason::Error);
-        let running = matches!(
-            agent.status,
-            AgentStatus::Running | AgentStatus::Initializing
-        );
-
-        let (status, status_text): (AnyElement, &str) = if waiting_for_permission {
-            (
-                Icon::new(IconName::Warning)
-                    .size(IconSize::XSmall)
-                    .color(Color::Warning)
-                    .into_any_element(),
-                "Waiting for permission",
-            )
-        } else if failed {
-            (
-                Icon::new(IconName::XCircle)
-                    .size(IconSize::XSmall)
-                    .color(Color::Error)
-                    .into_any_element(),
-                "Failed",
-            )
-        } else if running {
-            (
-                Icon::new(IconName::LoadCircle)
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted)
-                    .with_rotate_animation(2)
-                    .into_any_element(),
-                "Running",
-            )
-        } else if agent.requires_attention {
-            (
-                Indicator::dot().color(Color::Accent).into_any_element(),
-                "Finished, not seen yet",
-            )
-        } else {
-            (
-                Icon::new(IconName::Check)
-                    .size(IconSize::XSmall)
-                    .color(Color::Disabled)
-                    .into_any_element(),
-                "Idle",
-            )
-        };
-
-        let title = agent_title(agent);
-        let highlighted = running || waiting_for_permission || failed || agent.requires_attention;
-        let tooltip: SharedString = format!("{title}\n{} · {status_text}", agent.provider).into();
-
-        h_flex()
-            .id(SharedString::from(format!("paseo-agent-{}", agent.id)))
-            .w_full()
-            .h_6()
-            .pl(px(30.))
-            .pr_2()
-            .gap_1p5()
-            .cursor_pointer()
-            .hover(|style| style.bg(color.ghost_element_hover))
-            .child(
-                div()
-                    .flex_none()
-                    .size_3()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(status),
-            )
-            .child(
-                Label::new(title)
-                    .size(LabelSize::Small)
-                    .color(if highlighted {
-                        Color::Default
-                    } else {
-                        Color::Muted
-                    })
-                    .truncate(),
-            )
-            .child(div().flex_1())
-            .children(
-                relative_time(&agent.updated_at)
-                    .map(|age| Label::new(age).size(LabelSize::XSmall).color(Color::Muted)),
-            )
-            .tooltip(Tooltip::text(tooltip))
-    }
-}
-
-impl PaseoSidebar {
-    /// One line per terminal under its workspace, after the agents. Clicking attaches to the
-    /// terminal in a tab.
-    fn render_terminal(&self, terminal: &TerminalInfo, cx: &mut Context<Self>) -> Stateful<Div> {
-        let color = cx.theme().colors();
-        let title = terminal
-            .title
-            .as_deref()
-            .filter(|title| !title.is_empty() && *title != terminal.name);
-        let tooltip: SharedString = match title {
-            Some(title) => format!("{}\n{title}", terminal.name),
-            None => terminal.name.clone(),
-        }
-        .into();
-        h_flex()
+        div()
             .id(SharedString::from(format!(
-                "paseo-terminal-{}",
-                terminal.id
+                "paseo-workspace-row-{}",
+                workspace.id
             )))
             .w_full()
-            .h_6()
-            .pl(px(30.))
-            .pr_2()
-            .gap_1p5()
-            .cursor_pointer()
-            .hover(|style| style.bg(color.ghost_element_hover))
-            .child(
-                Icon::new(IconName::Terminal)
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(terminal.name.clone())
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .truncate(),
-            )
-            .children(title.map(|title| {
-                Label::new(title.to_string())
-                    .size(LabelSize::XSmall)
-                    .color(Color::Disabled)
-                    .truncate()
+            .child(item)
+            .on_hover(cx.listener({
+                let workspace_id = workspace.id.clone();
+                move |this, is_hovered: &bool, _window, cx| {
+                    if *is_hovered {
+                        this.hovered_workspace = Some(workspace_id.clone());
+                    } else if this.hovered_workspace.as_ref() == Some(&workspace_id) {
+                        this.hovered_workspace = None;
+                    }
+                    cx.notify();
+                }
             }))
             .tooltip(Tooltip::text(tooltip))
+            .into_any_element()
     }
-}
-
-struct NewAgentChoice {
-    header: SharedString,
-    label: SharedString,
-    new_agent: NewAgent,
-}
-
-/// One entry per selectable model, grouped by provider, default model first. The provider set
-/// with `PAZEDO_AGENT_PROVIDER` comes first, and is offered even if the daemon does not list it,
-/// since setting it is a deliberate override.
-fn new_agent_choices(providers: &[ProviderEntry]) -> Vec<NewAgentChoice> {
-    let mut choices = Vec::new();
-    let from_env = NewAgent::from_env();
-    if std::env::var(PROVIDER_ENV_VAR).is_ok()
-        && !providers
-            .iter()
-            .any(|provider| provider.provider == from_env.provider)
-    {
-        choices.push(NewAgentChoice {
-            header: format!("{} (from {PROVIDER_ENV_VAR})", from_env.provider).into(),
-            label: from_env
-                .model
-                .clone()
-                .unwrap_or_else(|| "Default model".into())
-                .into(),
-            new_agent: from_env.clone(),
-        });
-    }
-    // The provider chosen with the environment variable is listed first.
-    let mut providers: Vec<&ProviderEntry> = providers.iter().collect();
-    if std::env::var(PROVIDER_ENV_VAR).is_ok() {
-        providers.sort_by_key(|provider| provider.provider != from_env.provider);
-    }
-    for provider in providers {
-        if !provider.enabled
-            || matches!(
-                provider.status,
-                ProviderStatus::Unavailable | ProviderStatus::Error
-            )
-        {
-            continue;
-        }
-        let header: SharedString = if provider.status == ProviderStatus::Loading {
-            format!("{} (loading)", provider.label()).into()
-        } else {
-            provider.label().to_string().into()
-        };
-        let mut models: Vec<_> = provider
-            .models
-            .iter()
-            .filter(|model| model.is_selectable != Some(false))
-            .collect();
-        models.sort_by_key(|model| !model.is_default);
-        if models.is_empty() {
-            choices.push(NewAgentChoice {
-                header,
-                label: "Default model".into(),
-                new_agent: NewAgent {
-                    provider: provider.provider.clone(),
-                    model: None,
-                },
-            });
-            continue;
-        }
-        for model in models {
-            choices.push(NewAgentChoice {
-                header: header.clone(),
-                label: if model.is_default {
-                    format!("{} (default)", model.label).into()
-                } else {
-                    model.label.clone().into()
-                },
-                new_agent: NewAgent {
-                    provider: provider.provider.clone(),
-                    model: Some(model.id.clone()),
-                },
-            });
-        }
-    }
-    choices
-}
-
-fn agent_title(agent: &Agent) -> SharedString {
-    agent
-        .title
-        .clone()
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| format!("{} agent", agent.provider))
-        .into()
 }
 
 fn active_workspace_id(

@@ -1530,6 +1530,44 @@ impl Request for KillTerminal {
     type Response = KillTerminalResponse;
 }
 
+/// Closes agents and terminals the way closing their tabs in Paseo's apps does: agents are
+/// archived, terminals killed.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseItems {
+    pub agent_ids: Vec<String>,
+    pub terminal_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseItemsResponse {
+    #[serde(default)]
+    pub agents: Vec<ClosedAgent>,
+    #[serde(default)]
+    pub terminals: Vec<ClosedTerminal>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedAgent {
+    pub agent_id: String,
+    pub archived_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedTerminal {
+    pub terminal_id: String,
+    pub success: bool,
+}
+
+impl Request for CloseItems {
+    const TYPE: &'static str = "close_items_request";
+    const RESPONSE_TYPE: &'static str = "close_items_response";
+    type Response = CloseItemsResponse;
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureTerminal {

@@ -188,13 +188,13 @@ mod screenshots {
         let directory = dirs_home().join("dev/pazedo-sandbox");
         pump(cx, Duration::from_secs(15), |cx| {
             store.read_with(cx, |store, _| {
-                store.newest_workspace_for_directory(&directory).is_some()
+                store.workspace_for_directory(&directory).is_some()
             })
         })
         .context("the test daemon did not list a sandbox workspace")?;
         let workspace_id = store.read_with(cx, |store, _| {
             store
-                .newest_workspace_for_directory(&directory)
+                .workspace_for_directory(&directory)
                 .map(|workspace| workspace.id.clone())
                 .expect("checked above")
         });
@@ -411,7 +411,10 @@ mod screenshots {
         window.update(cx, |multi_workspace, _, cx| {
             let workspace = multi_workspace.workspace().read(cx);
             for item in workspace.items_of_type::<PaseoAgentItem>(cx) {
-                let Some(thread_view) = item.read(cx).conversation_view().read(cx).active_thread()
+                let Some(thread_view) = item
+                    .read(cx)
+                    .conversation_view()
+                    .and_then(|view| view.read(cx).active_thread())
                 else {
                     continue;
                 };

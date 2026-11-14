@@ -1,5 +1,5 @@
 use crate::{
-    PaseoPanel, PaseoSidebar, PaseoStore, PaseoTerminalItem,
+    PaseoAgentItem, PaseoPanel, PaseoSidebar, PaseoStore, PaseoTerminalItem,
     store::{DirectorySnapshot, DirectorySubscriptions},
 };
 use fs::FakeFs;
@@ -586,4 +586,120 @@ async fn test_paseo_tabs_open_in_the_paseo_panel(cx: &mut TestAppContext) {
         );
         assert!(workspace.panel::<PaseoPanel>(cx).is_some());
     });
+}
+
+/// The ids of the panel's tabs, agents first as they are added.
+fn panel_tabs(panel: &Entity<PaseoPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+    panel.read_with(cx, |panel, cx| {
+        panel
+            .pane()
+            .read(cx)
+            .items()
+            .filter_map(|item| {
+                if let Some(agent) = item.downcast::<PaseoAgentItem>() {
+                    agent.read(cx).agent_id(cx)
+                } else {
+                    item.downcast::<PaseoTerminalItem>()
+                        .map(|terminal| terminal.read(cx).terminal_id().to_string())
+                }
+            })
+            .collect()
+    })
+}
+
+#[gpui::test]
+async fn test_panel_tabs_follow_the_open_paseo_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    let store = cx.update(|cx| {
+        let store = cx.new(|cx| PaseoStore::new(None, cx));
+        PaseoStore::set_global(store.clone(), cx);
+        store
+    });
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_sandbox", "sandbox", path!("/sandbox"))],
+            vec![
+                workspace(
+                    "wks_old",
+                    "prj_sandbox",
+                    path!("/sandbox"),
+                    "2026-11-14T09:00:00Z",
+                ),
+                workspace(
+                    "wks_new",
+                    "prj_sandbox",
+                    path!("/sandbox"),
+                    "2026-11-14T10:00:00Z",
+                ),
+            ],
+            vec![
+                agent("a1", "wks_new", "idle", json!({})),
+                agent("a22", "wks_new", "running", json!({})),
+                agent(
+                    "archived",
+                    "wks_new",
+                    "idle",
+                    json!({"archivedAt": "2026-11-14T11:00:00Z"}),
+                ),
+                agent("elsewhere", "wks_old", "idle", json!({})),
+            ],
+        )));
+        store.set_terminals(
+            "wks_new",
+            vec![TerminalInfo {
+                id: "t1".into(),
+                name: "Terminal 1".into(),
+                cwd: Some(path!("/sandbox").into()),
+                workspace_id: Some("wks_new".into()),
+                title: None,
+            }],
+            cx,
+        );
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let weak_workspace = workspace.weak_handle();
+        let project = workspace.project().clone();
+        let panel = cx.new(|cx| PaseoPanel::new(weak_workspace, project, window, cx));
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        panel_tabs(&panel, cx),
+        vec!["a1", "a22", "t1"],
+        "the newest workspace of the folder, without archived agents"
+    );
+
+    // Opening the other workspace of the same folder from the sidebar swaps the tabs, without
+    // closing (archiving) anything.
+    store.update(cx, |store, cx| store.select_workspace("wks_old", cx));
+    cx.run_until_parked();
+    assert_eq!(panel_tabs(&panel, cx), vec!["elsewhere"]);
+    store.read_with(cx, |store, _| {
+        assert!(!store.is_closing("a1") && !store.is_closing("t1"));
+    });
+
+    // An agent started elsewhere in the open workspace gets a tab.
+    store.update(cx, |store, cx| {
+        store.handle_event(
+            Event::Message(ServerMessage::AgentUpdate(AgentUpdate::Upsert {
+                subscription_id: None,
+                agent: agent("from-phone", "wks_old", "running", json!({})),
+                project: None,
+            })),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(panel_tabs(&panel, cx), vec!["elsewhere", "from-phone"]);
 }

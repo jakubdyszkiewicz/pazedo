@@ -373,7 +373,7 @@ impl AgentConnection for PaseoConnection {
         let workspace_id = self
             .store
             .read(cx)
-            .newest_workspace_for_directory(Path::new(&cwd))
+            .workspace_for_directory(Path::new(&cwd))
             .map(|workspace| workspace.id.clone());
         let new_agent = self
             .next_new_agent

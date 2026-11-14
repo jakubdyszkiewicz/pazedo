@@ -1,4 +1,5 @@
 use anyhow::{Context as _, Result};
+use collections::HashSet;
 use collections::{BTreeMap, HashMap};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task};
@@ -6,13 +7,17 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
         Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement, AgentUpdate,
-        CreateTerminal, FetchAgents, FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page,
-        ProjectSummary, ProjectUpdate, ProviderEntry, ServerInfo, ServerMessage,
-        SetSessionEventSubscription, Subscribe, SubscribeTerminals, TerminalInfo,
+        CloseItems, CreateTerminal, FetchAgents, FetchWorkspaces, GetProvidersSnapshot,
+        ListProjects, Page, ProjectSummary, ProjectUpdate, ProviderEntry, ServerInfo,
+        ServerMessage, SetSessionEventSubscription, Subscribe, SubscribeTerminals, TerminalInfo,
         TerminalStreamExit, TerminalsChanged, Workspace, WorkspaceUpdate,
     },
 };
-use std::{cmp::Reverse, sync::Arc};
+use std::{
+    cmp::Reverse,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// The daemon to connect to, as `host:port`, `ws://...` or a socket path. Until pazedo has
 /// settings of its own, nothing connects unless this is set, so a development build never
@@ -73,6 +78,12 @@ pub struct PaseoStore {
     terminal_subscriptions: HashMap<String, Option<String>>,
     terminals: HashMap<String, Vec<TerminalInfo>>,
     terminal_tasks: HashMap<String, Task<()>>,
+    /// The Paseo workspace last opened from the sidebar, per directory. Several Paseo workspaces
+    /// can share a directory, and so one Zed workspace.
+    selected_workspaces: HashMap<PathBuf, String>,
+    /// Agents and terminals closed from pazedo, until the daemon's update removes them; their
+    /// tabs must not come back in the meantime.
+    closing: HashSet<String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -162,6 +173,8 @@ impl PaseoStore {
             terminal_subscriptions: HashMap::default(),
             terminals: HashMap::default(),
             terminal_tasks: HashMap::default(),
+            selected_workspaces: HashMap::default(),
+            closing: HashSet::default(),
             _tasks: Vec::new(),
         };
         let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.trim().is_empty()) else {
@@ -237,15 +250,97 @@ impl PaseoStore {
         }));
     }
 
-    /// Several Paseo workspaces can share a directory; new agents go to the newest one.
-    pub fn newest_workspace_for_directory(
-        &self,
-        directory: &std::path::Path,
-    ) -> Option<&Workspace> {
-        self.workspaces
+    /// The Paseo workspace a directory stands for: the one last opened from the sidebar, or the
+    /// newest one for that directory.
+    pub fn workspace_for_directory(&self, directory: &Path) -> Option<&Workspace> {
+        self.selected_workspaces
+            .get(directory)
+            .and_then(|id| self.workspaces.get(id))
+            .filter(|workspace| Path::new(workspace.directory()) == directory)
+            .or_else(|| {
+                self.workspaces
+                    .values()
+                    .filter(|workspace| Path::new(workspace.directory()) == directory)
+                    .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            })
+    }
+
+    pub fn select_workspace(&mut self, workspace_id: &str, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get(workspace_id) else {
+            return;
+        };
+        self.selected_workspaces.insert(
+            PathBuf::from(workspace.directory()),
+            workspace_id.to_string(),
+        );
+        cx.notify();
+    }
+
+    /// The workspace's agents that are neither archived nor being closed, oldest first, which
+    /// is the order of their tabs.
+    pub fn workspace_agents(&self, workspace_id: &str) -> Vec<&Agent> {
+        let mut agents: Vec<&Agent> = self
+            .agents
             .values()
-            .filter(|workspace| std::path::Path::new(workspace.directory()) == directory)
-            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            .filter(|agent| {
+                agent.workspace_id.as_deref() == Some(workspace_id)
+                    && agent.archived_at.is_none()
+                    && !self.closing.contains(&agent.id)
+            })
+            .collect();
+        agents.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        agents
+    }
+
+    /// The workspace's terminals that are not being closed, empty until they are watched.
+    pub fn workspace_terminals(&self, workspace_id: &str) -> Vec<&TerminalInfo> {
+        self.terminals
+            .get(workspace_id)
+            .into_iter()
+            .flatten()
+            .filter(|terminal| !self.closing.contains(&terminal.id))
+            .collect()
+    }
+
+    pub fn is_closing(&self, id: &str) -> bool {
+        self.closing.contains(id)
+    }
+
+    /// Archives agents and kills terminals, as closing their tabs in Paseo's apps does.
+    pub fn close_items(
+        &mut self,
+        agent_ids: Vec<String>,
+        terminal_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.closing.extend(agent_ids.iter().cloned());
+        self.closing.extend(terminal_ids.iter().cloned());
+        cx.notify();
+        let request = CloseItems {
+            agent_ids,
+            terminal_ids,
+        };
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = client.request(&request).await {
+                log::error!("failed to close Paseo agents and terminals: {error:#}");
+                // Show their tabs again rather than hiding what is still running.
+                this.update(cx, |this, cx| {
+                    for id in request.agent_ids.iter().chain(&request.terminal_ids) {
+                        this.closing.remove(id);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     pub fn status(&self) -> &ConnectionStatus {

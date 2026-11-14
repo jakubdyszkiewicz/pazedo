@@ -5,13 +5,12 @@ pazedo renders it with Zed's own terminal view (`terminal_view::TerminalView`): 
 selection, copy, search, links, scrolling and themes are Zed's; the process runs in the daemon
 and keeps running when the tab closes.
 
-- The sidebar lists a workspace's terminals under its agents once the workspace has been
-  opened in the window (terminal lists are subscribed per workspace, see below). Clicking one
-  attaches to it in a tab of the Paseo panel, next to the agent tabs.
-- The **+** menu on a workspace row starts with **New Terminal**: the daemon starts a shell in
-  the workspace's directory and the tab opens.
+- Every terminal of the Paseo workspace open in the window has a tab in the Paseo panel, next
+  to the agent tabs (terminal lists are subscribed per workspace, see below).
+- **New Terminal** in the panel's **+** menu, or on an empty panel, starts a shell in the
+  workspace's directory and opens its tab.
 - When the shell exits (`exit`, or killed from another client), the tab closes, like a local
-  Zed terminal. Closing the tab only detaches.
+  Zed terminal. Closing the tab kills the terminal, as in Paseo's apps.
 
 ## How it fits together
 

@@ -1,15 +1,25 @@
 # Paseo agent sessions in Zed
 
-Clicking an agent in the Paseo sidebar opens its session in a tab of the Paseo panel (a dock
-panel, left by default, that holds Paseo agent and terminal tabs apart from the files in the
-center; `paseo_ui::PaseoPanel`, replacing Zed's agent panel) rendered by
-Zed's own thread UI (`agent_ui::ConversationView`): streaming markdown, reasoning, tool call
-cards (edits as real diffs), plans, permission prompts, the message editor, queueing and the
-stop button. The composer's dropdowns change the agent's model, thinking level and mode. The **+** button on
-a workspace row opens a menu of the daemon's providers and their models and starts a new agent
-with the one picked. Paseo owns the agents; Zed only
-observes and steers them, so agents started from the phone, the CLI or other agents show up
-the same way.
+Every agent of the Paseo workspace open in the window has a tab in the Paseo panel (a dock
+panel, left by default, `paseo_ui::PaseoPanel`, replacing Zed's agent panel; the sidebar lists
+only workspaces). Each tab is rendered by Zed's own thread UI (`agent_ui::ConversationView`):
+streaming markdown, reasoning, tool call cards (edits as real diffs), plans, permission prompts,
+the message editor, queueing and the stop button. The composer's dropdowns change the agent's
+model, thinking level and mode. The panel's **+** menu (and the New Agent button of an empty
+panel) lists the daemon's providers and models and starts a new agent with the one picked.
+Paseo owns the agents; Zed only observes and steers them, so agents started from the phone,
+the CLI or other agents get a tab the same way. Closing a tab archives the agent, as closing
+it in Paseo's apps does.
+
+How the panel's tabs are kept in step (`PaseoPanel::sync_tabs`, run on every store change):
+a tab per non-archived agent and per terminal of the Paseo workspace for the window's folder
+(the one last opened from the sidebar, else the newest for that folder); tabs of agents
+archived elsewhere, or of another Paseo workspace of the same folder, are removed without
+archiving anything. An agent tab builds its thread view, and so loads its history, only when
+first shown. Closing a tab sends `close_items_request`; a tab dragged to another pane is
+removed and re-added in the same update, so the item checks a moment later whether it is
+still open before archiving. Quitting the app or closing the window archives nothing
+(verified).
 
 Decided 2026-11-14 after comparing this with a native timeline view: reusing Zed's thread UI
 needed no upstream edits, while a native view would have been thousands of lines to reach the

@@ -13,6 +13,7 @@ use paseo_client::{
 };
 use project::Project;
 use settings::Settings as _;
+use std::cell::Cell;
 use terminal::terminal_settings::TerminalSettings;
 use terminal::{ForwardedInput, Terminal, TerminalBounds, TerminalBuilder};
 use terminal_view::TerminalView;
@@ -25,10 +26,14 @@ use crate::{
     store::{PaseoStore, PaseoStoreEvent},
 };
 
-/// A terminal owned by the Paseo daemon in a center-pane tab, rendered by Zed's terminal view.
-/// The shell keeps running when the tab closes, like in Paseo's own apps.
+/// A terminal owned by the Paseo daemon in a tab of the Paseo panel, rendered by Zed's terminal
+/// view. Closing the tab kills the shell, as in Paseo's apps.
 pub struct PaseoTerminalItem {
     terminal_id: String,
+    workspace: WeakEntity<Workspace>,
+    /// Set when pazedo removes the tab itself or the shell has exited. Only a tab the user
+    /// closes kills the terminal.
+    detached: Cell<bool>,
     name: SharedString,
     store: Entity<PaseoStore>,
     client: Option<Client>,
@@ -52,10 +57,7 @@ impl PaseoTerminalItem {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let existing = PaseoPanel::find_item::<PaseoTerminalItem>(workspace, cx, |item, _| {
-            item.terminal_id == terminal_id
-        });
-        if let Some(existing) = existing {
+        if let Some(existing) = Self::find(workspace, &terminal_id, cx) {
             PaseoPanel::show_item(workspace, Box::new(existing), window, cx);
             return;
         }
@@ -76,7 +78,16 @@ impl PaseoTerminalItem {
         PaseoPanel::show_item(workspace, Box::new(item), window, cx);
     }
 
-    fn new(
+    pub(crate) fn find(workspace: &Workspace, terminal_id: &str, cx: &App) -> Option<Entity<Self>> {
+        PaseoPanel::find_item::<Self>(workspace, cx, |item, _| item.terminal_id == terminal_id)
+    }
+
+    /// Marks the tab as removed by pazedo, so removing it does not kill the terminal.
+    pub(crate) fn detach(&self) {
+        self.detached.set(true);
+    }
+
+    pub(crate) fn new(
         terminal_id: String,
         name: SharedString,
         workspace: WeakEntity<Workspace>,
@@ -105,7 +116,7 @@ impl PaseoTerminalItem {
         let terminal_view = cx.new(|cx| {
             TerminalView::new(
                 terminal.clone(),
-                workspace,
+                workspace.clone(),
                 workspace_id,
                 project,
                 window,
@@ -133,7 +144,10 @@ impl PaseoTerminalItem {
                     if exit.terminal_id == this.terminal_id =>
                 {
                     match &exit.error {
-                        None => cx.emit(ItemEvent::CloseItem),
+                        None => {
+                            this.detach();
+                            cx.emit(ItemEvent::CloseItem);
+                        }
                         Some(error) => {
                             this.slot = None;
                             this.show_notice(&format!("Lost the terminal's stream: {error}"), cx);
@@ -152,6 +166,8 @@ impl PaseoTerminalItem {
         // Attaching waits for the view's first layout (see `forward_input`).
         Self {
             terminal_id,
+            workspace,
+            detached: Cell::new(false),
             name,
             client: store.read(cx).client(),
             store,
@@ -312,7 +328,6 @@ impl PaseoTerminalItem {
         &self.terminal
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn terminal_id(&self) -> &str {
         &self.terminal_id
     }
@@ -377,6 +392,36 @@ impl Item for PaseoTerminalItem {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
         f(*event)
+    }
+
+    /// Closing the tab kills the terminal, as in Paseo's apps. A tab dragged to another pane is
+    /// removed and added again in the same update, so the check waits a moment and only kills
+    /// the terminal when the tab is gone.
+    fn on_removed(&self, cx: &mut Context<Self>) {
+        if self.detached.get() {
+            return;
+        }
+        let terminal_id = self.terminal_id.clone();
+        let workspace = self.workspace.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::ZERO)
+                .await;
+            cx.update(|cx| {
+                let still_open =
+                    this.upgrade()
+                        .zip(workspace.upgrade())
+                        .is_some_and(|(item, workspace)| {
+                            PaseoPanel::is_open(workspace.read(cx), item.entity_id(), cx)
+                        });
+                if !still_open {
+                    PaseoStore::global(cx).update(cx, |store, cx| {
+                        store.close_items(Vec::new(), vec![terminal_id], cx);
+                    });
+                }
+            });
+        })
+        .detach();
     }
 }
 
