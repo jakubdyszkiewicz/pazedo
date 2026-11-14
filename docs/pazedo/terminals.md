@@ -28,7 +28,10 @@ and keeps running when the tab closes.
   daemon's response plus a receiver of that terminal's binary frames. The driver installs the
   slot route while it handles the response, so the restore frame the daemon sends right behind
   the response cannot be lost to a race. The receiver closes when the connection is lost.
-- On attach the item asks for `restore: full-snapshot` at its current size. The daemon answers
+- The item attaches once the view has laid out, asking for `restore: full-snapshot` at the
+  tab's size. Attaching earlier wrote the restore into Zed's default-sized grid; the first
+  layout then cut the alternate screen (vim, htop) instead of reflowing it, so a reopened vim
+  showed a few `~` lines and no text. The daemon answers
   with one `Restore` frame (0x05) of ANSI produced by xterm's serializer, which rebuilds screen
   and scrollback; the item feeds it to `replace_display_output`. `Output` frames (0x01) go to
   `write_raw_output`. pazedo does not advertise `terminal_chunked_replay`, so the daemon never
@@ -54,6 +57,13 @@ With the off-screen runner (`PAZEDO_SCREENSHOT_TERMINAL`, see
   `$COLUMNS` in the shell matches the tab's width (the resize reached the daemon's PTY).
 - Typing `exit` closes the tab and the daemon drops the terminal from its list.
 
-Not verified yet: full-screen programs (vim, htop) after a restore, two clients fighting over
-the size, and the same terminal open in two windows (the second tab's unsubscribe on close
+In the real app (`script/pazedo/run-dev`, driven with `script/pazedo/ui`):
+
+- The open workspace lists its terminals; clicking one attaches; typed commands run, and lines
+  wrap at the column count the shell reports.
+- vim started in the tab, tab closed, app restarted, terminal reopened: vim's screen comes back
+  exactly (after the fix above), keeps taking input, redraws at the new width when the pane is
+  zoomed, and after `:wq` the shell reports the new `$COLUMNS`.
+
+Not verified yet: two clients fighting over the size, a reconnect with tabs open, and the same terminal open in two windows (the second tab's unsubscribe on close
 would detach the first, since `unsubscribe_terminal_request` names the terminal, not a slot).

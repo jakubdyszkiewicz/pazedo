@@ -112,7 +112,7 @@ impl PaseoTerminalItem {
         let input = cx.spawn(async move |this, cx| {
             while let Some(input) = input_rx.next().await {
                 if this
-                    .update(cx, |this, _| this.forward_input(input))
+                    .update(cx, |this, cx| this.forward_input(input, cx))
                     .is_err()
                 {
                     break;
@@ -145,7 +145,8 @@ impl PaseoTerminalItem {
             }),
         ];
 
-        let mut this = Self {
+        // Attaching waits for the view's first layout (see `forward_input`).
+        Self {
             terminal_id,
             name,
             client: store.read(cx).client(),
@@ -157,15 +158,20 @@ impl PaseoTerminalItem {
             stream: Task::ready(()),
             _input: input,
             _subscriptions: subscriptions,
-        };
-        this.attach(cx);
-        this
+        }
     }
 
     /// Subscribes to the terminal's stream on the current connection. The daemon answers with a
-    /// restore of the screen and scrollback, then streams output.
+    /// restore of the screen and scrollback at this tab's size, then streams output.
+    ///
+    /// Waits until the view has a size: a restore written into the default-sized grid loses
+    /// what does not fit when the grid is resized, and full-screen programs (vim, htop) live in
+    /// the alternate screen, which is cut rather than reflowed.
     fn attach(&mut self, cx: &mut Context<Self>) {
         self.slot = None;
+        if self.size.is_none() {
+            return;
+        }
         let Some(client) = self.client.clone().filter(Client::is_connected) else {
             return;
         };
@@ -241,7 +247,7 @@ impl PaseoTerminalItem {
         }
     }
 
-    fn forward_input(&mut self, input: ForwardedInput) {
+    fn forward_input(&mut self, input: ForwardedInput, cx: &mut Context<Self>) {
         match input {
             ForwardedInput::Bytes(bytes) => {
                 let (Some(client), Some(slot)) = (&self.client, self.slot) else {
@@ -256,8 +262,13 @@ impl PaseoTerminalItem {
                     .log_err();
             }
             ForwardedInput::Resize(bounds) => {
+                let first_layout = self.size.is_none();
                 self.size = Some(terminal_size(&bounds));
-                self.send_size();
+                if first_layout {
+                    self.attach(cx);
+                } else {
+                    self.send_size();
+                }
             }
         }
     }
