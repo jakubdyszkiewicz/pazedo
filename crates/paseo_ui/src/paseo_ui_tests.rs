@@ -1,14 +1,15 @@
 use crate::{
-    PaseoSidebar, PaseoStore,
+    PaseoSidebar, PaseoStore, PaseoTerminalItem,
     store::{DirectorySnapshot, DirectorySubscriptions},
 };
 use fs::FakeFs;
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use paseo_client::{
     Event,
+    frames::{TerminalFrame, TerminalOpcode},
     protocol::{
-        Agent, AgentUpdate, ProjectSummary, ServerMessage, Workspace, WorkspaceStatus,
-        WorkspaceUpdate,
+        Agent, AgentUpdate, ProjectSummary, ServerMessage, TerminalInfo, TerminalsChanged,
+        Workspace, WorkspaceStatus, WorkspaceUpdate,
     },
 };
 use pretty_assertions::assert_eq;
@@ -397,4 +398,143 @@ fn sidebar_with_directory(
 
 fn root_is(workspace: &Entity<workspace::Workspace>, path: &str, cx: &gpui::App) -> bool {
     workspace.read(cx).root_paths(cx).as_slice() == [Path::new(path).into()]
+}
+
+fn terminals_changed(workspace_id: &str, subscription: &str, names: &[&str]) -> Event {
+    Event::Message(ServerMessage::TerminalsChanged(TerminalsChanged {
+        subscription_id: Some(subscription.into()),
+        workspace_id: Some(workspace_id.into()),
+        cwd: path!("/sandbox").into(),
+        terminals: names
+            .iter()
+            .map(|name| TerminalInfo {
+                id: format!("term-{name}"),
+                name: name.to_string(),
+                cwd: Some(path!("/sandbox").into()),
+                workspace_id: Some(workspace_id.into()),
+                title: None,
+            })
+            .collect(),
+    }))
+}
+
+fn terminal_names(
+    store: &Entity<PaseoStore>,
+    workspace_id: &str,
+    cx: &TestAppContext,
+) -> Vec<String> {
+    store.read_with(cx, |store, _| {
+        store
+            .project_groups()
+            .into_iter()
+            .flat_map(|group| group.workspaces)
+            .filter(|entry| entry.workspace.id == workspace_id)
+            .flat_map(|entry| entry.terminals)
+            .map(|terminal| terminal.name)
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn test_terminal_lists_follow_watched_workspaces(cx: &mut TestAppContext) {
+    init_test(cx);
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_sandbox", "sandbox", path!("/sandbox"))],
+            vec![
+                workspace(
+                    "wks_watched",
+                    "prj_sandbox",
+                    path!("/sandbox"),
+                    "2026-11-14T09:00:00Z",
+                ),
+                workspace(
+                    "wks_other",
+                    "prj_sandbox",
+                    path!("/sandbox"),
+                    "2026-11-14T10:00:00Z",
+                ),
+            ],
+            Vec::new(),
+        )));
+        store.watch_terminals("wks_watched", cx);
+        store.handle_event(
+            terminals_changed("wks_watched", "terminals-1", &["zsh", "server"]),
+            cx,
+        );
+        store.handle_event(
+            terminals_changed("wks_other", "terminals-2", &["ignored"]),
+            cx,
+        );
+    });
+    assert_eq!(
+        terminal_names(&store, "wks_watched", cx),
+        vec!["zsh", "server"]
+    );
+    assert_eq!(
+        terminal_names(&store, "wks_other", cx),
+        Vec::<String>::new()
+    );
+
+    store.update(cx, |store, cx| {
+        store.handle_event(
+            terminals_changed("wks_watched", "terminals-1", &["zsh"]),
+            cx,
+        );
+    });
+    assert_eq!(
+        terminal_names(&store, "wks_watched", cx),
+        vec!["zsh"],
+        "later pushes carry the full list"
+    );
+}
+
+#[gpui::test]
+async fn test_terminal_tab_shows_the_restored_screen_then_output(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        let store = cx.new(|cx| PaseoStore::new(None, cx));
+        PaseoStore::set_global(store, cx);
+    });
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace =
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+    workspace.update_in(cx, |workspace, window, cx| {
+        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
+        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
+    });
+    let items: Vec<Entity<PaseoTerminalItem>> = workspace.read_with(cx, |workspace, cx| {
+        workspace.items_of_type::<PaseoTerminalItem>(cx).collect()
+    });
+    assert_eq!(items.len(), 1, "opening an open terminal focuses its tab");
+    let item = items[0].clone();
+
+    item.update(cx, |item, cx| {
+        for (opcode, payload) in [
+            (TerminalOpcode::Output, &b"stale output"[..]),
+            (TerminalOpcode::Restore, b"$ echo hi\r\nhi\r\n$ "),
+            (TerminalOpcode::Output, b"ls"),
+        ] {
+            item.apply_frame(
+                TerminalFrame {
+                    opcode,
+                    slot: 0,
+                    payload: payload.to_vec(),
+                },
+                cx,
+            );
+        }
+    });
+    cx.run_until_parked();
+    item.read_with(cx, |item, cx| {
+        let content = item.terminal().read(cx).get_content();
+        assert_eq!(content.trim_end(), "$ echo hi\nhi\n$ ls");
+    });
 }

@@ -6,8 +6,8 @@ use gpui::{
     ScrollHandle, SharedString, Stateful, Subscription, Task, WeakEntity, Window, px,
 };
 use paseo_client::protocol::{
-    Agent, AgentStatus, AttentionReason, ProviderEntry, ProviderStatus, Workspace, WorkspaceKind,
-    WorkspaceStatus,
+    Agent, AgentStatus, AttentionReason, ProviderEntry, ProviderStatus, TerminalInfo, Workspace,
+    WorkspaceKind, WorkspaceStatus,
 };
 use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
 use settings::Settings as _;
@@ -31,6 +31,7 @@ use crate::{
     agent_item::PaseoAgentItem,
     agent_session::{NewAgent, PROVIDER_ENV_VAR},
     store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry},
+    terminal_item::PaseoTerminalItem,
 };
 
 /// Lists the workspaces of a Paseo daemon, grouped by project, in place of Zed's threads
@@ -129,6 +130,49 @@ impl PaseoSidebar {
         .detach_and_log_err(cx);
     }
 
+    /// Opens the terminal's tab in its workspace.
+    fn open_terminal(
+        &mut self,
+        workspace_id: &str,
+        terminal_id: String,
+        name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(activate) = self.activate_workspace(workspace_id, window, cx) else {
+            return;
+        };
+        cx.spawn_in(window, async move |_, cx| {
+            let workspace = activate.await?;
+            workspace.update_in(cx, |workspace, window, cx| {
+                PaseoTerminalItem::open(workspace, terminal_id, name, window, cx);
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Starts a shell in the workspace and opens it.
+    fn new_terminal(&mut self, workspace_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let create = self
+            .store
+            .update(cx, |store, cx| store.create_terminal(workspace_id, cx));
+        let workspace_id = workspace_id.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let terminal = create.await?;
+            this.update_in(cx, |this, window, cx| {
+                this.open_terminal(
+                    &workspace_id,
+                    terminal.id.clone(),
+                    terminal.name.clone().into(),
+                    window,
+                    cx,
+                );
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
     fn new_agent_menu_is_open(&self, workspace_id: &str) -> bool {
         self.new_agent_menus
             .borrow()
@@ -136,7 +180,8 @@ impl PaseoSidebar {
             .is_some_and(PopoverMenuHandle::is_deployed)
     }
 
-    /// The + button on a workspace row: a menu of the daemon's providers and their models.
+    /// The + button on a workspace row: a new terminal, or a new agent with one of the daemon's
+    /// providers and models.
     fn render_new_agent_menu(&self, workspace_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let handle = self
             .new_agent_menus
@@ -158,7 +203,7 @@ impl PaseoSidebar {
                 IconName::Plus,
             )
             .icon_size(IconSize::Small),
-            Tooltip::text("New Agent"),
+            Tooltip::text("New Agent or Terminal"),
         )
         .on_open(Rc::new({
             let store = store.clone();
@@ -169,6 +214,19 @@ impl PaseoSidebar {
             let sidebar = sidebar.clone();
             let workspace_id = workspace_id.clone();
             Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                menu = menu
+                    .entry("New Terminal", None, {
+                        let sidebar = sidebar.clone();
+                        let workspace_id = workspace_id.clone();
+                        move |window, cx| {
+                            sidebar
+                                .update(cx, |sidebar, cx| {
+                                    sidebar.new_terminal(&workspace_id, window, cx);
+                                })
+                                .ok();
+                        }
+                    })
+                    .separator();
                 if choices.is_empty() {
                     return menu.header("No providers available yet");
                 }
@@ -629,6 +687,22 @@ impl PaseoSidebar {
                     }))
                     .into_any_element()
             }))
+            .children(entry.terminals.iter().map(|terminal| {
+                let workspace_id = open_workspace_id.clone();
+                let terminal_id = terminal.id.clone();
+                let name: SharedString = terminal.name.clone().into();
+                self.render_terminal(terminal, cx)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_terminal(
+                            &workspace_id,
+                            terminal_id.clone(),
+                            name.clone(),
+                            window,
+                            cx,
+                        );
+                    }))
+                    .into_any_element()
+            }))
             .into_any_element()
     }
 }
@@ -724,6 +798,53 @@ impl PaseoSidebar {
                 relative_time(&agent.updated_at)
                     .map(|age| Label::new(age).size(LabelSize::XSmall).color(Color::Muted)),
             )
+            .tooltip(Tooltip::text(tooltip))
+    }
+}
+
+impl PaseoSidebar {
+    /// One line per terminal under its workspace, after the agents. Clicking attaches to the
+    /// terminal in a tab.
+    fn render_terminal(&self, terminal: &TerminalInfo, cx: &mut Context<Self>) -> Stateful<Div> {
+        let color = cx.theme().colors();
+        let title = terminal
+            .title
+            .as_deref()
+            .filter(|title| !title.is_empty() && *title != terminal.name);
+        let tooltip: SharedString = match title {
+            Some(title) => format!("{}\n{title}", terminal.name),
+            None => terminal.name.clone(),
+        }
+        .into();
+        h_flex()
+            .id(SharedString::from(format!(
+                "paseo-terminal-{}",
+                terminal.id
+            )))
+            .w_full()
+            .h_6()
+            .pl(px(30.))
+            .pr_2()
+            .gap_1p5()
+            .cursor_pointer()
+            .hover(|style| style.bg(color.ghost_element_hover))
+            .child(
+                Icon::new(IconName::Terminal)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(terminal.name.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .children(title.map(|title| {
+                Label::new(title.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Disabled)
+                    .truncate()
+            }))
             .tooltip(Tooltip::text(tooltip))
     }
 }
@@ -903,6 +1024,14 @@ impl Render for PaseoSidebar {
         let on_left = self.side(cx) == SidebarSide::Left;
 
         let active_workspace = self.highlighted_workspace(cx);
+        if let Some(workspace_id) = active_workspace.clone()
+            && !self.store.read(cx).is_watching_terminals(&workspace_id)
+        {
+            let store = self.store.clone();
+            cx.defer(move |cx| {
+                store.update(cx, |store, cx| store.watch_terminals(&workspace_id, cx));
+            });
+        }
         let groups = self.store.read(cx).project_groups();
         let is_connected = matches!(self.store.read(cx).status(), ConnectionStatus::Connected(_));
         let header = self.render_header(window, cx);

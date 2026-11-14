@@ -11,6 +11,11 @@
 //! it also renders that agent's session from the live daemon, opened in a tab with Zed's thread
 //! UI, as `agent-session.png`. Real network I/O completes while the deterministic scheduler is
 //! pumped, so this works with the screen locked.
+//!
+//! With `PAZEDO_SCREENSHOT_TERMINAL=<terminal id|new>` instead, it attaches to that terminal of
+//! the sandbox workspace (or starts one), types a command into Zed's terminal view and renders
+//! `terminal-session.png` and `terminal-typed.png`. `PAZEDO_SCREENSHOT_TERMINAL=sidebar` opens
+//! nothing and only clicks `PAZEDO_SCREENSHOT_CLICK`, e.g. the sidebar's New Terminal entry.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -40,7 +45,7 @@ mod screenshots {
         WindowOptions, point, px, size,
     };
     use paseo_client::protocol::{Agent, ProjectSummary, ServerInfo, Workspace};
-    use paseo_ui::{ConnectionStatus, PaseoAgentItem, PaseoSidebar, PaseoStore};
+    use paseo_ui::{ConnectionStatus, PaseoAgentItem, PaseoSidebar, PaseoStore, PaseoTerminalItem};
     use project::Project;
     use serde_json::{Value, json};
     use std::{
@@ -159,7 +164,128 @@ mod screenshots {
             live_agent_session(&endpoint, &agent_id, &app_state, &mut cx, &path)?;
             println!("{}", path.display());
         }
+        if let (Ok(endpoint), Ok(terminal_id)) = (
+            std::env::var(paseo_ui::ENDPOINT_ENV_VAR),
+            std::env::var("PAZEDO_SCREENSHOT_TERMINAL"),
+        ) {
+            live_terminal(&endpoint, &terminal_id, &app_state, &mut cx, &output_dir)?;
+        }
         Ok(())
+    }
+
+    fn live_terminal(
+        endpoint: &str,
+        terminal_id: &str,
+        app_state: &Arc<AppState>,
+        cx: &mut VisualTestAppContext,
+        output_dir: &std::path::Path,
+    ) -> Result<()> {
+        let store = cx.update(|cx| {
+            let store = cx.new(|cx| PaseoStore::new(Some(endpoint.to_string()), cx));
+            PaseoStore::set_global(store.clone(), cx);
+            store
+        });
+        let directory = dirs_home().join("dev/pazedo-sandbox");
+        pump(cx, Duration::from_secs(15), |cx| {
+            store.read_with(cx, |store, _| {
+                store.newest_workspace_for_directory(&directory).is_some()
+            })
+        })
+        .context("the test daemon did not list a sandbox workspace")?;
+        let workspace_id = store.read_with(cx, |store, _| {
+            store
+                .newest_workspace_for_directory(&directory)
+                .map(|workspace| workspace.id.clone())
+                .expect("checked above")
+        });
+
+        if terminal_id == "sidebar" {
+            let window = open_window(&directory, app_state, cx)?;
+            wait(cx, Duration::from_secs(2))?;
+            click_from_env(window, cx)?;
+            wait(cx, Duration::from_secs(3))?;
+            let path = output_dir.join("terminal-sidebar.png");
+            capture(cx, window, &path)?;
+            println!("{}", path.display());
+            return print_terminal(window, cx);
+        }
+
+        let (terminal_id, name) = if terminal_id == "new" {
+            let create = store.update(cx, |store, cx| store.create_terminal(&workspace_id, cx));
+            pump(cx, Duration::from_secs(10), |_| create.is_ready())?;
+            let terminal = futures::FutureExt::now_or_never(create)
+                .context("terminal creation did not finish")?
+                .context("could not create a terminal")?;
+            println!("created terminal {}", terminal.id);
+            (terminal.id, terminal.name)
+        } else {
+            (terminal_id.to_string(), "Terminal".to_string())
+        };
+
+        let window = open_window(&directory, app_state, cx)?;
+        window.update(cx, |multi_workspace, window, cx| {
+            multi_workspace.workspace().update(cx, |workspace, cx| {
+                PaseoTerminalItem::open(workspace, terminal_id, name.into(), window, cx);
+            });
+        })?;
+        wait(cx, Duration::from_secs(3))?;
+        let path = output_dir.join("terminal-session.png");
+        capture(cx, window, &path)?;
+        println!("{}", path.display());
+        print_terminal(window, cx)?;
+
+        let command = std::env::var("PAZEDO_SCREENSHOT_TYPE")
+            .unwrap_or_else(|_| "echo pazedo-$((6*7))".to_string());
+        cx.simulate_input(window.into(), &command);
+        cx.simulate_keystrokes(window.into(), "enter");
+        wait(cx, Duration::from_secs(3))?;
+        let path = output_dir.join("terminal-typed.png");
+        capture(cx, window, &path)?;
+        println!("{}", path.display());
+        print_terminal(window, cx)
+    }
+
+    /// Clicks the points in `PAZEDO_SCREENSHOT_CLICK`: `x,y` in window points (the PNGs are
+    /// captured at that scale), several separated by `;`. Returns whether it was set.
+    fn click_from_env(
+        window: WindowHandle<MultiWorkspace>,
+        cx: &mut VisualTestAppContext,
+    ) -> Result<bool> {
+        let Ok(clicks) = std::env::var("PAZEDO_SCREENSHOT_CLICK") else {
+            return Ok(false);
+        };
+        for click in clicks.split(';') {
+            let (x, y) = click
+                .split_once(',')
+                .and_then(|(x, y)| {
+                    Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+                })
+                .context("PAZEDO_SCREENSHOT_CLICK must be x,y[;x,y...]")?;
+            // A real pointer hovers before it clicks; some controls only react once hovered.
+            cx.simulate_mouse_move(
+                window.into(),
+                point(px(x), px(y)),
+                None,
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
+            cx.simulate_click(window.into(), point(px(x), px(y)), gpui::Modifiers::none());
+            wait(cx, Duration::from_secs(2))?;
+        }
+        Ok(true)
+    }
+
+    fn print_terminal(
+        window: WindowHandle<MultiWorkspace>,
+        cx: &mut VisualTestAppContext,
+    ) -> Result<()> {
+        window.update(cx, |multi_workspace, _, cx| {
+            let workspace = multi_workspace.workspace().read(cx);
+            for item in workspace.items_of_type::<PaseoTerminalItem>(cx) {
+                let content = item.read(cx).terminal().read(cx).get_content();
+                println!("terminal content:\n{}\n---", content.trim_end());
+            }
+        })
     }
 
     fn live_agent_session(
@@ -231,27 +357,8 @@ mod screenshots {
             );
             dump_thread(window, cx)?;
         }
-        // `x,y` in window points (the PNGs are captured at that scale), e.g. a permission button;
-        // several clicks are separated by `;`.
-        if let Ok(clicks) = std::env::var("PAZEDO_SCREENSHOT_CLICK") {
-            for click in clicks.split(';') {
-                let (x, y) = click
-                    .split_once(',')
-                    .and_then(|(x, y)| {
-                        Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
-                    })
-                    .context("PAZEDO_SCREENSHOT_CLICK must be x,y[;x,y...]")?;
-                // A real pointer hovers before it clicks; some controls only react once hovered.
-                cx.simulate_mouse_move(
-                    window.into(),
-                    point(px(x), px(y)),
-                    None,
-                    gpui::Modifiers::none(),
-                );
-                cx.run_until_parked();
-                cx.simulate_click(window.into(), point(px(x), px(y)), gpui::Modifiers::none());
-                wait(cx, Duration::from_secs(2))?;
-            }
+        // For example a permission button.
+        if click_from_env(window, cx)? {
             wait(cx, Duration::from_secs(10))?;
             capture(
                 cx,

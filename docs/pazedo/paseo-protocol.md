@@ -155,16 +155,31 @@ stream updates", "emit N byte diff agent stream payload". Any other prompt strea
 turn with text, reasoning and tool calls for the model's duration (`ten-second-stream`,
 `one-minute-stream`, ...). Read from the 0.15.4 bundle; only the plan approval was tried.
 
-## Terminals (from sources; not verified live yet)
+## Terminals (verified 2026-11-14 unless noted)
 
-- `subscribe_terminals_request {cwd, workspaceId?}`: `cwd` is required in 0.15.4. The first
-  `terminals_changed` answers it; later ones push the **full** list again.
-- `subscribe_terminal_request {terminalId, restore: {mode: live|visible-snapshot|full-snapshot}}`
-  returns a `slot` (0-255). Binary frames `[opcode, slot, payload]`: Output 0x01, Input 0x02,
-  Resize 0x03 (JSON `{rows, cols}`), Snapshot 0x04 (JSON terminal state), Restore 0x05,
-  ReplayBegin/Data/End 0x06-0x08. `terminal_stream_exit` ends a stream.
+- Terminals belong to a workspace. `create_terminal_request {cwd, workspaceId?, name?, size?}`
+  returns `{terminal, error}`; without `workspaceId` the daemon picks a workspace of that
+  directory. `subscribe_terminals_request {cwd, workspaceId}` lists only that workspace's
+  terminals and answers with `terminals_changed` (with a `subscriptionId`); later
+  `terminals_changed` pushes carry the **full** list again. `cwd` is required in 0.15.4.
+- `subscribe_terminal_request {terminalId, restore: {mode: live|visible-snapshot|full-snapshot,
+  scrollbackLines?, size?}}` returns `{terminalId, slot, subscriptionId, error}`. Slots are
+  per connection and were not reused between attaches (0, then 1).
+- Binary frames `[opcode, slot, payload]`: Output 0x01 (raw PTY bytes), Input 0x02 (client to
+  daemon, raw bytes), Resize 0x03 (JSON `{rows, cols, intent?: claim|update}`), Snapshot 0x04
+  (JSON grid state; not observed), Restore 0x05, ReplayBegin/Data/End 0x06-0x08 (only for
+  clients advertising `terminal_chunked_replay`; ReplayBegin carries `{rows, cols,
+  retainedHistoryLines}`). A client without that capability gets one Restore frame right
+  after the subscribe response: ANSI from xterm's serializer that rebuilds screen and
+  scrollback (observed: the prompt, earlier commands and their output, then cursor position).
+- Size ownership: `intent: "claim"` makes the sender the size owner, `"update"` is applied
+  only from the owner; a missing intent counts as `claim` (compat). Read from the 0.15.4
+  bundle; that our resize reached the PTY was verified through `$COLUMNS`.
 - JSON alternative for input: `terminal_input {terminalId, message: {type: input, data} |
-  {type: resize, rows, cols}}`.
+  {type: resize, rows, cols, intent?}}`.
+- `unsubscribe_terminal_request {terminalId}` detaches. `terminal_stream_exit {subscriptionId?,
+  terminalId, error?}` ends a stream: without `error` the process exited (verified with
+  `exit`); with `error` the daemon lost track of it and the process may still run.
 
 ## Observations and open questions
 

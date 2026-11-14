@@ -6,7 +6,7 @@ use paseo_client::{
     frames::{TerminalFrame, TerminalOpcode},
     protocol::{
         FetchWorkspaces, HelloRejectionReason, ListProjects, ServerMessage, Subscribe,
-        TerminalClientMessage, TerminalInput, WorkspaceStatus, WorkspaceUpdate,
+        SubscribeTerminal, TerminalClientMessage, TerminalInput, WorkspaceStatus, WorkspaceUpdate,
     },
 };
 use pretty_assertions::assert_eq;
@@ -361,6 +361,56 @@ fn terminal_frames_flow_both_ways() -> Result<()> {
             input,
             json!({"type": "terminal_input", "terminalId": "term-1", "message": {"type": "resize", "rows": 24, "cols": 80}})
         );
+        Ok(())
+    })
+}
+
+#[test]
+fn subscribed_terminal_frames_go_to_their_stream_until_disconnect() -> Result<()> {
+    smol::block_on(async {
+        let mut harness = Harness::start(|_| {}).await?;
+        let mut connection = harness.connect().await?;
+
+        let subscribe = smol::spawn({
+            let client = harness.client.clone();
+            async move {
+                client
+                    .subscribe_terminal(&SubscribeTerminal {
+                        terminal_id: "term-1".into(),
+                        restore: None,
+                    })
+                    .await
+            }
+        });
+        let request = connection
+            .expect_request("subscribe_terminal_request")
+            .await?;
+        connection.respond(
+            &request,
+            "subscribe_terminal_response",
+            json!({"terminalId": "term-1", "slot": 5, "subscriptionId": "sub-1", "error": null}),
+        )?;
+        // Sent right behind the response, before the subscriber has seen the slot.
+        connection.send_binary(vec![0x05, 5, b'$', b' '])?;
+        connection.send_binary(vec![0x01, 6, b'x'])?;
+
+        let (response, mut frames) = with_timeout(subscribe).await??;
+        assert_eq!(response.slot, Some(5));
+        assert_eq!(
+            with_timeout(frames.next()).await?,
+            Some(TerminalFrame {
+                opcode: TerminalOpcode::Restore,
+                slot: 5,
+                payload: b"$ ".to_vec()
+            })
+        );
+        match harness.next_event().await? {
+            Event::Terminal(frame) => assert_eq!(frame.slot, 6),
+            other => panic!("expected the unrouted frame as an event, got {other:?}"),
+        }
+
+        connection.close()?;
+        assert_eq!(with_timeout(frames.next()).await?, None);
         Ok(())
     })
 }

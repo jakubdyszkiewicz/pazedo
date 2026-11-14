@@ -88,6 +88,11 @@ Three layers, cheapest first. UI work that was only compiled, never looked at, i
    (`agent-session-external.png`). Real socket I/O runs
    while the deterministic scheduler is pumped, so this works with the screen locked. With
    `new`, set `PAZEDO_AGENT_PROVIDER=mock` (and a mock model) or a real agent is created.
+   `PAZEDO_SCREENSHOT_TERMINAL=<terminal id>` (or `new`) attaches to a terminal of the
+   sandbox's newest workspace instead, types `PAZEDO_SCREENSHOT_TYPE` (default
+   `echo pazedo-$((6*7))`) and Enter, and prints the terminal's text
+   (`terminal-session.png`, `terminal-typed.png`); `sidebar` only clicks
+   `PAZEDO_SCREENSHOT_CLICK` (`terminal-sidebar.png`).
 3. **The real app** against the test daemon (`script/pazedo/run-dev`, then
    `script/pazedo/screenshot`): for what fixtures cannot show, such as the live connection,
    updates arriving, and opening real directories. Needs the window in front (see below).

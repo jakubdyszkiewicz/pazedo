@@ -3,7 +3,7 @@
 //!   cargo run -p paseo_client --example paseo_debug -- [--endpoint 127.0.0.1:6868] <command>
 //!
 //! Commands: `info`, `workspaces`, `agents`, `watch [seconds]`, `timeline <agent-id> [seconds]`,
-//! `terminals <cwd>`. The endpoint defaults to the isolated test daemon
+//! `terminals <cwd> [workspace-id]`, `terminal-stream <cwd> [terminal-id] [restore-mode]`. The endpoint defaults to the isolated test daemon
 //! (docs/pazedo/development.md), never to the user's real daemon.
 
 use anyhow::{Context as _, Result, bail};
@@ -11,12 +11,14 @@ use futures::{StreamExt as _, channel::mpsc};
 use paseo_client::{
     Client, ConnectOptions, Endpoint, Event,
     fake_daemon::smol_sleep,
+    frames::{TerminalFrame, TerminalOpcode},
     protocol::{
         AgentFilter, AgentSessionConfig, AgentStreamEvent, AgentUpdate, CreateAgent,
-        FetchAgentTimeline, FetchAgents, FetchWorkspaces, ListProjects, PermissionResponse,
-        ProjectUpdate, RespondToPermission, SendAgentMessage, ServerMessage,
-        SetAgentTimelineSubscription, SetSessionEventSubscription, Subscribe, SubscribeTerminals,
-        TimelineDirection, TimelineProjection, WorkspaceUpdate,
+        CreateTerminal, FetchAgentTimeline, FetchAgents, FetchWorkspaces, ListProjects,
+        PermissionResponse, ProjectUpdate, RespondToPermission, SendAgentMessage, ServerMessage,
+        SetAgentTimelineSubscription, SetSessionEventSubscription, Subscribe, SubscribeTerminal,
+        SubscribeTerminals, TerminalRestore, TerminalRestoreMode, TerminalSize, TimelineDirection,
+        TimelineProjection, WorkspaceUpdate,
     },
 };
 use std::time::{Duration, Instant};
@@ -124,17 +126,105 @@ fn main() -> Result<()> {
                 let terminals = client
                     .request(&SubscribeTerminals {
                         cwd,
-                        workspace_id: None,
+                        workspace_id: args.get(2).cloned(),
                     })
                     .await?;
+                println!(
+                    "workspace {:?}, subscription {:?}",
+                    terminals.workspace_id, terminals.subscription_id
+                );
                 for terminal in terminals.terminals {
-                    println!("{}  {}  {:?}", terminal.id, terminal.name, terminal.title);
+                    println!(
+                        "{}  {}  {:?}  workspace={:?}",
+                        terminal.id, terminal.name, terminal.title, terminal.workspace_id
+                    );
                 }
                 Ok(())
+            }
+            "terminal-stream" => {
+                let cwd = args.get(1).context("terminal-stream needs a cwd")?.clone();
+                terminal_stream(&client, &mut events, cwd, args.get(2).cloned(), args.get(3)).await
             }
             other => bail!("unknown command {other}"),
         }
     })
+}
+
+/// Attaches to a terminal (creating one when no id is given), types a command into it and
+/// prints every frame of the stream.
+async fn terminal_stream(
+    client: &Client,
+    events: &mut mpsc::UnboundedReceiver<Event>,
+    cwd: String,
+    terminal_id: Option<String>,
+    restore_mode: Option<&String>,
+) -> Result<()> {
+    let size = TerminalSize { rows: 24, cols: 80 };
+    let terminal_id = match terminal_id {
+        Some(terminal_id) => terminal_id,
+        None => {
+            let response = client
+                .request(&CreateTerminal {
+                    cwd,
+                    name: Some("paseo_debug".into()),
+                    size: Some(size),
+                    ..Default::default()
+                })
+                .await?;
+            let terminal = response
+                .terminal
+                .with_context(|| format!("create failed: {:?}", response.error))?;
+            println!("created terminal {}", terminal.id);
+            terminal.id
+        }
+    };
+    let mode = match restore_mode.map(String::as_str) {
+        None | Some("visible") => TerminalRestoreMode::VisibleSnapshot,
+        Some("full") => TerminalRestoreMode::FullSnapshot,
+        Some("live") => TerminalRestoreMode::Live,
+        Some(other) => bail!("unknown restore mode {other}"),
+    };
+    let response = client
+        .request(&SubscribeTerminal {
+            terminal_id: terminal_id.clone(),
+            restore: Some(TerminalRestore {
+                mode,
+                scrollback_lines: None,
+                size: Some(size),
+            }),
+        })
+        .await?;
+    println!("subscribed: {response:?}");
+    let slot = response.slot.context("no slot")?;
+    print_frames(events, Instant::now() + Duration::from_secs(3)).await;
+    client.send_terminal_frame(&TerminalFrame {
+        opcode: TerminalOpcode::Input,
+        slot,
+        payload: b"echo pazedo-$((6*7))\r".to_vec(),
+    })?;
+    println!("sent input");
+    print_frames(events, Instant::now() + Duration::from_secs(3)).await;
+    Ok(())
+}
+
+async fn print_frames(events: &mut mpsc::UnboundedReceiver<Event>, deadline: Instant) {
+    while let Some(event) = next_event_before(events, deadline).await {
+        print_event(event);
+    }
+}
+
+fn print_event(event: Event) {
+    match event {
+        Event::Terminal(frame) => println!(
+            "frame {:?} slot {} {} bytes: {:?}",
+            frame.opcode,
+            frame.slot,
+            frame.payload.len(),
+            String::from_utf8_lossy(&frame.payload[..frame.payload.len().min(300)])
+        ),
+        Event::Message(message) => println!("message {message:?}"),
+        other => println!("{other:?}"),
+    }
 }
 
 fn seconds_arg(args: &[String], index: usize) -> Result<Duration> {

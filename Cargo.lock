@@ -12621,6 +12621,8 @@ dependencies = [
  "session",
  "settings",
  "tempfile",
+ "terminal",
+ "terminal_view",
  "theme",
  "theme_settings",
  "title_bar",

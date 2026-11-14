@@ -12,6 +12,7 @@ Docs in this folder:
 - [paseo-protocol.md](./paseo-protocol.md): the daemon protocol as `crates/paseo_client` uses
   it, with what was verified against a real daemon.
 - [agent-sessions.md](./agent-sessions.md): how Paseo agents are shown with Zed's thread UI.
+- [terminals.md](./terminals.md): how Paseo terminals are shown with Zed's terminal view.
 
 This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore it.
 
@@ -21,8 +22,9 @@ This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore i
   `upstream` (not `origin`) so that a fork can be added as `origin` later without renaming.
 - Fork code goes into new crates and fork tooling into `script/pazedo/`. Crates so far:
   `crates/paseo_client` (daemon protocol client; no gpui dependency) and `crates/paseo_ui`
-  (the Paseo workspace sidebar, the store behind it, and Paseo agent sessions shown with Zed's
-  thread UI; see [agent-sessions.md](./agent-sessions.md)).
+  (the Paseo workspace sidebar, the store behind it, Paseo agent sessions shown with Zed's
+  thread UI and Paseo terminals shown with Zed's terminal view; see
+  [agent-sessions.md](./agent-sessions.md) and [terminals.md](./terminals.md)).
   Upstream files are changed only where there is no seam, and every such change is listed
   under [Upstream touch points](#upstream-touch-points).
 
@@ -58,9 +60,6 @@ makes syncing tractable.
 | `crates/zed/Cargo.toml` | `paseo_ui` dependency | For the sidebar registration below. |
 | `crates/zed/src/zed.rs` | In `initialize_workspace`, register `paseo_ui::PaseoSidebar` instead of `sidebar::Sidebar` and open it; drop the `use sidebar::Sidebar` import | The Paseo sidebar replaces the threads sidebar. The `sidebar` crate stays a dependency (`dump_workspace_info` is still used). |
 | `crates/agent_ui/src/thread_metadata_store.rs` | `handle_conversation_event` returns early for threads whose agent id is `paseo` | Zed records every open thread in its own thread database; Paseo already owns these agents' history, and Zed could not reopen the entries. Five lines. |
+| `crates/terminal/src/terminal.rs` | `ForwardedInput`, a `forwarded_input_tx` field, `Terminal::forward_input`, two `else if` branches (in `write_to_pty` and the resize handler) and a test | A display-only terminal had nowhere to send keystrokes and resizes; with this, a Paseo terminal stream drives Zed's terminal view. About 30 lines plus the test, all additive. |
 | `README.md` | Two `> [!IMPORTANT]` lines at the top | Required by upstream's `.rules` (symlinked as `CLAUDE.md`) whenever an agent modifies source files: a reminder that a human must review the change. Only a human removes them. |
 
-Planned (from the brief, not yet done):
-
-- `crates/terminal/src/terminal.rs`: a terminal kind backed by a Paseo terminal stream next to
-  `TerminalType::{Pty, DisplayOnly}`.

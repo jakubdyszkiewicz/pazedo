@@ -1034,6 +1034,7 @@ impl TerminalBuilder {
             term_config: config,
             output_processor: None,
             output_events_tx: Some(events_tx),
+            forwarded_input_tx: None,
             output_generation: 0,
             title_override: None,
             events: VecDeque::with_capacity(10),
@@ -1324,6 +1325,7 @@ impl TerminalBuilder {
                 term_config: config,
                 output_processor: None,
                 output_events_tx: None,
+                forwarded_input_tx: None,
                 output_generation: 0,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
@@ -1511,6 +1513,14 @@ enum PtyResources {
     Released,
 }
 
+/// What a display-only terminal would write to a PTY, for terminals whose process runs
+/// elsewhere. See [`Terminal::forward_input`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ForwardedInput {
+    Bytes(Vec<u8>),
+    Resize(TerminalBounds),
+}
+
 enum TerminalType {
     Pty {
         resources: PtyResources,
@@ -1529,6 +1539,7 @@ pub struct Terminal {
     term_config: AlacrittyTermConfig,
     output_processor: Option<OutputParser>,
     output_events_tx: Option<futures::channel::mpsc::UnboundedSender<PtyEvent>>,
+    forwarded_input_tx: Option<futures::channel::mpsc::UnboundedSender<ForwardedInput>>,
     output_generation: u64,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
@@ -1751,6 +1762,10 @@ impl Terminal {
                 } = &self.terminal_type
                 {
                     pty_tx.resize(new_bounds);
+                } else if let Some(forwarded_input_tx) = &self.forwarded_input_tx {
+                    forwarded_input_tx
+                        .unbounded_send(ForwardedInput::Resize(new_bounds))
+                        .ok();
                 }
 
                 resize(term, new_bounds);
@@ -2208,7 +2223,24 @@ impl Terminal {
                 }
             }
             pty_tx.notify(input);
+        } else if let Some(forwarded_input_tx) = &self.forwarded_input_tx {
+            forwarded_input_tx
+                .unbounded_send(ForwardedInput::Bytes(input.into_owned()))
+                .ok();
         }
+    }
+
+    /// Sends this display-only terminal's input, query responses and resizes to `sender`, so
+    /// that output written with [`Self::write_raw_output`] can come from a process elsewhere.
+    pub fn forward_input(
+        &mut self,
+        sender: futures::channel::mpsc::UnboundedSender<ForwardedInput>,
+    ) -> Result<()> {
+        if !matches!(self.terminal_type, TerminalType::DisplayOnly) || self.subprocess.is_some() {
+            bail!("only display-only terminals can forward their input");
+        }
+        self.forwarded_input_tx = Some(sender);
+        Ok(())
     }
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
@@ -5037,6 +5069,42 @@ mod tests {
             );
         });
         assert_eq!(terminal.entity_id(), entity_id);
+    }
+
+    #[gpui::test]
+    async fn test_display_only_terminal_forwards_input_and_resizes(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_terminal_test_with_window(cx, b"");
+        let (forwarded_tx, mut forwarded_rx) = futures::channel::mpsc::unbounded();
+        let new_bounds = TerminalBounds::new(
+            px(20.),
+            px(10.),
+            bounds(point(px(0.), px(0.)), size(px(400.), px(160.))),
+        );
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.forward_input(forwarded_tx).expect("display-only");
+            terminal.input(b"ls\r".to_vec());
+            // A device attributes query is answered through the same channel as typed input.
+            terminal.write_raw_output(b"\x1b[c", cx);
+            terminal.set_size(new_bounds);
+            terminal.sync(window, cx);
+        });
+        cx.run_until_parked();
+
+        let mut forwarded = Vec::new();
+        while let Ok(input) = forwarded_rx.try_recv() {
+            forwarded.push(input);
+        }
+        assert_eq!(
+            forwarded.first(),
+            Some(&ForwardedInput::Bytes(b"ls\r".to_vec()))
+        );
+        assert!(
+            forwarded
+                .iter()
+                .any(|input| matches!(input, ForwardedInput::Bytes(bytes) if bytes.starts_with(b"\x1b[?"))),
+            "expected a device attributes response in {forwarded:?}"
+        );
+        assert!(forwarded.contains(&ForwardedInput::Resize(new_bounds)));
     }
 
     #[gpui::test]

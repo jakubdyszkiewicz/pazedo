@@ -1442,6 +1442,24 @@ impl Notification for UnsubscribeTerminal {
     const TYPE: &'static str = "unsubscribe_terminal_request";
 }
 
+/// Whether a resize takes over the terminal's size (`claim`) or only applies while this client
+/// owns it (`update`). The last client to claim decides the size every client sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalResizeIntent {
+    Claim,
+    Update,
+}
+
+/// The JSON payload of a binary resize frame ([`crate::frames::TerminalOpcode::Resize`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalStreamResize {
+    pub rows: u16,
+    pub cols: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<TerminalResizeIntent>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TerminalClientMessage {

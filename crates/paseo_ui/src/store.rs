@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use collections::{BTreeMap, HashMap};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task};
@@ -6,9 +6,10 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
         Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement, AgentUpdate,
-        FetchAgents, FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page, ProjectSummary,
-        ProjectUpdate, ProviderEntry, ServerInfo, ServerMessage, SetSessionEventSubscription,
-        Subscribe, Workspace, WorkspaceUpdate,
+        CreateTerminal, FetchAgents, FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page,
+        ProjectSummary, ProjectUpdate, ProviderEntry, ServerInfo, ServerMessage,
+        SetSessionEventSubscription, Subscribe, SubscribeTerminals, TerminalInfo,
+        TerminalStreamExit, TerminalsChanged, Workspace, WorkspaceUpdate,
     },
 };
 use std::{cmp::Reverse, sync::Arc};
@@ -36,13 +37,14 @@ pub enum ConnectionStatus {
     Disconnected(SharedString),
 }
 
-/// For open agent sessions, which follow their own timeline subscriptions.
+/// For open agent sessions and terminals, which follow their own subscriptions.
 #[derive(Clone, Debug)]
 pub enum PaseoStoreEvent {
     Connected,
     Disconnected,
     AgentStream(AgentStream),
     AgentTimelineReplacement(AgentTimelineReplacement),
+    TerminalStreamExit(TerminalStreamExit),
 }
 
 struct GlobalPaseoStore(Entity<PaseoStore>);
@@ -66,6 +68,11 @@ pub struct PaseoStore {
     /// applied after the snapshot.
     queued_messages: Option<Vec<ServerMessage>>,
     sync_task: Option<Task<()>>,
+    /// Terminal lists are subscribed per workspace, only for workspaces the user opened, by
+    /// workspace id. The value is the current subscription id once the daemon answered.
+    terminal_subscriptions: HashMap<String, Option<String>>,
+    terminals: HashMap<String, Vec<TerminalInfo>>,
+    terminal_tasks: HashMap<String, Task<()>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -103,6 +110,8 @@ pub struct WorkspaceEntry {
     pub workspace: Workspace,
     /// Newest first.
     pub agents: Vec<Agent>,
+    /// Empty until the workspace's terminals are watched.
+    pub terminals: Vec<TerminalInfo>,
 }
 
 impl WorkspaceEntry {
@@ -150,6 +159,9 @@ impl PaseoStore {
             subscriptions: DirectorySubscriptions::default(),
             queued_messages: None,
             sync_task: None,
+            terminal_subscriptions: HashMap::default(),
+            terminals: HashMap::default(),
+            terminal_tasks: HashMap::default(),
             _tasks: Vec::new(),
         };
         let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.trim().is_empty()) else {
@@ -248,6 +260,98 @@ impl PaseoStore {
         self.workspaces.get(id)
     }
 
+    pub fn is_watching_terminals(&self, workspace_id: &str) -> bool {
+        self.terminal_subscriptions.contains_key(workspace_id)
+    }
+
+    /// Keeps the workspace's terminal list current from now on, across reconnects.
+    pub fn watch_terminals(&mut self, workspace_id: &str, cx: &mut Context<Self>) {
+        if self.is_watching_terminals(workspace_id) {
+            return;
+        }
+        self.terminal_subscriptions
+            .insert(workspace_id.to_string(), None);
+        self.subscribe_terminals(workspace_id.to_string(), cx);
+    }
+
+    fn subscribe_terminals(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone().filter(Client::is_connected) else {
+            return;
+        };
+        let Some(workspace) = self.workspaces.get(&workspace_id) else {
+            return;
+        };
+        let request = SubscribeTerminals {
+            cwd: workspace.directory().to_string(),
+            workspace_id: Some(workspace_id.clone()),
+        };
+        let task = cx.spawn({
+            let workspace_id = workspace_id.clone();
+            async move |this, cx| match client.request(&request).await {
+                Ok(changed) => {
+                    this.update(cx, |this, cx| {
+                        if let Some(subscription) =
+                            this.terminal_subscriptions.get_mut(&workspace_id)
+                        {
+                            *subscription = changed.subscription_id.clone();
+                        }
+                        this.terminals.insert(workspace_id, changed.terminals);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(error) => {
+                    log::warn!("failed to load the terminals of {workspace_id}: {error:#}")
+                }
+            }
+        });
+        self.terminal_tasks.insert(workspace_id, task);
+    }
+
+    /// Starts a shell in the workspace's directory.
+    pub fn create_terminal(
+        &mut self,
+        workspace_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<TerminalInfo>> {
+        let Some(client) = self.client.clone() else {
+            return Task::ready(Err(anyhow::anyhow!("not connected to a Paseo daemon")));
+        };
+        let Some(workspace) = self.workspaces.get(workspace_id) else {
+            return Task::ready(Err(anyhow::anyhow!("unknown workspace {workspace_id}")));
+        };
+        let request = CreateTerminal {
+            cwd: workspace.directory().to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            ..Default::default()
+        };
+        let workspace_id = workspace_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let response = client.request(&request).await?;
+            let terminal = response.terminal.with_context(|| {
+                format!(
+                    "the daemon did not create a terminal: {}",
+                    response.error.as_deref().unwrap_or("no reason given")
+                )
+            })?;
+            this.update(cx, |this, cx| {
+                let terminals = this.terminals.entry(workspace_id).or_default();
+                if !terminals.iter().any(|known| known.id == terminal.id) {
+                    terminals.push(terminal.clone());
+                    cx.notify();
+                }
+            })?;
+            Ok(terminal)
+        })
+    }
+
+    pub fn terminal(&self, terminal_id: &str) -> Option<&TerminalInfo> {
+        self.terminals
+            .values()
+            .flatten()
+            .find(|terminal| terminal.id == terminal_id)
+    }
+
     /// Projects sorted by name; each with its workspaces, pinned first, then newest first.
     pub fn project_groups(&self) -> Vec<ProjectGroup> {
         let mut agents_by_workspace: HashMap<&str, Vec<&Agent>> = HashMap::default();
@@ -289,6 +393,11 @@ impl PaseoStore {
             let entry = WorkspaceEntry {
                 workspace: workspace.clone(),
                 agents,
+                terminals: self
+                    .terminals
+                    .get(&workspace.id)
+                    .cloned()
+                    .unwrap_or_default(),
             };
             // A workspace can arrive before the `project.update` that announces its project.
             groups
@@ -337,6 +446,10 @@ impl PaseoStore {
                 self.subscriptions = DirectorySubscriptions::default();
                 self.queued_messages = None;
                 self.sync_task = None;
+                self.terminal_tasks.clear();
+                for subscription in self.terminal_subscriptions.values_mut() {
+                    *subscription = None;
+                }
                 cx.emit(PaseoStoreEvent::Disconnected);
             }
             Event::Message(ServerMessage::AgentStream(stream)) => {
@@ -344,6 +457,12 @@ impl PaseoStore {
             }
             Event::Message(ServerMessage::AgentTimelineReplacement(replacement)) => {
                 cx.emit(PaseoStoreEvent::AgentTimelineReplacement(replacement));
+            }
+            Event::Message(ServerMessage::TerminalsChanged(changed)) => {
+                self.apply_terminals_changed(changed);
+            }
+            Event::Message(ServerMessage::TerminalStreamExit(exit)) => {
+                cx.emit(PaseoStoreEvent::TerminalStreamExit(exit));
             }
             Event::Message(message) => match &mut self.queued_messages {
                 Some(queued) => queued.push(message),
@@ -363,6 +482,7 @@ impl PaseoStore {
             let result = fetch_directory(&client).await;
             this.update(cx, |this, cx| {
                 this.finish_sync(result);
+                this.resubscribe_terminals(cx);
                 cx.notify();
             })
             .ok();
@@ -372,6 +492,33 @@ impl PaseoStore {
     pub(crate) fn begin_sync(&mut self) {
         self.subscriptions = DirectorySubscriptions::default();
         self.queued_messages = Some(Vec::new());
+    }
+
+    /// Watched workspaces lose their terminal subscriptions with the connection.
+    fn resubscribe_terminals(&mut self, cx: &mut Context<Self>) {
+        let workspace_ids: Vec<String> = self
+            .terminal_subscriptions
+            .iter()
+            .filter(|(workspace_id, subscription)| {
+                subscription.is_none() && !self.terminal_tasks.contains_key(*workspace_id)
+            })
+            .map(|(workspace_id, _)| workspace_id.clone())
+            .collect();
+        for workspace_id in workspace_ids {
+            self.subscribe_terminals(workspace_id, cx);
+        }
+    }
+
+    fn apply_terminals_changed(&mut self, changed: TerminalsChanged) {
+        let Some(workspace_id) = changed.workspace_id else {
+            return;
+        };
+        let Some(current) = self.terminal_subscriptions.get(&workspace_id) else {
+            return;
+        };
+        if DirectorySubscriptions::accepts(current, &changed.subscription_id) {
+            self.terminals.insert(workspace_id, changed.terminals);
+        }
     }
 
     pub(crate) fn finish_sync(&mut self, result: Result<DirectorySnapshot>) {
@@ -502,6 +649,18 @@ impl PaseoStore {
 
     pub fn set_providers(&mut self, providers: Vec<ProviderEntry>, cx: &mut Context<Self>) {
         self.providers = providers;
+        cx.notify();
+    }
+
+    pub fn set_terminals(
+        &mut self,
+        workspace_id: &str,
+        terminals: Vec<TerminalInfo>,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal_subscriptions
+            .insert(workspace_id.to_string(), None);
+        self.terminals.insert(workspace_id.to_string(), terminals);
         cx.notify();
     }
 

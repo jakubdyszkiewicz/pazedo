@@ -6,7 +6,8 @@
 //! with pings, and reconnects with backoff. It stops when every [`Client`] handle is dropped.
 //!
 //! Subscriptions belong to one connection. After every [`Event::Connected`] the consumer must
-//! request them again; the daemon assigns new subscription ids.
+//! request them again; the daemon assigns new subscription ids. Terminal streams attached with
+//! [`Client::subscribe_terminal`] end (their receiver closes) when the connection is lost.
 
 pub mod frames;
 pub mod protocol;
@@ -41,7 +42,8 @@ use crate::{
     frames::{ChunkAssembler, Frame, TerminalFrame},
     protocol::{
         ClientType, Hello, HelloAuth, HelloRejectionReason, Notification, PROTOCOL_VERSION,
-        Request, RpcErrorPayload, ServerInfo, ServerMessage, capabilities,
+        Request, RpcErrorPayload, ServerInfo, ServerMessage, SubscribeTerminal,
+        SubscribeTerminalResponse, capabilities,
     },
 };
 
@@ -271,7 +273,11 @@ impl fmt::Display for HelloRejected {
 
 impl std::error::Error for HelloRejected {}
 
-type PendingResponse = oneshot::Sender<Result<RawMessage>>;
+struct PendingResponse {
+    response: oneshot::Sender<Result<RawMessage>>,
+    /// For `subscribe_terminal_request`: where the frames of the slot in the response go.
+    terminal_route: Option<mpsc::UnboundedSender<TerminalFrame>>,
+}
 
 struct Connection {
     outgoing: mpsc::UnboundedSender<Message>,
@@ -288,6 +294,9 @@ struct Shared {
     /// a connection that is already gone.
     connection: Mutex<Option<Connection>>,
     pending: Mutex<HashMap<String, PendingResponse>>,
+    /// Terminal stream frames by slot. Routes are installed by the driver while it handles the
+    /// subscribe response, so the restore frame that follows it cannot be missed.
+    terminal_routes: Mutex<HashMap<u8, mpsc::UnboundedSender<TerminalFrame>>>,
     next_request_id: AtomicU64,
 }
 
@@ -305,8 +314,10 @@ impl Shared {
 
     fn disconnected(&self, reason: &str) {
         self.connection.lock().take();
-        for (_, response) in self.pending.lock().drain() {
-            response
+        self.terminal_routes.lock().clear();
+        for (_, pending) in self.pending.lock().drain() {
+            pending
+                .response
                 .send(Err(anyhow!(
                     "connection to the Paseo daemon lost: {reason}"
                 )))
@@ -336,6 +347,7 @@ impl Client {
             request_id_prefix: format!("pazedo-{}", uuid::Uuid::new_v4().simple()),
             connection: Mutex::default(),
             pending: Mutex::default(),
+            terminal_routes: Mutex::default(),
             next_request_id: AtomicU64::default(),
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -382,9 +394,45 @@ impl Client {
             .with_context(|| format!("failed to decode {}", R::RESPONSE_TYPE))
     }
 
+    /// Attaches to a terminal's stream. Its frames (starting with the restore of the screen the
+    /// daemon sends after the response) arrive on the returned receiver instead of as
+    /// [`Event::Terminal`]. The receiver closes when the connection is lost.
+    pub async fn subscribe_terminal(
+        &self,
+        request: &SubscribeTerminal,
+    ) -> Result<(
+        SubscribeTerminalResponse,
+        mpsc::UnboundedReceiver<TerminalFrame>,
+    )> {
+        let body = serde_json::to_value(request)
+            .with_context(|| format!("failed to encode {}", SubscribeTerminal::TYPE))?;
+        let (frames_tx, frames_rx) = mpsc::unbounded();
+        let response = self
+            .send_request(SubscribeTerminal::TYPE, body, Some(frames_tx))
+            .await?;
+        let response: SubscribeTerminalResponse = serde_json::from_value(response.payload)
+            .with_context(|| format!("failed to decode {}", SubscribeTerminal::RESPONSE_TYPE))?;
+        if let Some(error) = &response.error {
+            bail!(
+                "could not attach to terminal {}: {error}",
+                request.terminal_id
+            );
+        }
+        Ok((response, frames_rx))
+    }
+
     /// Sends any session request and returns the correlated response untyped. For messages
     /// this crate does not model yet.
     pub async fn request_raw(&self, message_type: &str, body: Value) -> Result<RawMessage> {
+        self.send_request(message_type, body, None).await
+    }
+
+    async fn send_request(
+        &self,
+        message_type: &str,
+        body: Value,
+        terminal_route: Option<mpsc::UnboundedSender<TerminalFrame>>,
+    ) -> Result<RawMessage> {
         let Value::Object(mut message) = body else {
             bail!("{message_type} body must be a JSON object");
         };
@@ -403,10 +451,13 @@ impl Client {
             let connection = connection
                 .as_ref()
                 .context("not connected to the Paseo daemon")?;
-            self.shared
-                .pending
-                .lock()
-                .insert(request_id.clone(), response_tx);
+            self.shared.pending.lock().insert(
+                request_id.clone(),
+                PendingResponse {
+                    response: response_tx,
+                    terminal_route,
+                },
+            );
             if connection.outgoing.unbounded_send(frame).is_err() {
                 self.shared.pending.lock().remove(&request_id);
                 bail!("connection to the Paseo daemon closed");
@@ -649,6 +700,16 @@ fn handle_frame(shared: &Shared, events: &mpsc::UnboundedSender<Event>, frame: F
         Frame::Text(text) => handle_text(shared, events, &text),
         Frame::Binary(bytes) => match TerminalFrame::decode(&bytes) {
             Some(frame) => {
+                let slot = frame.slot;
+                let mut routes = shared.terminal_routes.lock();
+                if let Some(route) = routes.get(&slot) {
+                    // A closed route means the stream's reader is gone; nobody else wants it.
+                    if route.unbounded_send(frame).is_err() {
+                        routes.remove(&slot);
+                    }
+                    return;
+                }
+                drop(routes);
                 events.unbounded_send(Event::Terminal(frame)).ok();
             }
             None => log::debug!(
@@ -685,6 +746,13 @@ fn handle_text(shared: &Shared, events: &mpsc::UnboundedSender<Event>, text: &st
         .and_then(Value::as_str)
         .and_then(|request_id| shared.pending.lock().remove(request_id));
     if let Some(pending) = pending {
+        if let Some(route) = pending.terminal_route
+            && message.message_type == SubscribeTerminal::RESPONSE_TYPE
+            && let Some(slot) = message.payload.get("slot").and_then(Value::as_u64)
+            && let Ok(slot) = u8::try_from(slot)
+        {
+            shared.terminal_routes.lock().insert(slot, route);
+        }
         let result = if message.message_type == "rpc_error" {
             match serde_json::from_value::<RpcErrorPayload>(message.payload) {
                 Ok(error) => Err(RpcError {
@@ -698,7 +766,7 @@ fn handle_text(shared: &Shared, events: &mpsc::UnboundedSender<Event>, text: &st
         } else {
             Ok(message)
         };
-        pending.send(result).ok();
+        pending.response.send(result).ok();
         return;
     }
 
