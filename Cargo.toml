@@ -163,6 +163,7 @@ members = [
     "crates/outline",
     "crates/outline_panel",
     "crates/paseo_client",
+    "crates/paseo_ui",
     "crates/path",
     "crates/paths",
     "crates/picker",
@@ -440,6 +441,7 @@ opencode = { path = "crates/opencode" }
 outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
 paseo_client = { path = "crates/paseo_client" }
+paseo_ui = { path = "crates/paseo_ui" }
 path = { path = "crates/path" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf", default-features = false }

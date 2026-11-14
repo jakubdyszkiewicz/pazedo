@@ -77,7 +77,6 @@ use settings::{
     SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
     initial_project_settings_content, initial_tasks_content, update_settings_file,
 };
-use sidebar::Sidebar;
 #[cfg(debug_assertions)]
 use workspace::workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError};
 
@@ -538,10 +537,14 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         cx.defer(move |cx| {
             window_handle
                 .update(cx, |_, window, cx| {
-                    let sidebar =
-                        cx.new(|cx| Sidebar::new(multi_workspace_handle.clone(), window, cx));
+                    // pazedo: the Paseo workspace sidebar replaces the threads sidebar and is the
+                    // primary navigation, so it starts open.
+                    let sidebar = cx.new(|cx| {
+                        paseo_ui::PaseoSidebar::new(multi_workspace_handle.clone(), window, cx)
+                    });
                     multi_workspace_handle.update(cx, |multi_workspace, cx| {
                         multi_workspace.register_sidebar(sidebar, cx);
+                        multi_workspace.open_sidebar(cx);
                     });
                 })
                 .ok();

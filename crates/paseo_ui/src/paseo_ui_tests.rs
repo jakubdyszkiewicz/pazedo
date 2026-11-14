@@ -1,0 +1,400 @@
+use crate::{
+    PaseoSidebar, PaseoStore,
+    store::{DirectorySnapshot, DirectorySubscriptions},
+};
+use fs::FakeFs;
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use paseo_client::{
+    Event,
+    protocol::{
+        Agent, AgentUpdate, ProjectSummary, ServerMessage, Workspace, WorkspaceStatus,
+        WorkspaceUpdate,
+    },
+};
+use pretty_assertions::assert_eq;
+use project::Project;
+use serde_json::{Value, json};
+use settings::SettingsStore;
+use std::path::Path;
+use util::path;
+use workspace::{MultiWorkspace, Sidebar as _};
+
+fn init_test(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+    });
+}
+
+fn workspace(id: &str, project_id: &str, directory: &str, created_at: &str) -> Workspace {
+    serde_json::from_value(json!({
+        "id": id,
+        "projectId": project_id,
+        "projectDisplayName": project_id.trim_start_matches("prj_"),
+        "projectRootPath": directory,
+        "workspaceDirectory": directory,
+        "projectKind": "git",
+        "workspaceKind": "local_checkout",
+        "name": "main",
+        "status": "done",
+        "activityAt": null,
+        "createdAt": created_at,
+    }))
+    .unwrap()
+}
+
+fn with_status(mut value: Workspace, status: WorkspaceStatus) -> Workspace {
+    value.status = status;
+    value
+}
+
+fn agent(id: &str, workspace_id: &str, status: &str, extra: Value) -> Agent {
+    let mut agent = json!({
+        "id": id,
+        "provider": "mock",
+        "cwd": "/sandbox",
+        "workspaceId": workspace_id,
+        "model": null,
+        "createdAt": format!("2026-11-14T10:00:0{}Z", id.len() % 10),
+        "updatedAt": "2026-11-14T10:00:00Z",
+        "lastUserMessageAt": null,
+        "status": status,
+        "capabilities": {},
+        "currentModeId": null,
+        "availableModes": [],
+        "pendingPermissions": [],
+        "persistence": null,
+        "title": id,
+    });
+    if let (Value::Object(agent), Value::Object(extra)) = (&mut agent, extra) {
+        agent.extend(extra);
+    }
+    serde_json::from_value(agent).unwrap()
+}
+
+fn project(id: &str, name: &str, root: &str) -> ProjectSummary {
+    serde_json::from_value(json!({
+        "projectId": id,
+        "projectDisplayName": name,
+        "projectRootPath": root,
+        "projectKind": "git",
+    }))
+    .unwrap()
+}
+
+fn workspace_upsert(subscription: &str, workspace: Workspace) -> Event {
+    Event::Message(ServerMessage::WorkspaceUpdate(WorkspaceUpdate::Upsert {
+        subscription_id: Some(subscription.into()),
+        workspace,
+    }))
+}
+
+fn snapshot(
+    projects: Vec<ProjectSummary>,
+    workspaces: Vec<Workspace>,
+    agents: Vec<Agent>,
+) -> DirectorySnapshot {
+    DirectorySnapshot {
+        projects,
+        workspaces,
+        agents,
+        subscriptions: DirectorySubscriptions {
+            workspaces: Some("workspaces-2".into()),
+            agents: Some("agents-2".into()),
+        },
+    }
+}
+
+fn new_store(cx: &mut TestAppContext) -> Entity<PaseoStore> {
+    cx.new(|cx| PaseoStore::new(None, cx))
+}
+
+fn workspace_names(store: &Entity<PaseoStore>, cx: &TestAppContext) -> Vec<(String, Vec<String>)> {
+    store.read_with(cx, |store, _| {
+        store
+            .project_groups()
+            .into_iter()
+            .map(|group| {
+                (
+                    group.name.to_string(),
+                    group
+                        .workspaces
+                        .into_iter()
+                        .map(|entry| entry.workspace.id)
+                        .collect(),
+                )
+            })
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn test_updates_during_sync_apply_after_the_snapshot(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        // Arrives on the new subscription before the snapshot response is applied.
+        store.handle_event(
+            workspace_upsert(
+                "workspaces-2",
+                with_status(
+                    workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z"),
+                    WorkspaceStatus::Running,
+                ),
+            ),
+            cx,
+        );
+        // A late push from the previous connection's subscription.
+        store.handle_event(
+            workspace_upsert(
+                "workspaces-1",
+                with_status(
+                    workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z"),
+                    WorkspaceStatus::Failed,
+                ),
+            ),
+            cx,
+        );
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_a", "a", "/a")],
+            vec![workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z")],
+            Vec::new(),
+        )));
+        assert_eq!(
+            store.workspace("wks_a").map(|workspace| workspace.status),
+            Some(WorkspaceStatus::Running)
+        );
+
+        store.handle_event(
+            workspace_upsert(
+                "workspaces-1",
+                with_status(
+                    workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z"),
+                    WorkspaceStatus::Failed,
+                ),
+            ),
+            cx,
+        );
+        assert_eq!(
+            store.workspace("wks_a").map(|workspace| workspace.status),
+            Some(WorkspaceStatus::Running),
+            "pushes from a released subscription are ignored"
+        );
+    });
+}
+
+#[gpui::test]
+fn test_groups_workspaces_and_agents(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![
+                project("prj_b", "beta", "/b"),
+                project("prj_a", "Alpha", "/a"),
+                project("prj_empty", "empty", "/empty"),
+            ],
+            vec![
+                workspace("wks_old", "prj_a", "/a", "2026-11-14T08:00:00Z"),
+                workspace("wks_new", "prj_a", "/a", "2026-11-14T09:00:00Z"),
+                workspace("wks_b", "prj_b", "/b", "2026-11-14T09:00:00Z"),
+                // Its project is not known yet; it still gets a group.
+                workspace("wks_c", "prj_gamma", "/c", "2026-11-14T09:00:00Z"),
+            ],
+            vec![
+                agent("one", "wks_new", "running", json!({})),
+                agent(
+                    "two",
+                    "wks_new",
+                    "idle",
+                    json!({"pendingPermissions": [
+                        {"id": "p", "provider": "mock", "name": "bash", "kind": "tool"}
+                    ]}),
+                ),
+                agent("three", "wks_old", "idle", json!({})),
+            ],
+        )));
+
+        store.handle_event(
+            Event::Message(ServerMessage::AgentUpdate(AgentUpdate::Upsert {
+                subscription_id: Some("agents-2".into()),
+                agent: agent("four", "wks_b", "initializing", json!({})),
+                project: None,
+            })),
+            cx,
+        );
+        store.handle_event(
+            Event::Message(ServerMessage::AgentUpdate(AgentUpdate::Remove {
+                subscription_id: Some("agents-2".into()),
+                agent_id: "three".into(),
+            })),
+            cx,
+        );
+
+        let groups = store.project_groups();
+        let new_workspace = &groups[0].workspaces[0];
+        assert_eq!(new_workspace.workspace.id, "wks_new");
+        assert_eq!(new_workspace.agents.len(), 2);
+        assert_eq!(new_workspace.running_agent_count(), 1);
+        assert_eq!(new_workspace.pending_permission_count(), 1);
+        assert!(groups[0].workspaces[1].agents.is_empty());
+        assert_eq!(groups[1].workspaces[0].running_agent_count(), 1);
+    });
+
+    assert_eq!(
+        workspace_names(&store, cx),
+        vec![
+            (
+                "Alpha".to_string(),
+                vec!["wks_new".to_string(), "wks_old".to_string()]
+            ),
+            ("beta".to_string(), vec!["wks_b".to_string()]),
+            ("empty".to_string(), Vec::new()),
+            ("gamma".to_string(), vec!["wks_c".to_string()]),
+        ]
+    );
+}
+
+#[gpui::test]
+fn test_workspace_removal_updates_projects(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_a", "a", "/a"), project("prj_b", "b", "/b")],
+            vec![
+                workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z"),
+                workspace("wks_b", "prj_b", "/b", "2026-11-14T10:00:00Z"),
+            ],
+            Vec::new(),
+        )));
+        store.handle_event(
+            Event::Message(ServerMessage::WorkspaceUpdate(WorkspaceUpdate::Remove {
+                subscription_id: Some("workspaces-2".into()),
+                id: "wks_b".into(),
+                empty_project: None,
+                removed_project_id: Some("prj_b".into()),
+            })),
+            cx,
+        );
+        store.handle_event(
+            Event::Message(ServerMessage::WorkspaceUpdate(WorkspaceUpdate::Remove {
+                subscription_id: Some("workspaces-2".into()),
+                id: "wks_a".into(),
+                empty_project: Some(project("prj_a", "a renamed", "/a")),
+                removed_project_id: None,
+            })),
+            cx,
+        );
+    });
+    assert_eq!(
+        workspace_names(&store, cx),
+        vec![("a renamed".to_string(), Vec::new())]
+    );
+}
+
+#[gpui::test]
+fn test_disconnect_keeps_the_last_directory(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_a", "a", "/a")],
+            vec![workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z")],
+            Vec::new(),
+        )));
+        store.handle_event(
+            Event::Disconnected {
+                reason: "connection reset".into(),
+            },
+            cx,
+        );
+        assert!(matches!(
+            store.status(),
+            crate::ConnectionStatus::Disconnected(reason) if reason.as_ref() == "connection reset"
+        ));
+        assert!(store.workspace("wks_a").is_some());
+    });
+}
+
+#[gpui::test]
+async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    fs.insert_tree(path!("/other"), json!({ "lib.rs": "" }))
+        .await;
+    let other_project = Project::test(fs.clone(), [path!("/other").as_ref()], cx).await;
+    let sandbox_project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(other_project, window, cx));
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.test_add_workspace(sandbox_project, window, cx);
+    });
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        let other = multi_workspace
+            .workspaces()
+            .find(|workspace| root_is(workspace, path!("/other"), cx))
+            .cloned()
+            .unwrap();
+        multi_workspace.activate(other, None, window, cx);
+    });
+    cx.run_until_parked();
+
+    let sidebar = sidebar_with_directory(&multi_workspace, cx);
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.open_workspace("wks_second", window, cx);
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert!(root_is(multi_workspace.workspace(), path!("/sandbox"), cx));
+    });
+    sidebar.read_with(cx, |sidebar, cx| {
+        assert_eq!(
+            sidebar.highlighted_workspace(cx).as_deref(),
+            Some("wks_second"),
+            "the clicked row is highlighted even though another workspace shares its directory"
+        );
+    });
+}
+
+fn sidebar_with_directory(
+    multi_workspace: &Entity<MultiWorkspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<PaseoSidebar> {
+    let sidebar =
+        cx.update(|window, cx| cx.new(|cx| PaseoSidebar::new(multi_workspace.clone(), window, cx)));
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.store().update(cx, |store, _| {
+            store.begin_sync();
+            store.finish_sync(Ok(snapshot(
+                vec![project("prj_sandbox", "sandbox", path!("/sandbox"))],
+                vec![
+                    workspace(
+                        "wks_first",
+                        "prj_sandbox",
+                        path!("/sandbox"),
+                        "2026-11-14T09:00:00Z",
+                    ),
+                    workspace(
+                        "wks_second",
+                        "prj_sandbox",
+                        path!("/sandbox"),
+                        "2026-11-14T10:00:00Z",
+                    ),
+                ],
+                Vec::new(),
+            )));
+        });
+        assert!(!sidebar.has_notifications(cx));
+    });
+    sidebar
+}
+
+fn root_is(workspace: &Entity<workspace::Workspace>, path: &str, cx: &gpui::App) -> bool {
+    workspace.read(cx).root_paths(cx).as_slice() == [Path::new(path).into()]
+}

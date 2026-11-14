@@ -4,9 +4,9 @@
 #   script/pazedo/screenshot                     # newest target/*/zed process -> /tmp/pazedo-screenshot.png
 #   script/pazedo/screenshot -p <pid> -o out.png
 #
-# Captures by window id rather than the whole display so that other windows on the screen
-# (which may cover Zed) don't end up in the image. Needs Screen Recording permission for the
-# app responsible for this process; see docs/pazedo/development.md.
+# Captures by window id rather than the whole display so that other windows don't end up in
+# the image. Needs Screen Recording (capture) and Accessibility (raising the window) permission
+# for the app responsible for this process; see docs/pazedo/development.md.
 set -eu
 
 pid=""
@@ -27,6 +27,15 @@ if [ -z "$pid" ]; then
     echo "no running target/*/zed process; pass -p <pid>" >&2
     exit 1
   fi
+fi
+
+# gpui stops drawing a window that is fully covered, so a covered window yields a stale frame.
+# Raising it needs Accessibility permission for the app this runs under (Terminal.app here).
+if ! osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1; then
+  echo "warning: could not bring pid $pid to the front (grant Accessibility to the terminal app);" \
+    "if its window is covered, this image is stale" >&2
+else
+  sleep 1
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

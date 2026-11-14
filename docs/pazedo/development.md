@@ -42,8 +42,16 @@ time and watch `df -h`.
 ## Running a dev build
 
 ```sh
-target/debug/zed ~/dev/pazedo-sandbox
+cargo build -p zed
+script/pazedo/run-dev ~/dev/pazedo-sandbox     # stops a running dev build first
 ```
+
+`run-dev` starts the build with `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868`, the test daemon, unless
+the variable is already set. pazedo connects to Paseo only when that variable is set, so a
+plain `target/debug/zed` shows "Not connected" in the sidebar and never reaches the real daemon.
+
+The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorkspace` hides the
+sidebar when `disable_ai` is set or the agent is disabled).
 
 Open a project other than this repository: a dev build that opens the Zed repo itself runs
 rust-analyzer with `cargo run`'s environment and invalidates the build cache. Errors in
@@ -64,11 +72,20 @@ It captures one window by id (`screencapture -l`, id found by `window_id.swift`)
 covering Zed don't matter and the rest of the screen is not captured. Zed also owns invisible
 helper windows, so the script picks the largest on-screen one.
 
+gpui does not redraw a window that is fully covered by other windows (it tracks
+`NSWindowOcclusionState`), so `screencapture -l` of a covered window returns the last frame
+drawn, which can be minutes old. Verified 2026-11-14: two captures 20 s apart were
+byte-identical while the window sat behind Terminal, although the Paseo data had changed. The
+script therefore raises the window with System Events first and warns when it cannot. macOS 14+
+refuses `NSRunningApplication.activate` from another process, and `open` did not bring the
+dev build to the front either.
+
 Permission: macOS grants Screen Recording to the *responsible* app of a process. Agents run
 under the Paseo daemon, and the daemon was started with `paseo daemon start` from Terminal.app,
 so Terminal.app is the app that needs the permission (granted in System Settings › Privacy &
 Security › Screen & System Audio Recording; Paseo.app is in the list too). After changing the
-permission, restart the daemon from Terminal. If the daemon is started another way,
+permission, restart the daemon from Terminal. Raising and clicking windows (System Events) also
+needs Terminal.app in Privacy & Security › Accessibility. If the daemon is started another way,
 `screencapture` fails with `could not create image from display`.
 
 ## Paseo test daemon

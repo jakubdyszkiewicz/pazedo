@@ -1,0 +1,45 @@
+#!/bin/sh
+# Starts the dev build of pazedo, connected to the Paseo test daemon by default.
+#
+#   script/pazedo/run-dev [paths...]
+#
+# Stops any running dev instance first. The binary is wrapped in a minimal app bundle under
+# target/ and started with `open`, so it runs as a regular app and `--env` can pass the endpoint.
+# It may still start behind other windows; script/pazedo/screenshot raises it before capturing.
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+profile="${PAZEDO_PROFILE:-debug}"
+binary="$repo/target/$profile/zed"
+bundle="$repo/target/$profile/PazedoDev.app"
+endpoint="${PAZEDO_PASEO_ENDPOINT:-127.0.0.1:6868}"
+
+if [ ! -x "$binary" ]; then
+  echo "$binary not found; run cargo build -p zed first" >&2
+  exit 1
+fi
+
+mkdir -p "$bundle/Contents/MacOS"
+ln -sf "$binary" "$bundle/Contents/MacOS/zed"
+cat > "$bundle/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>zed</string>
+  <key>CFBundleIdentifier</key><string>dev.pazedo.dev</string>
+  <key>CFBundleName</key><string>Pazedo Dev</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+
+pkill -f "$repo/target/[a-z]*/zed" 2>/dev/null && sleep 1 || true
+
+if [ "$#" -gt 0 ]; then
+  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" --args "$@"
+else
+  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint"
+fi
+echo "started $bundle (Paseo endpoint $endpoint)"

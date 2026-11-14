@@ -1,0 +1,39 @@
+[package]
+name = "paseo_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/paseo_ui.rs"
+doctest = false
+
+[dependencies]
+agent_settings.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+collections.workspace = true
+futures.workspace = true
+gpui.workspace = true
+log.workspace = true
+paseo_client.workspace = true
+platform_title_bar.workspace = true
+settings.workspace = true
+theme.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+pretty_assertions.workspace = true
+project = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }

@@ -19,7 +19,8 @@ This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore i
 - Local only for now: there is no GitHub fork yet. The clone's remote for Zed is named
   `upstream` (not `origin`) so that a fork can be added as `origin` later without renaming.
 - Fork code goes into new crates and fork tooling into `script/pazedo/`. Crates so far:
-  `crates/paseo_client` (daemon protocol client; no gpui dependency). Planned: `paseo_ui`.
+  `crates/paseo_client` (daemon protocol client; no gpui dependency) and `crates/paseo_ui`
+  (the Paseo workspace sidebar and the store behind it).
   Upstream files are changed only where there is no seam, and every such change is listed
   under [Upstream touch points](#upstream-touch-points).
 
@@ -51,12 +52,12 @@ makes syncing tractable.
 
 | File | Change | Why |
 | --- | --- | --- |
-| `Cargo.toml` | `crates/paseo_client` in `members` and `[workspace.dependencies]` | Every new crate. Conflicts here are trivial: keep both sides, sorted. |
+| `Cargo.toml` | `crates/paseo_client`, `crates/paseo_ui` in `members` and `[workspace.dependencies]` | Every new crate. Conflicts here are trivial: keep both sides, sorted. |
+| `crates/zed/Cargo.toml` | `paseo_ui` dependency | For the sidebar registration below. |
+| `crates/zed/src/zed.rs` | In `initialize_workspace`, register `paseo_ui::PaseoSidebar` instead of `sidebar::Sidebar` and open it; drop the `use sidebar::Sidebar` import | The Paseo sidebar replaces the threads sidebar. The `sidebar` crate stays a dependency (`dump_workspace_info` is still used). |
 | `README.md` | Two `> [!IMPORTANT]` lines at the top | Required by upstream's `.rules` (symlinked as `CLAUDE.md`) whenever an agent modifies source files: a reminder that a human must review the change. Only a human removes them. |
 
 Planned (from the brief, not yet done):
 
-- `crates/zed/src/zed.rs`: register the Paseo sidebar instead of `sidebar::Sidebar`
-  (`multi_workspace.register_sidebar(...)`).
 - `crates/terminal/src/terminal.rs`: a terminal kind backed by a Paseo terminal stream next to
   `TerminalType::{Pty, DisplayOnly}`.
