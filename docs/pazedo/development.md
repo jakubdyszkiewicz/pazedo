@@ -36,8 +36,28 @@ with `/usr/bin/time -l`:
 The linker warns `__eh_frame section too large (max 16MB) to encode dwarf unwind offsets in
 compact unwind table`; harmless for development.
 
-Disk: each worktree has its own `target/` (24 GB+). Build in at most one or two worktrees at a
-time and watch `df -h`.
+Disk: the internal SSD is too small for Zed's build output (a day of debug builds grew
+`target/debug` to 108 GB, 60 GB of it `incremental/`). Since 2026-11-14 `target` is a symlink
+to `/Volumes/dev/pazedo-target` on the external SSD (APFS, USB, about 94 MB/s for many small
+files). The symlink keeps absolute paths unchanged, so cargo's fingerprints stayed valid when
+the directory moved. Builds fail while the disk is unplugged. `rm -rf target/debug/incremental`
+is a safe way to reclaim space: it is only cache. Each worktree has its own `target/`; point it
+at the external disk too.
+
+## Release app
+
+```sh
+script/pazedo/bundle --install      # release build, target/release/Pazedo.app, ~/Applications
+script/pazedo/bundle --skip-build --install   # re-bundle only, e.g. for another endpoint
+```
+
+Measured 2026-11-14 (first release build, `target` on the external disk): 20 min 41 s wall,
+2 h 9 min user CPU, peak RSS 8.2 GB (the thin-LTO link), `target/release` 18 GB, binary 374 MB,
+app 357 MB. The app is ad-hoc signed, on the dev channel (no auto-update), and keeps its data
+in `~/Library/Application Support/Pazedo`, so it can run next to a dev build. The endpoint is
+written into `Info.plist` when bundling (`PAZEDO_PASEO_ENDPOINT`, default the test daemon).
+First launch asks whether to trust the opened project (Zed's restricted mode), because the
+data directory is new.
 
 ## Running a dev build
 
@@ -45,6 +65,13 @@ time and watch `df -h`.
 cargo build -p zed
 script/pazedo/run-dev ~/dev/pazedo-sandbox     # stops a running dev build first
 ```
+
+`run-dev` copies the binary into `.pazedo-dev/PazedoDev.app` (git-excluded through
+`.git/info/exclude`) and starts that. Not `target/`: an app started from the external disk
+blocks until someone answers macOS's "access files on a removable volume" prompt. And not
+outside the repository: debug builds find their assets by walking up from the executable to
+the directory with `.git`. A debug build that panics still reads debug info from `target/`
+for the backtrace, which triggers that prompt.
 
 `run-dev` starts the build with `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868`, the test daemon, and
 `PAZEDO_AGENT_PROVIDER=mock` / `PAZEDO_AGENT_MODEL=one-minute-stream` for agents created from

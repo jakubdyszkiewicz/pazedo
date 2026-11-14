@@ -10,7 +10,8 @@
 #   script/pazedo/ui frame                        # window position and size in points
 set -eu
 
-pid=$(pgrep -n -f '/target/[a-z]+/zed( |$)' || true)
+# PAZEDO_UI_PID picks another process, e.g. an installed Pazedo.app.
+pid=${PAZEDO_UI_PID:-$(pgrep -n -f '(target/[a-z]+|PazedoDev.app/Contents/MacOS)/zed( |$)' || true)}
 if [ -z "$pid" ]; then
   echo "no running target/*/zed process" >&2
   exit 1

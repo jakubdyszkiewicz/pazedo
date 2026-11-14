@@ -13,6 +13,7 @@ Docs in this folder:
   it, with what was verified against a real daemon.
 - [agent-sessions.md](./agent-sessions.md): how Paseo agents are shown with Zed's thread UI.
 - [terminals.md](./terminals.md): how Paseo terminals are shown with Zed's terminal view.
+- [todo.md](./todo.md): open work, in priority order.
 
 This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore it.
 
@@ -59,6 +60,7 @@ makes syncing tractable.
 | `Cargo.toml` | `crates/paseo_client`, `crates/paseo_ui` in `members` and `[workspace.dependencies]` | Every new crate. Conflicts here are trivial: keep both sides, sorted. |
 | `crates/zed/Cargo.toml` | `paseo_ui` dependency | For the sidebar registration below. |
 | `crates/zed/src/zed.rs` | In `initialize_workspace`, register `paseo_ui::PaseoSidebar` instead of `sidebar::Sidebar` and open it; drop the `use sidebar::Sidebar` import | The Paseo sidebar replaces the threads sidebar. The `sidebar` crate stays a dependency (`dump_workspace_info` is still used). |
+| `crates/zed/src/main.rs` | Read the data directory from `PAZEDO_USER_DATA_DIR` when `--user-data-dir` is not given | `Pazedo.app` (`script/pazedo/bundle`) keeps its data apart from development builds. An app bundle cannot pass arguments, and a launcher script that adds them hides the app's windows from accessibility clients, so `Info.plist` sets the variable instead. Four lines. |
 | `crates/agent_ui/src/thread_metadata_store.rs` | `handle_conversation_event` returns early for threads whose agent id is `paseo` | Zed records every open thread in its own thread database; Paseo already owns these agents' history, and Zed could not reopen the entries. Five lines. |
 | `crates/terminal/src/terminal.rs` | `ForwardedInput`, a `forwarded_input_tx` field, `Terminal::forward_input`, two `else if` branches (in `write_to_pty` and the resize handler) and a test | A display-only terminal had nowhere to send keystrokes and resizes; with this, a Paseo terminal stream drives Zed's terminal view. About 30 lines plus the test, all additive. |
 | `README.md` | Two `> [!IMPORTANT]` lines at the top | Required by upstream's `.rules` (symlinked as `CLAUDE.md`) whenever an agent modifies source files: a reminder that a human must review the change. Only a human removes them. |

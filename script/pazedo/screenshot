@@ -22,7 +22,7 @@ while getopts "p:o:s:" option; do
 done
 
 if [ -z "$pid" ]; then
-  pid=$(pgrep -n -f '/target/[a-z]+/zed( |$)' || true)
+  pid=$(pgrep -n -f '(target/[a-z]+|PazedoDev.app/Contents/MacOS)/zed( |$)' || true)
   if [ -z "$pid" ]; then
     echo "no running target/*/zed process; pass -p <pid>" >&2
     exit 1

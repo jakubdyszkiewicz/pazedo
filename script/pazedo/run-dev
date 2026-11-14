@@ -3,15 +3,20 @@
 #
 #   script/pazedo/run-dev [paths...]
 #
-# Stops any running dev instance first. The binary is wrapped in a minimal app bundle under
-# target/ and started with `open`, so it runs as a regular app and `--env` can pass the endpoint.
+# Stops any running dev instance first. The binary is copied into a minimal app bundle in
+# .pazedo-dev/ (git-excluded) and started with `open`, so it runs as a regular app and `--env`
+# can pass the endpoint. Where the bundle lives matters:
+# - target/ is on the external disk, and an app started from a removable volume blocks in dyld
+#   until someone answers macOS's "access files on a removable volume" prompt;
+# - debug builds read their assets from the checkout, found by walking up from the executable
+#   to a directory with .git, so the bundle must sit inside the repository.
 # It may still start behind other windows; script/pazedo/screenshot raises it before capturing.
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 profile="${PAZEDO_PROFILE:-debug}"
 binary="$repo/target/$profile/zed"
-bundle="$repo/target/$profile/PazedoDev.app"
+bundle="$repo/.pazedo-dev/PazedoDev.app"
 endpoint="${PAZEDO_PASEO_ENDPOINT:-127.0.0.1:6868}"
 # Agents created from Zed use the test daemon's mock provider unless told otherwise.
 provider="${PAZEDO_AGENT_PROVIDER:-mock}"
@@ -22,8 +27,12 @@ if [ ! -x "$binary" ]; then
   exit 1
 fi
 
+pkill -f "$bundle/Contents/MacOS/zed" 2>/dev/null && sleep 1 || true
+grep -qx '/.pazedo-dev/' "$repo/.git/info/exclude" 2>/dev/null ||
+  echo '/.pazedo-dev/' >> "$repo/.git/info/exclude"
+rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS"
-ln -sf "$binary" "$bundle/Contents/MacOS/zed"
+cp "$binary" "$bundle/Contents/MacOS/zed"
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -37,8 +46,6 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-
-pkill -f "$repo/target/[a-z]*/zed" 2>/dev/null && sleep 1 || true
 
 # `open` passes no environment of its own; forward the optional overrides that are set.
 extra_env=""

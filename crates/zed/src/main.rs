@@ -268,7 +268,13 @@ fn main() {
         return;
     }
 
-    let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
+    // pazedo: an app bundle cannot pass arguments, so Pazedo.app sets this in its Info.plist to
+    // keep its data apart from development builds.
+    let user_data_dir = args
+        .user_data_dir
+        .clone()
+        .or_else(|| env::var("PAZEDO_USER_DATA_DIR").ok());
+    let restart_arguments = if let Some(directory) = user_data_dir.as_deref() {
         let directory = paths::set_custom_data_dir(directory);
         vec![
             std::ffi::OsString::from("--user-data-dir"),
