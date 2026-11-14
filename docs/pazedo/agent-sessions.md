@@ -2,8 +2,10 @@
 
 Clicking an agent in the Paseo sidebar opens its session in a center-pane tab rendered by
 Zed's own thread UI (`agent_ui::ConversationView`): streaming markdown, reasoning, tool call
-cards, plans, permission prompts, the message editor, queueing and the stop button. The
-**+** button on a workspace row starts a new agent there. Paseo owns the agents; Zed only
+cards (edits as real diffs), plans, permission prompts, the message editor, queueing and the
+stop button. The composer's dropdowns change the agent's model and mode. The **+** button on
+a workspace row opens a menu of the daemon's providers and their models and starts a new agent
+with the one picked. Paseo owns the agents; Zed only
 observes and steers them, so agents started from the phone, the CLI or other agents show up
 the same way.
 
@@ -27,9 +29,26 @@ same features.
     `AcpThread::update_session_state` from `turn_started` / `turn_completed` / `turn_failed` /
     `turn_canceled`, which is what makes turns started elsewhere look the same as local ones.
   - `cancel` sends `cancel_agent_request`. `new_session` sends `agent.create.request` for the
-    workspace's directory (provider from `PAZEDO_AGENT_PROVIDER`, default `claude`, model from
-    `PAZEDO_AGENT_MODEL`; a picker comes later).
+    workspace's directory with the provider and model chosen in the sidebar's + menu, handed
+    over through `PaseoConnection::set_next_new_agent` because `ConversationView` creates the
+    session itself (fallback: `PAZEDO_AGENT_PROVIDER`, default `claude`, and
+    `PAZEDO_AGENT_MODEL`).
+  - `session_config_options` exposes the agent's model (choices from the daemon's provider
+    snapshot) and mode (from the agent snapshot) as ACP config options, so Zed shows its own
+    dropdowns; changes go out as `set_agent_model_request` / `set_agent_mode_request`. The
+    provider is fixed after creation and not offered.
+  - History: the latest 2000 timeline *rows* (every streamed chunk is a row, so this is a
+    handful of turns to a few hundred); when there is more, the tab shows "Load Full History",
+    which reopens the session with all rows. `PAZEDO_AGENT_HISTORY_LIMIT` overrides the row
+    count.
   - Releasing the view only releases the timeline subscription; agents keep running.
+- Edits and writes become ACP diff content: one file change with the absolute path (relative
+  paths are joined with the agent's directory) and the hunks as a git patch. Zed matches the
+  file headers of a git patch literally against the reported path, so the headers are dropped
+  (a header-less patch is accepted for a single file). A provider's diff is only used when its
+  hunk line counts add up; otherwise the diff is generated from the edit's old and new text, and
+  only if neither works is it shown as text. Zed shows edit cards collapsed; the chevron opens
+  the diff.
 - Timeline items become ACP v2 values built from their wire JSON (the schema types are
   non-exhaustive builders; the wire format is the stable contract): user messages keyed by
   Paseo's `messageId`, assistant and reasoning deltas appended to one message until something
@@ -74,15 +93,19 @@ mock's own text runs one cycle into the next without a line break. The runner's
 `PAZEDO_SCREENSHOT_DUMP_ENTRIES=1` prints the thread's entries next to the view's, which
 settles whether something is missing or just scrolled away.
 
+Also verified on 2026-11-14 in the running app: the + menu lists the test daemon's providers
+(Claude, Codex, OpenCode and the dev-only Mock Load Test, which the daemon includes because
+pazedo advertises `all_providers`) with their models; picking a mock model opened a New Agent
+tab whose composer showed that model and created the agent with it; an edit card expanded to a
+syntax-highlighted diff of the right file; "Load Full History" (with the limit set to 5 rows)
+grew the thread from 20 to 82 entries.
+
 ## Known gaps
 
-- Only the last 200 timeline entries are loaded; no "load older" yet.
-- Edit diffs are shown as text, not as Zed's diff view (Paseo sends a unified diff; ACP's diff
-  content expects file changes plus a git patch).
 - Questions (`kind: question` permission requests) are shown as allow/deny.
-- No provider/model/mode picker, no images or file attachments in prompts (mentions are sent as
-  plain text).
+- No images or file attachments in prompts (mentions are sent as plain text). The thinking
+  level is not offered yet.
+- "Load Full History" reloads everything at once; there is no incremental paging.
 - A timeline gap is only logged; it should reload the session.
-- `agent_ui`'s `ThreadMetadataStore` records every `ConversationView`, so Paseo sessions also
-  land in Zed's own thread history database. Not filtered yet (would need a small upstream
-  edit).
+- Diffs generated from an edit's old and new text show snippet line numbers (`@@ -1 +1 @@`),
+  not the file's.

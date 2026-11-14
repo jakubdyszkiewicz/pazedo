@@ -6,9 +6,9 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
         Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement, AgentUpdate,
-        FetchAgents, FetchWorkspaces, ListProjects, Page, ProjectSummary, ProjectUpdate,
-        ServerInfo, ServerMessage, SetSessionEventSubscription, Subscribe, Workspace,
-        WorkspaceUpdate,
+        FetchAgents, FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page, ProjectSummary,
+        ProjectUpdate, ProviderEntry, ServerInfo, ServerMessage, SetSessionEventSubscription,
+        Subscribe, Workspace, WorkspaceUpdate,
     },
 };
 use std::{cmp::Reverse, sync::Arc};
@@ -58,6 +58,8 @@ pub struct PaseoStore {
     projects: BTreeMap<String, ProjectSummary>,
     workspaces: HashMap<String, Workspace>,
     agents: HashMap<String, Agent>,
+    providers: Vec<ProviderEntry>,
+    providers_task: Option<Task<()>>,
     subscriptions: DirectorySubscriptions,
     /// Pushes that arrive while a snapshot is being fetched. Their order relative to the
     /// snapshot response is not preserved between the two foreground tasks, so they are
@@ -143,6 +145,8 @@ impl PaseoStore {
             projects: BTreeMap::default(),
             workspaces: HashMap::default(),
             agents: HashMap::default(),
+            providers: Vec::new(),
+            providers_task: None,
             subscriptions: DirectorySubscriptions::default(),
             queued_messages: None,
             sync_task: None,
@@ -188,6 +192,37 @@ impl PaseoStore {
 
     pub fn agent(&self, id: &str) -> Option<&Agent> {
         self.agents.get(id)
+    }
+
+    /// Providers that can start agents, as last reported by the daemon.
+    pub fn providers(&self) -> &[ProviderEntry] {
+        &self.providers
+    }
+
+    pub fn provider(&self, provider: &str) -> Option<&ProviderEntry> {
+        self.providers
+            .iter()
+            .find(|entry| entry.provider == provider)
+    }
+
+    /// Fetches the provider snapshot again. Providers report `loading` until they have probed
+    /// their models, so callers refresh before showing choices.
+    pub fn refresh_providers(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone().filter(Client::is_connected) else {
+            return;
+        };
+        self.providers_task = Some(cx.spawn(async move |this, cx| {
+            match client.request(&GetProvidersSnapshot::default()).await {
+                Ok(snapshot) => {
+                    this.update(cx, |this, cx| {
+                        this.providers = snapshot.entries;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(error) => log::warn!("failed to load Paseo providers: {error:#}"),
+            }
+        }));
     }
 
     /// Several Paseo workspaces can share a directory; new agents go to the newest one.
@@ -293,6 +328,7 @@ impl PaseoStore {
             Event::Connected(server_info) => {
                 self.status = ConnectionStatus::Connected(server_info);
                 self.sync(cx);
+                self.refresh_providers(cx);
                 cx.emit(PaseoStoreEvent::Connected);
             }
             Event::Disconnected { reason } => {
@@ -461,6 +497,11 @@ impl PaseoStore {
             agents,
             subscriptions: DirectorySubscriptions::default(),
         }));
+        cx.notify();
+    }
+
+    pub fn set_providers(&mut self, providers: Vec<ProviderEntry>, cx: &mut Context<Self>) {
+        self.providers = providers;
         cx.notify();
     }
 

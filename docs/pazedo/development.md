@@ -48,7 +48,9 @@ script/pazedo/run-dev ~/dev/pazedo-sandbox     # stops a running dev build first
 
 `run-dev` starts the build with `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868`, the test daemon, and
 `PAZEDO_AGENT_PROVIDER=mock` / `PAZEDO_AGENT_MODEL=one-minute-stream` for agents created from
-Zed, unless the variables are already set. pazedo connects to Paseo only when that variable is set, so a
+Zed, unless the variables are already set. It also forwards `PAZEDO_AGENT_HISTORY_LIMIT` and
+`RUST_LOG` when set (`open` passes no other environment). With `PAZEDO_AGENT_PROVIDER` set, the
+sidebar's + menu lists that provider first. pazedo connects to Paseo only when that variable is set, so a
 plain `target/debug/zed` shows "Not connected" in the sidebar and never reaches the real daemon.
 
 The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorkspace` hides the
@@ -99,10 +101,14 @@ Terminal.app, granted 2026-11-14):
 script/pazedo/ui click 120 95      # coordinates as seen in a script/pazedo/screenshot image
 script/pazedo/ui key 53            # a macOS key code (53 is Escape, 36 is Return)
 script/pazedo/ui type "some text"  # types into the focused field
+script/pazedo/ui move 200 92       # hover only, e.g. to reveal a row's + button
+script/pazedo/ui scroll 200 600 -5 # scroll lines at a point; negative scrolls down
 script/pazedo/ui frame             # window position and size in points
 ```
 
-Clicks are real CoreGraphics mouse events (`click.swift`). System Events' `click at` does
+The scripts raise the window only when it is not already in front: raising an app that is in
+front re-activates it, which closes any open popover menu. Clicks are real CoreGraphics mouse
+events (`click.swift`). System Events' `click at` does
 nothing in Zed because it goes through the accessibility tree, which gpui windows do not expose.
 Verified 2026-11-14 against the test daemon: a mock agent started with `paseo-test run`
 appeared in the running app with a spinner without a restart, and clicking its workspace row

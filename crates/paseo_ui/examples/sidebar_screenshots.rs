@@ -207,6 +207,7 @@ mod screenshots {
                 PaseoAgentItem::open(
                     workspace,
                     (!new_agent).then(|| agent_id.to_string()),
+                    None,
                     title.into(),
                     window,
                     cx,
@@ -238,6 +239,14 @@ mod screenshots {
                     Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
                 })
                 .context("PAZEDO_SCREENSHOT_CLICK must be x,y")?;
+            // A real pointer hovers before it clicks; some controls only react once hovered.
+            cx.simulate_mouse_move(
+                window.into(),
+                point(px(x), px(y)),
+                None,
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
             cx.simulate_click(window.into(), point(px(x), px(y)), gpui::Modifiers::none());
             wait(cx, Duration::from_secs(12))?;
             capture(
@@ -317,6 +326,10 @@ mod screenshots {
                         println!(
                             "  {index}: {kind} user={user_text:?} view_editor={view_editor:?}"
                         );
+                        let debug = format!("{entry:?}");
+                        if debug.contains(":edit:") {
+                            println!("    {}", debug.chars().take(1500).collect::<String>());
+                        }
                     }
                 }
             }

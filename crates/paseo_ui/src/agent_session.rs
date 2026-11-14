@@ -8,14 +8,14 @@
 //! started here.
 
 use acp_thread::{
-    AcpThread, AgentConnection, MessageKind, PermissionRequestId, ReceiptSessionSubmissions,
-    ReceiptSubmission, SubmissionDisconnected,
+    AcpThread, AgentConnection, AgentSessionConfigOptions, MessageKind, PermissionRequestId,
+    ReceiptSessionSubmissions, ReceiptSubmission, SubmissionDisconnected,
 };
 use action_log::ActionLog;
 use agent_client_protocol::v2::schema as acp_v2;
 use agent_servers::{AgentServer, AgentServerDelegate};
 use anyhow::{Context as _, Result, anyhow, bail};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use gpui::{
     App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task, TaskExt as _,
     WeakEntity,
@@ -26,14 +26,19 @@ use paseo_client::{
         AgentSessionConfig, AgentStatus, AgentStream, AgentStreamEvent, CancelAgent, CreateAgent,
         FetchAgentTimeline, FetchAgentTimelineResponse, PermissionBehavior, PermissionRequest,
         PermissionResponse, ReleaseSubscription, RespondToPermission, SendAgentMessage,
-        SetAgentTimelineSubscription, TimelineDirection, TimelineItem, TimelineProjection,
-        TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
+        SetAgentMode, SetAgentModel, SetAgentTimelineSubscription, TimelineDirection, TimelineItem,
+        TimelineProjection, TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
     },
 };
 use project::{AgentId, Project};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::{any::Any, cell::RefCell, path::Path, rc::Rc};
+use std::{
+    any::Any,
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 use util::{ResultExt as _, path_list::PathList};
 
 use crate::store::{PaseoStore, PaseoStoreEvent};
@@ -43,9 +48,22 @@ pub const PASEO_AGENT_ID: &str = "paseo";
 pub const PROVIDER_ENV_VAR: &str = "PAZEDO_AGENT_PROVIDER";
 pub const MODEL_ENV_VAR: &str = "PAZEDO_AGENT_MODEL";
 const DEFAULT_PROVIDER: &str = "claude";
-const HISTORY_LIMIT: u32 = 200;
+/// Rows, not entries: every streamed chunk is a row, so a few turns can take hundreds. Paseo's
+/// app pages 40 at a time as you scroll back; Zed's thread view cannot page backwards, so this
+/// loads enough to cover recent work and the tab offers the rest.
+const HISTORY_LIMIT: u32 = 2000;
 /// Long tool output is shortened in tool cards; the full output stays in Paseo.
 const TOOL_OUTPUT_LIMIT: usize = 4000;
+
+/// How many timeline entries a session loads at first. `PAZEDO_AGENT_HISTORY_LIMIT` overrides
+/// it, which makes truncated history easy to try.
+fn history_limit() -> u32 {
+    std::env::var("PAZEDO_AGENT_HISTORY_LIMIT")
+        .ok()
+        .and_then(|limit| limit.parse().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(HISTORY_LIMIT)
+}
 
 /// An in-process "agent server" for `ConversationView`: connecting returns the shared
 /// [`PaseoConnection`].
@@ -83,12 +101,37 @@ type Sessions = Rc<RefCell<HashMap<String, Session>>>;
 pub struct PaseoConnection {
     store: Entity<PaseoStore>,
     sessions: Sessions,
+    /// Agents whose next load fetches their whole history instead of the latest entries.
+    full_history: RefCell<HashSet<String>>,
+    /// Provider and model for the next `new_session`. `ConversationView` creates the session
+    /// itself, so the choice made before opening the tab is handed over here.
+    next_new_agent: RefCell<Option<NewAgent>>,
     _store_subscription: Subscription,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewAgent {
+    pub provider: String,
+    pub model: Option<String>,
+}
+
+impl NewAgent {
+    /// `PAZEDO_AGENT_PROVIDER` / `PAZEDO_AGENT_MODEL`, or Claude with its default model.
+    pub fn from_env() -> Self {
+        Self {
+            provider: std::env::var(PROVIDER_ENV_VAR)
+                .unwrap_or_else(|_| DEFAULT_PROVIDER.to_string()),
+            model: std::env::var(MODEL_ENV_VAR).ok(),
+        }
+    }
 }
 
 /// One open agent: the thread showing it and the state needed to apply its live events.
 struct Session {
     thread: WeakEntity<AcpThread>,
+    /// Whether the loaded history stops short of the agent's first entry.
+    history_truncated: bool,
+    full_history: bool,
     stream: StreamState,
     /// While positive, live events are held instead of applied: during history loading, and
     /// between sending a message and the thread applying its acceptance. Paseo puts the user
@@ -122,10 +165,29 @@ impl PaseoConnection {
         let connection = Rc::new(Self {
             store,
             sessions,
+            full_history: RefCell::default(),
+            next_new_agent: RefCell::default(),
             _store_subscription: store_subscription,
         });
         cx.set_global(GlobalPaseoConnection(connection.clone()));
         connection
+    }
+
+    pub fn set_next_new_agent(&self, new_agent: NewAgent) {
+        *self.next_new_agent.borrow_mut() = Some(new_agent);
+    }
+
+    /// Whether the open session shows only the latest part of the agent's history.
+    pub fn history_truncated(&self, agent_id: &str) -> bool {
+        self.sessions
+            .borrow()
+            .get(agent_id)
+            .is_some_and(|session| session.history_truncated)
+    }
+
+    /// Makes the agent's next load fetch its whole history. The caller reopens the view.
+    pub fn request_full_history(&self, agent_id: &str) {
+        self.full_history.borrow_mut().insert(agent_id.to_string());
     }
 
     fn client(&self, cx: &App) -> Result<Client> {
@@ -144,10 +206,12 @@ impl PaseoConnection {
         title: Option<SharedString>,
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
+        let full_history = self.full_history.borrow().contains(&agent_id);
         let existing = self
             .sessions
             .borrow()
             .get(&agent_id)
+            .filter(|session| session.full_history || !full_history)
             .and_then(|session| session.thread.upgrade());
         if let Some(thread) = existing {
             return Task::ready(Ok(thread));
@@ -156,13 +220,16 @@ impl PaseoConnection {
             Ok(client) => client,
             Err(error) => return Task::ready(Err(error)),
         };
+        let agent = self.store.read(cx).agent(&agent_id).cloned();
         let title = title.or_else(|| {
-            self.store
-                .read(cx)
-                .agent(&agent_id)
+            agent
+                .as_ref()
                 .and_then(|agent| agent.title.clone())
                 .map(Into::into)
         });
+        let cwd = agent
+            .map(|agent| PathBuf::from(agent.cwd))
+            .or_else(|| work_dirs.paths().first().map(|path| path.to_path_buf()));
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
         let thread = cx.new(|cx| {
@@ -184,8 +251,20 @@ impl PaseoConnection {
             let sessions = self.sessions.clone();
             let store = self.store.downgrade();
             let agent_id = agent_id.clone();
+            let thread_id = thread.entity_id();
             move |_, cx| {
-                let removed = sessions.borrow_mut().remove(&agent_id);
+                // A reload may already have replaced this session with a newer one.
+                let removed = {
+                    let mut sessions = sessions.borrow_mut();
+                    let is_current = sessions
+                        .get(&agent_id)
+                        .is_some_and(|session| session.thread.entity_id() == thread_id);
+                    if is_current {
+                        sessions.remove(&agent_id)
+                    } else {
+                        None
+                    }
+                };
                 let subscription_id = removed.and_then(|session| session.timeline_subscription);
                 if let (Some(subscription_id), Some(store)) = (subscription_id, store.upgrade())
                     && let Some(client) = store.read(cx).client()
@@ -204,7 +283,12 @@ impl PaseoConnection {
             agent_id.clone(),
             Session {
                 thread: thread.downgrade(),
-                stream: StreamState::default(),
+                history_truncated: false,
+                full_history,
+                stream: StreamState {
+                    cwd,
+                    ..StreamState::default()
+                },
                 holds: 1,
                 held: Vec::new(),
                 last_seq: None,
@@ -230,7 +314,8 @@ impl PaseoConnection {
                         agent_id: agent_id.clone(),
                         direction: TimelineDirection::Tail,
                         cursor: None,
-                        limit: Some(HISTORY_LIMIT),
+                        // 0 means every entry.
+                        limit: Some(if full_history { 0 } else { history_limit() }),
                         projection: TimelineProjection::Projected,
                         whole_turns: Some(true),
                     })
@@ -242,6 +327,7 @@ impl PaseoConnection {
                 Ok((subscription_id, history)) => {
                     if let Some(session) = sessions.borrow_mut().get_mut(&agent_id) {
                         session.timeline_subscription = subscription_id;
+                        session.history_truncated = history.has_older;
                     }
                     replay_history(&sessions, &store, &agent_id, &thread, history, cx);
                     Ok(thread)
@@ -288,12 +374,16 @@ impl AgentConnection for PaseoConnection {
             .read(cx)
             .newest_workspace_for_directory(Path::new(&cwd))
             .map(|workspace| workspace.id.clone());
+        let new_agent = self
+            .next_new_agent
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(NewAgent::from_env);
         let request = CreateAgent {
             config: AgentSessionConfig {
-                provider: std::env::var(PROVIDER_ENV_VAR)
-                    .unwrap_or_else(|_| DEFAULT_PROVIDER.to_string()),
+                provider: new_agent.provider,
                 cwd,
-                model: std::env::var(MODEL_ENV_VAR).ok(),
+                model: new_agent.model,
                 ..Default::default()
             },
             workspace_id,
@@ -356,6 +446,20 @@ impl AgentConnection for PaseoConnection {
         }))
     }
 
+    fn session_config_options(
+        &self,
+        session_id: &acp_v2::SessionId,
+        cx: &App,
+    ) -> Option<Rc<dyn AgentSessionConfigOptions>> {
+        let options = PaseoConfigOptions {
+            agent_id: session_id.0.to_string(),
+            store: self.store.downgrade(),
+            options: RefCell::default(),
+        };
+        *options.options.borrow_mut() = options.compute(cx);
+        Some(Rc::new(options))
+    }
+
     fn cancel(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Result<()> {
         let client = self.client(cx)?;
         let agent_id = session_id.0.to_string();
@@ -373,6 +477,170 @@ impl AgentConnection for PaseoConnection {
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
     }
+}
+
+const MODEL_OPTION: &str = "model";
+const MODE_OPTION: &str = "mode";
+
+/// The agent's model and mode as ACP config options, so Zed's own dropdowns change them.
+/// The provider cannot change after creation, so it is not offered.
+struct PaseoConfigOptions {
+    agent_id: String,
+    store: WeakEntity<PaseoStore>,
+    /// `config_options` gets no `App` to read the store with, so the options are computed when
+    /// the view asks for them and whenever a value is set.
+    options: RefCell<Vec<acp_v2::SessionConfigOption>>,
+}
+
+impl PaseoConfigOptions {
+    fn compute(&self, cx: &App) -> Vec<acp_v2::SessionConfigOption> {
+        let Some(store) = self.store.upgrade() else {
+            return Vec::new();
+        };
+        let store = store.read(cx);
+        let Some(agent) = store.agent(&self.agent_id) else {
+            return Vec::new();
+        };
+        config_options(agent, store.provider(&agent.provider))
+    }
+}
+
+impl AgentSessionConfigOptions for PaseoConfigOptions {
+    fn config_options(&self) -> Vec<acp_v2::SessionConfigOption> {
+        self.options.borrow().clone()
+    }
+
+    fn set_config_option(
+        &self,
+        config_id: acp_v2::SessionConfigId,
+        value: acp_v2::SessionConfigOptionValue,
+        cx: &mut App,
+    ) -> Task<Result<Vec<acp_v2::SessionConfigOption>>> {
+        let client = self
+            .store
+            .upgrade()
+            .and_then(|store| store.read(cx).client());
+        let agent_id = self.agent_id.clone();
+        let Some(value) = serde_json::to_value(&value).ok().and_then(|value| {
+            value
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }) else {
+            return Task::ready(Err(anyhow!("Unsupported value for {}", config_id.0)));
+        };
+        let config_id = config_id.0.to_string();
+        let options: Vec<acp_v2::SessionConfigOption> = self
+            .compute(cx)
+            .into_iter()
+            .map(|option| {
+                let mut value_json = serde_json::to_value(&option).unwrap_or_default();
+                if value_json["configId"] == config_id.as_str() {
+                    value_json["currentValue"] = Value::String(value.clone());
+                    wire(value_json)
+                } else {
+                    option
+                }
+            })
+            .collect();
+        *self.options.borrow_mut() = options.clone();
+        cx.background_spawn(async move {
+            let client = client.context("Not connected to Paseo")?;
+            let response = match config_id.as_str() {
+                MODEL_OPTION => {
+                    client
+                        .request(&SetAgentModel {
+                            agent_id,
+                            model_id: Some(value),
+                        })
+                        .await?
+                }
+                MODE_OPTION => {
+                    client
+                        .request(&SetAgentMode {
+                            agent_id,
+                            mode_id: value,
+                        })
+                        .await?
+                }
+                other => bail!("Paseo agents have no {other} option"),
+            };
+            if !response.accepted {
+                bail!(
+                    "Paseo did not apply the change: {}",
+                    response.error.unwrap_or_else(|| "no reason given".into())
+                );
+            }
+            Ok(options)
+        })
+    }
+}
+
+/// Model and mode selectors for an agent. The provider's models come from the daemon's
+/// provider snapshot; the agent's own snapshot lists its modes.
+fn config_options(
+    agent: &paseo_client::protocol::Agent,
+    provider: Option<&paseo_client::protocol::ProviderEntry>,
+) -> Vec<acp_v2::SessionConfigOption> {
+    let mut options = Vec::new();
+
+    let mut models: Vec<(String, String, Option<String>)> = provider
+        .map(|provider| {
+            provider
+                .models
+                .iter()
+                .filter(|model| model.is_selectable != Some(false))
+                .map(|model| {
+                    (
+                        model.id.clone(),
+                        model.label.clone(),
+                        model.description.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let current_model = agent.model.clone().or_else(|| {
+        provider
+            .and_then(|provider| provider.default_model())
+            .map(|model| model.id.clone())
+    });
+    if let Some(current_model) = current_model {
+        if !models.iter().any(|(id, _, _)| *id == current_model) {
+            models.insert(0, (current_model.clone(), current_model.clone(), None));
+        }
+        options.push(wire(json!({
+            "configId": MODEL_OPTION,
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": current_model,
+            "options": models
+                .into_iter()
+                .map(|(id, label, description)| {
+                    json!({"value": id, "name": label, "description": description})
+                })
+                .collect::<Vec<_>>(),
+        })));
+    }
+
+    if let Some(current_mode) = &agent.current_mode_id
+        && !agent.available_modes.is_empty()
+    {
+        options.push(wire(json!({
+            "configId": MODE_OPTION,
+            "name": "Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": current_mode,
+            "options": agent
+                .available_modes
+                .iter()
+                .map(|mode| json!({"value": mode.id, "name": mode.label, "description": mode.description}))
+                .collect::<Vec<_>>(),
+        })));
+    }
+    options
 }
 
 struct PaseoSubmissions {
@@ -580,6 +848,10 @@ fn replay_history(
     history: FetchAgentTimelineResponse,
     cx: &mut App,
 ) {
+    let cwd = sessions
+        .borrow()
+        .get(agent_id)
+        .and_then(|session| session.stream.cwd.clone());
     let mut updates = Vec::new();
     let mut last_key = None;
     for entry in &history.entries {
@@ -589,7 +861,7 @@ fn replay_history(
             TimelineItem::Reasoning { .. } => Some((MessageKind::Thought, key.clone())),
             _ => None,
         };
-        updates.extend(history_updates(&entry.item(), &key));
+        updates.extend(history_updates(&entry.item(), &key, cwd.as_deref()));
     }
 
     let agent = history
@@ -860,6 +1132,8 @@ fn apply_updates(thread: &Entity<AcpThread>, updates: Vec<ThreadUpdate>, cx: &mu
 /// (a tool call, a user message, a new turn) happens in between.
 #[derive(Default)]
 struct StreamState {
+    /// The agent's directory, which relative tool-call paths are resolved against.
+    cwd: Option<PathBuf>,
     turn: Option<String>,
     /// Paseo can announce `turn_completed` before `permission_resolved`, so resolving a
     /// permission only means "running again" while a turn is still active.
@@ -953,14 +1227,14 @@ impl StreamState {
                 self.assistant = None;
                 self.thought = None;
                 let key = self.new_key("item");
-                history_updates(other, &key)
+                history_updates(other, &key, self.cwd.as_deref())
             }
         }
     }
 }
 
 /// Updates for one complete timeline item. `key` identifies it when the item has no id.
-fn history_updates(item: &TimelineItem, key: &str) -> Vec<ThreadUpdate> {
+fn history_updates(item: &TimelineItem, key: &str, cwd: Option<&Path>) -> Vec<ThreadUpdate> {
     match item {
         TimelineItem::UserMessage { text, message_id } => vec![ThreadUpdate::User(wire(json!({
             "messageId": message_id.as_deref().unwrap_or(key),
@@ -977,7 +1251,7 @@ fn history_updates(item: &TimelineItem, key: &str) -> Vec<ThreadUpdate> {
             "content": [text_block(text)],
         })))],
         TimelineItem::ToolCall(tool_call) => {
-            vec![ThreadUpdate::ToolCall(tool_call_update(tool_call))]
+            vec![ThreadUpdate::ToolCall(tool_call_update(tool_call, cwd))]
         }
         TimelineItem::Todo { items } => vec![ThreadUpdate::Plan(plan(items))],
         TimelineItem::Error { message } => vec![ThreadUpdate::Assistant(wire(json!({
@@ -994,8 +1268,9 @@ fn history_updates(item: &TimelineItem, key: &str) -> Vec<ThreadUpdate> {
     }
 }
 
-fn tool_call_update(tool_call: &ToolCall) -> acp_v2::ToolCallUpdate {
+fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCallUpdate {
     let detail = tool_call.detail();
+    let diff = edit_diff(&detail, cwd);
     let (title, kind, body) = match &detail {
         ToolCallDetail::Shell {
             command,
@@ -1022,8 +1297,10 @@ fn tool_call_update(tool_call: &ToolCall) -> acp_v2::ToolCallUpdate {
         } => (
             format!("Edit {file_path}"),
             "edit",
+            // Without a resolvable path the diff can only be shown as text.
             unified_diff
                 .as_deref()
+                .filter(|_| diff.is_none())
                 .map(|diff| format!("```diff\n{}\n```", truncate(diff))),
         ),
         ToolCallDetail::Write { file_path, .. } => (format!("Write {file_path}"), "edit", None),
@@ -1075,10 +1352,126 @@ fn tool_call_update(tool_call: &ToolCall) -> acp_v2::ToolCallUpdate {
         "kind": kind,
         "status": status,
     });
+    let mut content = Vec::new();
+    if let Some(diff) = diff {
+        content.push(diff);
+    }
     if let Some(body) = body {
-        update["content"] = json!([{"type": "content", "content": text_block(&body)}]);
+        content.push(json!({"type": "content", "content": text_block(&body)}));
+    }
+    if !content.is_empty() {
+        update["content"] = Value::Array(content);
     }
     wire(update)
+}
+
+/// The hunks of a one-file unified diff without its file headers. Providers write git headers
+/// with paths relative to the repository (`a/src/main.rs`), which Zed compares literally with
+/// the absolute path reported for the change; a header-less patch for a single file change is
+/// accepted as is. Multi-file diffs are left to the text fallback.
+fn single_file_hunks(diff: &str) -> Option<String> {
+    let files = diff
+        .lines()
+        .filter(|line| line.starts_with("+++ ") || line.starts_with("diff --git "))
+        .count();
+    if files > 2 {
+        return None;
+    }
+    let start = diff.lines().position(|line| line.starts_with("@@"))?;
+    Some(diff.lines().skip(start).collect::<Vec<_>>().join("\n"))
+}
+
+/// Whether every hunk has as many old and new lines as its header claims.
+fn hunks_are_consistent(hunks: &str) -> bool {
+    fn count(range: &str) -> Option<u32> {
+        match range.split_once(',') {
+            Some((_, count)) => count.parse().ok(),
+            None => range.parse::<u32>().ok().map(|_| 1),
+        }
+    }
+    let mut expected: Option<(u32, u32)> = None;
+    let (mut old, mut new) = (0, 0);
+    let mut hunk_count = 0;
+    let matches = |expected: Option<(u32, u32)>, old: u32, new: u32| {
+        expected
+            .is_none_or(|(expected_old, expected_new)| expected_old == old && expected_new == new)
+    };
+    for line in hunks.lines() {
+        if let Some(header) = line.strip_prefix("@@ ") {
+            if !matches(expected, old, new) {
+                return false;
+            }
+            let mut ranges = header.split_whitespace();
+            let (Some(old_range), Some(new_range)) = (ranges.next(), ranges.next()) else {
+                return false;
+            };
+            let (Some(old_count), Some(new_count)) = (
+                old_range.strip_prefix('-').and_then(count),
+                new_range.strip_prefix('+').and_then(count),
+            ) else {
+                return false;
+            };
+            expected = Some((old_count, new_count));
+            (old, new) = (0, 0);
+            hunk_count += 1;
+        } else if line.starts_with('-') {
+            old += 1;
+        } else if line.starts_with('+') {
+            new += 1;
+        } else if line.starts_with(' ') {
+            old += 1;
+            new += 1;
+        } else if !line.starts_with('\\') {
+            return false;
+        }
+    }
+    hunk_count > 0 && matches(expected, old, new)
+}
+
+/// An edit or write as ACP diff content, which Zed renders as a diff with syntax highlighting.
+/// Paseo reports a unified diff, or the replaced and new text; ACP needs an absolute path and a
+/// git patch (hunks without file headers are accepted for a single file).
+fn edit_diff(detail: &ToolCallDetail, cwd: Option<&Path>) -> Option<Value> {
+    let (file_path, operation, patch) = match detail {
+        ToolCallDetail::Edit {
+            file_path,
+            old_string,
+            new_string,
+            unified_diff,
+        } => {
+            // A provider's own diff carries real line numbers, but Zed rejects a malformed one
+            // outright, so it is only used when its hunks add up.
+            let provided = unified_diff
+                .as_deref()
+                .and_then(single_file_hunks)
+                .filter(|hunks| hunks_are_consistent(hunks));
+            let patch = match (provided, old_string, new_string) {
+                (Some(hunks), _, _) => hunks,
+                (None, Some(old), Some(new)) => language::unified_diff(old, new),
+                _ => return None,
+            };
+            (file_path, "modify", patch)
+        }
+        ToolCallDetail::Write {
+            file_path,
+            content: Some(content),
+        } => (file_path, "add", language::unified_diff("", content)),
+        _ => return None,
+    };
+    if patch.trim().is_empty() {
+        return None;
+    }
+    let path = Path::new(file_path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd?.join(path)
+    };
+    Some(json!({
+        "type": "diff",
+        "changes": [{"operation": operation, "path": path}],
+        "patch": {"format": "git_patch", "text": patch},
+    }))
 }
 
 fn plan(items: &[TodoItem]) -> acp_v2::PlanItems {
@@ -1238,6 +1631,7 @@ mod tests {
                     "status": status, "error": error, "detail": detail,
                 })),
                 "k",
+                Some(Path::new("/repo")),
             )
             .remove(0) else {
                 panic!("expected a tool call");
@@ -1266,6 +1660,59 @@ mod tests {
         assert_eq!(edit["title"], "Edit src/main.rs");
         assert_eq!(edit["kind"], "edit");
         assert_eq!(edit["status"], "completed");
+        // Relative paths resolve against the agent's directory; the diff replaces the text body.
+        assert_eq!(
+            edit["content"],
+            json!([{
+                "type": "diff",
+                "changes": [{"operation": "modify", "path": "/repo/src/main.rs"}],
+                "patch": {"format": "git_patch", "text": "@@ -1 +1 @@\n-a\n+b"},
+            }])
+        );
+
+        let git = tool_call(
+            json!({"type": "edit", "filePath": "src/main.rs",
+                   "unifiedDiff": "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-a\n+b"}),
+            "completed",
+            Value::Null,
+        );
+        assert_eq!(
+            git["content"][0]["patch"]["text"], "@@ -1 +1 @@\n-a\n+b",
+            "git headers are dropped"
+        );
+        assert!(hunks_are_consistent("@@ -1,2 +1,2 @@\n a\n-b\n+c"));
+        // The mock provider's synthetic diff claims more lines than it has; the diff is then
+        // generated from the old and new strings.
+        assert!(!hunks_are_consistent("@@ -42,7 +42,9 @@\n a\n-b\n+c"));
+        let mock = tool_call(
+            json!({"type": "edit", "filePath": "src/main.rs", "oldString": "b\n", "newString": "c\n",
+                   "unifiedDiff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -42,7 +42,9 @@\n a\n-b\n+c"}),
+            "completed",
+            Value::Null,
+        );
+        let patch = mock["content"][0]["patch"]["text"].as_str().unwrap();
+        assert!(!patch.contains("@@ -42"), "{patch}");
+        assert_eq!(
+            single_file_hunks("+++ b/a\n@@ -1 +1 @@\n+++ b/b\n@@ -1 +1 @@\n+++ b/c\n@@"),
+            None,
+            "multi-file diffs fall back to text"
+        );
+
+        let replaced = tool_call(
+            json!({"type": "edit", "filePath": "/abs/lib.rs", "oldString": "a\n", "newString": "b\n"}),
+            "completed",
+            Value::Null,
+        );
+        assert_eq!(replaced["content"][0]["changes"][0]["path"], "/abs/lib.rs");
+        let patch = replaced["content"][0]["patch"]["text"].as_str().unwrap();
+        assert!(patch.contains("-a") && patch.contains("+b"), "{patch}");
+
+        let written = tool_call(
+            json!({"type": "write", "filePath": "notes.md", "content": "hello\n"}),
+            "completed",
+            Value::Null,
+        );
+        assert_eq!(written["content"][0]["changes"][0]["operation"], "add");
 
         let unknown = tool_call(json!({"type": "brand_new"}), "running", Value::Null);
         assert_eq!(unknown["title"], "bash");
@@ -1323,6 +1770,56 @@ mod tests {
             PermissionResponse::Allow {
                 selected_action_id: Some("implement".into())
             }
+        );
+    }
+
+    #[test]
+    fn offers_the_providers_models_and_the_agents_modes() {
+        let agent: paseo_client::protocol::Agent = serde_json::from_value(json!({
+            "id": "a", "provider": "claude", "cwd": "/repo", "model": null,
+            "createdAt": "2026-11-14T10:00:00Z", "updatedAt": "2026-11-14T10:00:00Z",
+            "lastUserMessageAt": null, "status": "idle", "capabilities": {},
+            "currentModeId": "plan", "persistence": null, "title": null,
+            "availableModes": [{"id": "plan", "label": "Plan"}, {"id": "auto", "label": "Auto"}],
+        }))
+        .unwrap();
+        let provider: paseo_client::protocol::ProviderEntry = serde_json::from_value(json!({
+            "provider": "claude", "status": "ready", "label": "Claude",
+            "models": [
+                {"provider": "claude", "id": "opus", "label": "Opus", "isDefault": true},
+                {"provider": "claude", "id": "fable", "label": "Fable"},
+                {"provider": "claude", "id": "legacy", "label": "Legacy", "isSelectable": false},
+            ],
+        }))
+        .unwrap();
+        let options: Vec<Value> = config_options(&agent, Some(&provider))
+            .iter()
+            .map(|option| serde_json::to_value(option).unwrap())
+            .collect();
+        assert_eq!(options[0]["configId"], "model");
+        assert_eq!(
+            options[0]["currentValue"], "opus",
+            "no model set means the default"
+        );
+        assert_eq!(
+            options[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|option| option["value"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["opus", "fable"]
+        );
+        assert_eq!(options[1]["configId"], "mode");
+        assert_eq!(options[1]["currentValue"], "plan");
+
+        // Without a provider snapshot the agent's model is still shown.
+        let mut agent = agent;
+        agent.model = Some("custom".into());
+        let options = config_options(&agent, None);
+        assert_eq!(
+            serde_json::to_value(&options[0]).unwrap()["currentValue"],
+            "custom"
         );
     }
 

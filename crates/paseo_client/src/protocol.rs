@@ -259,6 +259,8 @@ pub struct Agent {
     pub active_turn: Option<ActiveTurn>,
     pub current_mode_id: Option<String>,
     #[serde(default)]
+    pub available_modes: Vec<AgentMode>,
+    #[serde(default)]
     pub pending_permissions: Vec<PermissionRequest>,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
@@ -270,6 +272,13 @@ pub struct Agent {
     pub last_error: Option<String>,
     #[serde(default)]
     pub provider_unavailable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AgentMode {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1131,6 +1140,117 @@ pub struct AgentTimelineReplacement {
     pub subscription_id: Option<String>,
     pub agent_id: String,
     pub epoch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAgentModel {
+    pub agent_id: String,
+    /// `None` returns to the provider's default model.
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActionResponse {
+    pub agent_id: String,
+    pub accepted: bool,
+    pub error: Option<String>,
+}
+
+impl Request for SetAgentModel {
+    const TYPE: &'static str = "set_agent_model_request";
+    const RESPONSE_TYPE: &'static str = "set_agent_model_response";
+    type Response = AgentActionResponse;
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAgentMode {
+    pub agent_id: String,
+    pub mode_id: String,
+}
+
+impl Request for SetAgentMode {
+    const TYPE: &'static str = "set_agent_mode_request";
+    const RESPONSE_TYPE: &'static str = "set_agent_mode_response";
+    type Response = AgentActionResponse;
+}
+
+/// The providers the daemon can run, with their models and modes. Without the
+/// `compact_provider_snapshots` capability the daemon answers with full entries.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetProvidersSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProvidersSnapshot {
+    pub entries: Vec<ProviderEntry>,
+}
+
+impl Request for GetProvidersSnapshot {
+    const TYPE: &'static str = "get_providers_snapshot_request";
+    const RESPONSE_TYPE: &'static str = "get_providers_snapshot_response";
+    type Response = ProvidersSnapshot;
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderEntry {
+    pub provider: String,
+    pub status: ProviderStatus,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub label: Option<String>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ProviderModel>,
+    #[serde(default)]
+    pub modes: Vec<AgentMode>,
+    pub default_mode_id: Option<String>,
+}
+
+impl ProviderEntry {
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.provider)
+    }
+
+    pub fn default_model(&self) -> Option<&ProviderModel> {
+        self.models
+            .iter()
+            .find(|model| model.is_default)
+            .or_else(|| self.models.first())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStatus {
+    Ready,
+    Loading,
+    Error,
+    Unavailable,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModel {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+    /// Hidden aliases and legacy ids are not offered for selection.
+    pub is_selectable: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------------------------

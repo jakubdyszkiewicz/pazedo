@@ -40,11 +40,22 @@ PLIST
 
 pkill -f "$repo/target/[a-z]*/zed" 2>/dev/null && sleep 1 || true
 
+# `open` passes no environment of its own; forward the optional overrides that are set.
+extra_env=""
+for name in PAZEDO_AGENT_HISTORY_LIMIT RUST_LOG; do
+  eval "value=\${$name:-}"
+  if [ -n "$value" ]; then
+    extra_env="$extra_env --env $name=$value"
+  fi
+done
+
 if [ "$#" -gt 0 ]; then
+  # shellcheck disable=SC2086
   open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" \
-    --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model" --args "$@"
+    --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model" $extra_env --args "$@"
 else
+  # shellcheck disable=SC2086
   open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" \
-    --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model"
+    --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model" $extra_env
 fi
 echo "started $bundle (Paseo endpoint $endpoint, new agents: $provider/$model)"

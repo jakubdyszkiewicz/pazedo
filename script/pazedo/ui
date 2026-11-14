@@ -5,6 +5,8 @@
 #   script/pazedo/ui key <key code> [modifiers]   # e.g. `ui key 53` (Escape), `ui key 36` (Return)
 #   script/pazedo/ui type <text>                  # types text into the focused field
 #   script/pazedo/ui click <x> <y>                # in screenshot coordinates (1600 px wide)
+#   script/pazedo/ui move <x> <y>                 # hover only, e.g. to reveal a row's buttons
+#   script/pazedo/ui scroll <x> <y> <lines>       # negative lines scroll down
 #   script/pazedo/ui frame                        # window position and size in points
 set -eu
 
@@ -19,8 +21,11 @@ frame() {
   osascript -e "tell application \"System Events\" to tell $process to get {position, size} of window 1" | tr -d ' '
 }
 
-osascript -e "tell application \"System Events\" to set frontmost of $process to true" >/dev/null
-sleep 0.3
+# Raising an app that is already in front still re-activates it, which closes open popovers.
+if [ "$(osascript -e "tell application \"System Events\" to get unix id of first process whose frontmost is true")" != "$pid" ]; then
+  osascript -e "tell application \"System Events\" to set frontmost of $process to true" >/dev/null
+  sleep 0.3
+fi
 
 case "${1:-}" in
   frame)
@@ -36,18 +41,26 @@ case "${1:-}" in
   type)
     osascript -e "tell application \"System Events\" to keystroke \"$2\""
     ;;
-  click)
+  click|move|scroll)
     # Screenshots are scaled to 1600 px wide; convert to screen points within the window.
     IFS=, read -r left top width height <<FRAME
 $(frame)
 FRAME
     x=$(( left + $2 * width / 1600 ))
     y=$(( top + $3 * width / 1600 ))
-    swift "$(dirname -- "$0")/click.swift" "$x" "$y"
-    echo "clicked at $x,$y"
+    if [ "$1" = scroll ]; then
+      swift "$(dirname -- "$0")/click.swift" --scroll "$4" "$x" "$y"
+      echo "scrolled $4 at $x,$y"
+    elif [ "$1" = move ]; then
+      swift "$(dirname -- "$0")/click.swift" --move "$x" "$y"
+      echo "moved to $x,$y"
+    else
+      swift "$(dirname -- "$0")/click.swift" "$x" "$y"
+      echo "clicked at $x,$y"
+    fi
     ;;
   *)
-    echo "usage: $0 frame | key <code> [modifiers] | type <text> | click <x> <y>" >&2
+    echo "usage: $0 frame | key <code> [modifiers] | type <text> | click|move <x> <y>" >&2
     exit 2
     ;;
 esac

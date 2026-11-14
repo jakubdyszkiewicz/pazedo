@@ -57,6 +57,7 @@ makes syncing tractable.
 | `Cargo.toml` | `crates/paseo_client`, `crates/paseo_ui` in `members` and `[workspace.dependencies]` | Every new crate. Conflicts here are trivial: keep both sides, sorted. |
 | `crates/zed/Cargo.toml` | `paseo_ui` dependency | For the sidebar registration below. |
 | `crates/zed/src/zed.rs` | In `initialize_workspace`, register `paseo_ui::PaseoSidebar` instead of `sidebar::Sidebar` and open it; drop the `use sidebar::Sidebar` import | The Paseo sidebar replaces the threads sidebar. The `sidebar` crate stays a dependency (`dump_workspace_info` is still used). |
+| `crates/agent_ui/src/thread_metadata_store.rs` | `handle_conversation_event` returns early for threads whose agent id is `paseo` | Zed records every open thread in its own thread database; Paseo already owns these agents' history, and Zed could not reopen the entries. Five lines. |
 | `README.md` | Two `> [!IMPORTANT]` lines at the top | Required by upstream's `.rules` (symlinked as `CLAUDE.md`) whenever an agent modifies source files: a reminder that a human must review the change. Only a human removes them. |
 
 Planned (from the brief, not yet done):

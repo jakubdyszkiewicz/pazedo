@@ -132,6 +132,19 @@ holds the next chunk of text (verified; history entries are merged). Other strea
   in the live event. The live event can arrive before the send's response.
 - `turn_completed` can arrive before `permission_resolved` for the same turn.
 
+### Providers, models and modes (verified 2026-11-14)
+
+- `get_providers_snapshot_request {cwd?}` returns `entries: [{provider, status
+  (ready|loading|error|unavailable), enabled, label, models: [{id, label, isDefault,
+  isSelectable?, ...}], modes: [{id, label}], defaultModeId}]`. Providers report `loading`
+  until they have probed their models. A client that advertises `all_providers` also gets the
+  dev-only `mock` provider on a dev daemon; one that does not (like a bare probe) does not.
+- An agent snapshot carries `model`, `currentModeId` and `availableModes`.
+- `set_agent_model_request {agentId, modelId}` and `set_agent_mode_request {agentId, modeId}`
+  answer with `{agentId, accepted, error}`.
+- `fetch_agent_timeline_request.limit` counts timeline rows, not projected entries: a limit of
+  200 returned about 20 merged entries for a mock agent. Paseo's app pages 40 rows at a time.
+
 ### Scripted mock prompts
 
 The `mock` provider (test daemon only) reacts to phrases in the prompt, which makes session UI

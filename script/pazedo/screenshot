@@ -31,7 +31,9 @@ fi
 
 # gpui stops drawing a window that is fully covered, so a covered window yields a stale frame.
 # Raising it needs Accessibility permission for the app this runs under (Terminal.app here).
-if ! osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1; then
+if [ "$(osascript -e "tell application \"System Events\" to get unix id of first process whose frontmost is true" 2>/dev/null)" = "$pid" ]; then
+  : # already in front; raising again would close open popovers
+elif ! osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1; then
   echo "warning: could not bring pid $pid to the front (grant Accessibility to the terminal app);" \
     "if its window is covered, this image is stale" >&2
 else

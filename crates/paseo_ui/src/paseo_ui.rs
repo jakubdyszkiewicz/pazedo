@@ -10,7 +10,9 @@ mod store;
 mod paseo_ui_tests;
 
 pub use agent_item::PaseoAgentItem;
-pub use agent_session::{MODEL_ENV_VAR, PROVIDER_ENV_VAR, PaseoAgentServer, PaseoConnection};
+pub use agent_session::{
+    MODEL_ENV_VAR, NewAgent, PROVIDER_ENV_VAR, PaseoAgentServer, PaseoConnection,
+};
 pub use sidebar::PaseoSidebar;
 pub use store::{
     ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, PaseoStoreEvent, ProjectGroup, WorkspaceEntry,

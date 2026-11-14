@@ -1277,6 +1277,11 @@ impl ThreadMetadataStore {
         if thread_ref.project().read(cx).is_via_collab() {
             return;
         }
+        // pazedo: Paseo owns its agents' history; recording them here would only leave stale
+        // entries that Zed cannot reopen.
+        if thread_ref.connection().agent_id().0.as_ref() == "paseo" {
+            return;
+        }
         let is_draft = thread_ref.is_draft_thread();
         let existing_thread = self.entry(thread_id);
 

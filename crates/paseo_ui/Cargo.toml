@@ -31,6 +31,7 @@ chrono.workspace = true
 collections.workspace = true
 futures.workspace = true
 gpui.workspace = true
+language.workspace = true
 log.workspace = true
 paseo_client.workspace = true
 platform_title_bar.workspace = true
