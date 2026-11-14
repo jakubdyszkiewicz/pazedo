@@ -1,0 +1,36 @@
+#!/bin/sh
+# Runs the Paseo CLI against an isolated test daemon, never the user's real one.
+#
+#   script/pazedo/paseo-test daemon run      # foreground; see docs/pazedo/development.md
+#   script/pazedo/paseo-test ls
+#   script/pazedo/paseo-test run --provider mock/ten-second-stream --cwd ~/dev/pazedo-sandbox "hi"
+#
+# Agents running under Paseo inherit PASEO_HOME/PASEO_AGENT_ID/..., which would point the CLI
+# at the real daemon, so all PASEO_* variables are cleared first.
+#
+# The bundled `paseo` launcher hard-codes PASEO_NODE_ENV=production, which hides the dev-only
+# `mock` agent provider, so this replicates the launcher's exec with `development`.
+set -eu
+
+PASEO_TEST_HOME="${PASEO_TEST_HOME:-$HOME/.paseo-pazedo-test}"
+PASEO_APP="${PASEO_APP:-/Applications/Paseo.app}"
+RESOURCES_DIR="$PASEO_APP/Contents/Resources"
+HELPER="$PASEO_APP/Contents/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper"
+RUNNER_PATH="$RESOURCES_DIR/app.asar.unpacked/dist/daemon/node-entrypoint-runner.js"
+CLI_ENTRYPOINT="$RESOURCES_DIR/app.asar/node_modules/@getpaseo/cli/dist/index.js"
+
+if [ ! -x "$HELPER" ]; then
+  echo "Paseo Helper not found at $HELPER (set PASEO_APP)" >&2
+  exit 1
+fi
+
+for name in $(env | sed -n 's/^\(PASEO_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$name"
+done
+
+mkdir -p "$PASEO_TEST_HOME"
+
+exec env ELECTRON_RUN_AS_NODE=1 PASEO_NODE_ENV=development \
+  PASEO_CLI="$RESOURCES_DIR/bin/paseo" \
+  "$HELPER" --disable-warning=DEP0040 "$RUNNER_PATH" node-script "$CLI_ENTRYPOINT" \
+  --home "$PASEO_TEST_HOME" "$@"

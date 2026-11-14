@@ -1,0 +1,41 @@
+#!/bin/sh
+# Captures the main window of a running dev build of Zed (or any process) to a PNG.
+#
+#   script/pazedo/screenshot                     # newest target/*/zed process -> /tmp/pazedo-screenshot.png
+#   script/pazedo/screenshot -p <pid> -o out.png
+#
+# Captures by window id rather than the whole display so that other windows on the screen
+# (which may cover Zed) don't end up in the image. Needs Screen Recording permission for the
+# app responsible for this process; see docs/pazedo/development.md.
+set -eu
+
+pid=""
+output="/tmp/pazedo-screenshot.png"
+max_size=1600
+while getopts "p:o:s:" option; do
+  case "$option" in
+    p) pid="$OPTARG" ;;
+    o) output="$OPTARG" ;;
+    s) max_size="$OPTARG" ;;
+    *) echo "usage: $0 [-p pid] [-o output.png] [-s max-size]" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$pid" ]; then
+  pid=$(pgrep -n -f '/target/[a-z]+/zed( |$)' || true)
+  if [ -z "$pid" ]; then
+    echo "no running target/*/zed process; pass -p <pid>" >&2
+    exit 1
+  fi
+fi
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+window_id=$(swift "$script_dir/window_id.swift" "$pid")
+if [ -z "$window_id" ]; then
+  echo "process $pid has no visible window" >&2
+  exit 1
+fi
+
+screencapture -x -o -l "$window_id" "$output"
+sips -Z "$max_size" "$output" --out "$output" > /dev/null
+echo "$output"
