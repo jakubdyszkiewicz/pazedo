@@ -29,10 +29,13 @@ messages, bump `PASEO_PROTOCOL_PACKAGE_VERSION`, and run the live tests.
   daemon closes a socket that sends no hello within 15 s, and rejects `protocolVersion < 1`.
 - The connection is up when `{"type":"status","payload":{"status":"server_info",...}}` arrives:
   `serverId`, `hostname`, `version`, `permissions`, and ~100 boolean `features` (verified).
-- Auth: none on a loopback daemon without a password (verified on the test daemon).
-  `auth: {kind: "password", password}` or `{kind: "localCredential", token}` otherwise; the
-  local credential is presumably `~/.paseo/local-credential` (unverified). How the real daemon
-  on the Tailscale address authenticates a client is **not verified yet**.
+- Auth: a daemon without a configured password admits every client as owner, without
+  credentials, whatever address it listens on (`resolveSessionAdmission` in the 0.15.4 bundle;
+  verified 2026-11-14 against the owner's real daemon on its Tailscale address, which has no
+  password). With a password, `hello.auth` must be `{kind: "password", password}` or
+  `{kind: "localCredential", token}`; the Paseo CLI reads the token from
+  `<paseo home>/local-credential` and the password from the host URI or `PASEO_PASSWORD`.
+  pazedo sends no `auth` yet.
 - Liveness: send `{"type":"ping"}` every 10 s; any inbound frame proves liveness. The daemon
   closes sockets that stop pinging for 45 s after their first ping. Paseo reconnects after
   `min(1.5 s × 2^attempt, 30 s)` and resets the attempt counter on `server_info`. pazedo uses the
@@ -144,6 +147,17 @@ holds the next chunk of text (verified; history entries are merged). Other strea
   answer with `{agentId, accepted, error}`.
 - `fetch_agent_timeline_request.limit` counts timeline rows, not projected entries: a limit of
   200 returned about 20 merged entries for a mock agent. Paseo's app pages 40 rows at a time.
+
+### Messages between agents (verified 2026-11-14, real daemon)
+
+When an agent starts another agent (`paseo run` from an agent's shell, or an orchestration tool), the new agent's
+prompt is not a `user_message`: it is a `tool_call` named `agent_message`, `callId`
+`paseo-agent-message:<uuid>`, with `agentMessage {event: message, sender: {id, serverId?,
+title?}, text}` and a `plain_text` detail holding the same text. Other `event`s (`finished`,
+`errored`, `permission-required`, `closed`) are news a parent receives about an agent it
+started. pazedo shows `message` as a user message headed "From agent “<sender title>”" and the
+others as cards titled after the event. Note also that `paseo run` called from inside an agent
+defaults to that agent's workspace; pass `--cwd` and `--new-workspace local` to start elsewhere.
 
 ### Scripted mock prompts
 

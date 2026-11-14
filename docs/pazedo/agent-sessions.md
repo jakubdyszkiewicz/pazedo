@@ -106,6 +106,15 @@ Thinking level, verified 2026-11-14 off screen against the test daemon: the comp
 Load Test · Low · Ten second stream; picking High in the dropdown set the agent's thinking to
 `high` on the daemon (`paseo-test ls`).
 
+Against the owner's real daemon with real Claude (2026-11-14, dev build via `run-dev` with
+`PAZEDO_PASEO_ENDPOINT=100.64.0.1:6767`): an agent started by another agent showed its
+prompt as "From agent “…”" (after adding that mapping); a Haiku agent asked to create a file
+raised a Write permission with the new content as a diff, Allow in pazedo let the turn finish
+and the file appeared in the project panel; the + menu listed Claude, Codex and OpenCode
+models and created a Claude Haiku 5.5 agent whose composer showed mode, thinking level and
+model; a six-hour Opus session with hundreds of tool calls opened and scrolled without
+problems.
+
 ## Known gaps
 
 - Questions (`kind: question` permission requests) are shown as allow/deny.

@@ -752,6 +752,37 @@ pub struct ToolCall {
     #[serde(default)]
     pub detail: Value,
     pub error: Option<Value>,
+    /// Set when the item is a message between agents rather than a tool call: the prompt an
+    /// agent received from the agent that started it (`message`), or news about an agent this
+    /// one started (`finished`, `errored`, ...). Paseo stores both as `agent_message` tool calls.
+    pub agent_message: Option<AgentMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AgentMessage {
+    pub event: AgentMessageEvent,
+    pub sender: AgentMessageSender,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentMessageEvent {
+    Message,
+    Finished,
+    Errored,
+    PermissionRequired,
+    Closed,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessageSender {
+    pub id: String,
+    pub server_id: Option<String>,
+    pub title: Option<String>,
 }
 
 impl ToolCall {

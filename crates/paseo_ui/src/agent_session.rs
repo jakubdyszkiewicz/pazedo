@@ -23,12 +23,12 @@ use gpui::{
 use paseo_client::{
     Client,
     protocol::{
-        AgentSessionConfig, AgentStatus, AgentStream, AgentStreamEvent, CancelAgent, CreateAgent,
-        FetchAgentTimeline, FetchAgentTimelineResponse, PermissionBehavior, PermissionRequest,
-        PermissionResponse, ReleaseSubscription, RespondToPermission, SendAgentMessage,
-        SetAgentMode, SetAgentModel, SetAgentThinking, SetAgentTimelineSubscription,
-        TimelineDirection, TimelineItem, TimelineProjection, TodoItem, ToolCall, ToolCallDetail,
-        ToolCallStatus,
+        AgentMessage, AgentMessageEvent, AgentSessionConfig, AgentStatus, AgentStream,
+        AgentStreamEvent, CancelAgent, CreateAgent, FetchAgentTimeline, FetchAgentTimelineResponse,
+        PermissionBehavior, PermissionRequest, PermissionResponse, ReleaseSubscription,
+        RespondToPermission, SendAgentMessage, SetAgentMode, SetAgentModel, SetAgentThinking,
+        SetAgentTimelineSubscription, TimelineDirection, TimelineItem, TimelineProjection,
+        TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
     },
 };
 use project::{AgentId, Project};
@@ -1311,6 +1311,22 @@ fn history_updates(item: &TimelineItem, key: &str, cwd: Option<&Path>) -> Vec<Th
             "messageId": key,
             "content": [text_block(text)],
         })))],
+        TimelineItem::ToolCall(ToolCall {
+            call_id,
+            agent_message:
+                Some(AgentMessage {
+                    event: AgentMessageEvent::Message,
+                    sender,
+                    text,
+                }),
+            ..
+        }) => vec![ThreadUpdate::User(wire(json!({
+            "messageId": call_id,
+            "content": [text_block(&format!(
+                "From agent “{}”:\n\n{text}",
+                sender.title.as_deref().unwrap_or(&sender.id)
+            ))],
+        })))],
         TimelineItem::ToolCall(tool_call) => {
             vec![ThreadUpdate::ToolCall(tool_call_update(tool_call, cwd))]
         }
@@ -1332,63 +1348,87 @@ fn history_updates(item: &TimelineItem, key: &str, cwd: Option<&Path>) -> Vec<Th
 fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCallUpdate {
     let detail = tool_call.detail();
     let diff = edit_diff(&detail, cwd);
-    let (title, kind, body) = match &detail {
-        ToolCallDetail::Shell {
-            command,
-            output,
-            exit_code,
-            ..
-        } => (
-            // Zed renders an execute tool call's title as the command, in code style.
-            command.clone(),
-            "execute",
-            output.as_deref().map(|output| {
-                let mut body = format!("```\n{}\n```", truncate(output));
-                if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
-                    body.push_str(&format!("\nExit code {exit_code}"));
+    let (title, kind, body) = match (&tool_call.agent_message, &detail) {
+        (Some(message), _) => {
+            let agent = message
+                .sender
+                .title
+                .as_deref()
+                .unwrap_or(&message.sender.id);
+            let title = match message.event {
+                AgentMessageEvent::Message => format!("Message from agent “{agent}”"),
+                AgentMessageEvent::Finished => format!("Agent “{agent}” finished"),
+                AgentMessageEvent::Errored => format!("Agent “{agent}” failed"),
+                AgentMessageEvent::PermissionRequired => {
+                    format!("Agent “{agent}” needs a permission")
                 }
-                body
-            }),
-        ),
-        ToolCallDetail::Read { file_path, .. } => (format!("Read {file_path}"), "read", None),
-        ToolCallDetail::Edit {
-            file_path,
-            unified_diff,
-            ..
-        } => (
-            format!("Edit {file_path}"),
-            "edit",
-            // Without a resolvable path the diff can only be shown as text.
-            unified_diff
-                .as_deref()
-                .filter(|_| diff.is_none())
-                .map(|diff| format!("```diff\n{}\n```", truncate(diff))),
-        ),
-        ToolCallDetail::Write { file_path, .. } => (format!("Write {file_path}"), "edit", None),
-        ToolCallDetail::Search { query, content } => (
-            format!("Search {query}"),
-            "search",
-            content
-                .as_deref()
-                .map(|content| truncate(content).to_string()),
-        ),
-        ToolCallDetail::Fetch { url, result } => (
-            format!("Fetch {url}"),
-            "fetch",
-            result.as_deref().map(|result| truncate(result).to_string()),
-        ),
-        ToolCallDetail::SubAgent { description, .. } => (
-            description.clone().unwrap_or_else(|| "Sub-agent".into()),
-            "other",
-            None,
-        ),
-        ToolCallDetail::PlainText { label, text } => (
-            label.clone().unwrap_or_else(|| tool_call.name.clone()),
-            "other",
-            text.clone(),
-        ),
-        ToolCallDetail::Plan { text } => ("Plan".to_string(), "think", Some(text.clone())),
-        ToolCallDetail::Other(_) => (tool_call.name.clone(), "other", None),
+                AgentMessageEvent::Closed => format!("Agent “{agent}” closed"),
+                AgentMessageEvent::Unknown => format!("Agent “{agent}”"),
+            };
+            (
+                title,
+                "other",
+                Some(message.text.clone()).filter(|text| !text.is_empty()),
+            )
+        }
+        (None, detail) => match detail {
+            ToolCallDetail::Shell {
+                command,
+                output,
+                exit_code,
+                ..
+            } => (
+                // Zed renders an execute tool call's title as the command, in code style.
+                command.clone(),
+                "execute",
+                output.as_deref().map(|output| {
+                    let mut body = format!("```\n{}\n```", truncate(output));
+                    if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
+                        body.push_str(&format!("\nExit code {exit_code}"));
+                    }
+                    body
+                }),
+            ),
+            ToolCallDetail::Read { file_path, .. } => (format!("Read {file_path}"), "read", None),
+            ToolCallDetail::Edit {
+                file_path,
+                unified_diff,
+                ..
+            } => (
+                format!("Edit {file_path}"),
+                "edit",
+                // Without a resolvable path the diff can only be shown as text.
+                unified_diff
+                    .as_deref()
+                    .filter(|_| diff.is_none())
+                    .map(|diff| format!("```diff\n{}\n```", truncate(diff))),
+            ),
+            ToolCallDetail::Write { file_path, .. } => (format!("Write {file_path}"), "edit", None),
+            ToolCallDetail::Search { query, content } => (
+                format!("Search {query}"),
+                "search",
+                content
+                    .as_deref()
+                    .map(|content| truncate(content).to_string()),
+            ),
+            ToolCallDetail::Fetch { url, result } => (
+                format!("Fetch {url}"),
+                "fetch",
+                result.as_deref().map(|result| truncate(result).to_string()),
+            ),
+            ToolCallDetail::SubAgent { description, .. } => (
+                description.clone().unwrap_or_else(|| "Sub-agent".into()),
+                "other",
+                None,
+            ),
+            ToolCallDetail::PlainText { label, text } => (
+                label.clone().unwrap_or_else(|| tool_call.name.clone()),
+                "other",
+                text.clone(),
+            ),
+            ToolCallDetail::Plan { text } => ("Plan".to_string(), "think", Some(text.clone())),
+            ToolCallDetail::Other(_) => (tool_call.name.clone(), "other", None),
+        },
     };
     let error = tool_call.error.as_ref().map(|error| match error {
         Value::String(error) => error.clone(),
@@ -1681,6 +1721,38 @@ mod tests {
             keys(&updates),
             vec!["state running", "state requires_action", "state idle"]
         );
+    }
+
+    #[test]
+    fn messages_between_agents_are_not_shown_as_tool_calls() {
+        let agent_message = |event: &str| {
+            TimelineItem::from_value(&json!({
+                "type": "tool_call", "callId": format!("paseo-agent-message:{event}"),
+                "name": "agent_message", "status": "completed", "error": null,
+                "agentMessage": {"event": event, "sender": {"id": "a1", "title": "Planner"},
+                                 "text": "Fix the tests."},
+                "detail": {"type": "plain_text", "text": "Fix the tests.", "icon": "bot"},
+            }))
+        };
+
+        let prompt = history_updates(&agent_message("message"), "k", None);
+        let [ThreadUpdate::User(message)] = prompt.as_slice() else {
+            panic!("expected a user message, got {:?}", keys(&prompt));
+        };
+        assert_eq!(message.message_id.0.as_ref(), "paseo-agent-message:message");
+        assert_eq!(
+            serde_json::to_value(&message.content).unwrap()[0]["text"],
+            "From agent “Planner”:\n\nFix the tests."
+        );
+
+        let ThreadUpdate::ToolCall(finished) =
+            history_updates(&agent_message("finished"), "k", None).remove(0)
+        else {
+            panic!("expected a tool call");
+        };
+        let finished = serde_json::to_value(finished).unwrap();
+        assert_eq!(finished["title"], "Agent “Planner” finished");
+        assert_eq!(finished["content"][0]["content"]["text"], "Fix the tests.");
     }
 
     #[test]

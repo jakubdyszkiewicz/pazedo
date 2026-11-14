@@ -496,8 +496,14 @@ fn preview(value: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| value.to_string());
+    // PASEO_DEBUG_FULL=1 prints whole items, e.g. to see a new item shape.
+    let limit = if std::env::var("PASEO_DEBUG_FULL").is_ok() {
+        usize::MAX
+    } else {
+        100
+    };
     text.chars()
-        .take(100)
+        .take(limit)
         .collect::<String>()
         .replace('\n', " ")
 }
