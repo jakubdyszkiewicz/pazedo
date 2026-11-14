@@ -96,6 +96,42 @@ Workspace `status` is a bucket the daemon derives from its agents: pending permi
   last cursor on a gap or after reconnect; a new `epoch`, `reset`, or
   `agent.timeline.replacement` means rebuilding from the tail.
 
+### Timeline items and stream events
+
+History entries and live `timeline` events carry an `AgentTimelineItemPayload`:
+`user_message`, `assistant_message`, `reasoning`, `tool_call` (`callId`, `name`, `status`
+running/completed/failed/canceled, and a `detail` of type shell, read, edit (with
+`unifiedDiff`), write, search, fetch, sub_agent, plain_text, plan or unknown), `todo`, `error`,
+`notification`, `compaction` and `plugin`. Live `assistant_message` events are deltas: each
+holds the next chunk of text (verified; history entries are merged). Other stream events:
+`thread_started`, `turn_started`, `turn_completed`, `turn_failed`, `turn_canceled`,
+`permission_requested`, `permission_resolved`, `attention_required`. Typed in `protocol.rs` as
+`TimelineItem`, `ToolCallDetail` and `AgentStreamEvent`, with an `Other` fallback.
+
+### Creating agents and answering permissions (verified 2026-11-14)
+
+- `agent.create.request {config: {provider, cwd, model?, modeId?, title?}, workspaceId?,
+  initialPrompt?}` returns `agent.create.response {agent, error}`.
+- A permission request raised before a client subscribed to the timeline is not replayed as a
+  stream event; it is in the agent snapshot's `pendingPermissions`. A session view must read
+  pending permissions from the snapshot when it opens.
+- `agent_permission_response {agentId, requestId, response: {behavior: allow|deny,
+  selectedActionId?}}` has no response message; `requestId` is the permission request's own id.
+  The daemon then pushes `permission_resolved {requestId, resolution}` on the timeline and the
+  turn continues (`turn_completed` for the mock plan approval).
+- While a permission is pending the agent's `status` stays `running` with
+  `requiresAttention: false`; the pending permission itself is the signal.
+
+### Scripted mock prompts
+
+The `mock` provider (test daemon only) reacts to phrases in the prompt, which makes session UI
+testable without real accounts: "emit a synthetic plan approval" (a `plan` permission request
+with actions `implement`/allow and `dismiss`/deny; verified), "emit synthetic questions", "emit a
+synthetic turn failure", "replay a claude-shaped foreground shell tool call", "emit N agent
+stream updates", "emit N byte diff agent stream payload". Any other prompt streams a synthetic
+turn with text, reasoning and tool calls for the model's duration (`ten-second-stream`,
+`one-minute-stream`, ...). Read from the 0.15.4 bundle; only the plan approval was tried.
+
 ## Terminals (from sources; not verified live yet)
 
 - `subscribe_terminals_request {cwd, workspaceId?}`: `cwd` is required in 0.15.4. The first

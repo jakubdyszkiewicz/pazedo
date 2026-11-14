@@ -12,9 +12,11 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event,
     fake_daemon::smol_sleep,
     protocol::{
-        AgentFilter, AgentUpdate, FetchAgentTimeline, FetchAgents, FetchWorkspaces, ListProjects,
-        ProjectUpdate, ServerMessage, SetAgentTimelineSubscription, SetSessionEventSubscription,
-        Subscribe, SubscribeTerminals, TimelineDirection, TimelineProjection, WorkspaceUpdate,
+        AgentFilter, AgentSessionConfig, AgentStreamEvent, AgentUpdate, CreateAgent,
+        FetchAgentTimeline, FetchAgents, FetchWorkspaces, ListProjects, PermissionResponse,
+        ProjectUpdate, RespondToPermission, ServerMessage, SetAgentTimelineSubscription,
+        SetSessionEventSubscription, Subscribe, SubscribeTerminals, TimelineDirection,
+        TimelineProjection, WorkspaceUpdate,
     },
 };
 use std::time::{Duration, Instant};
@@ -61,6 +63,47 @@ fn main() -> Result<()> {
             "timeline" => {
                 let agent_id = args.get(1).context("timeline needs an agent id")?.clone();
                 timeline(&client, &mut events, agent_id, seconds_arg(&args, 2)?).await
+            }
+            "create" => {
+                let cwd = args.get(1).context("create needs a cwd")?.clone();
+                let prompt = args.get(2).context("create needs a prompt")?.clone();
+                let response = client
+                    .request(&CreateAgent {
+                        config: AgentSessionConfig {
+                            provider: "mock".into(),
+                            cwd,
+                            model: Some("ten-second-stream".into()),
+                            title: Some("paseo_debug".into()),
+                            ..Default::default()
+                        },
+                        initial_prompt: Some(prompt),
+                        ..Default::default()
+                    })
+                    .await?;
+                match (response.agent, response.error) {
+                    (Some(agent), _) => println!("created agent {} ({:?})", agent.id, agent.status),
+                    (None, error) => bail!("create failed: {error:?}"),
+                }
+                Ok(())
+            }
+            "respond" => {
+                let agent_id = args.get(1).context("respond needs an agent id")?.clone();
+                let request_id = args
+                    .get(2)
+                    .context("respond needs a permission id")?
+                    .clone();
+                let action_id = args.get(3).cloned();
+                client.notify(&RespondToPermission {
+                    agent_id,
+                    request_id,
+                    response: PermissionResponse::Allow {
+                        selected_action_id: action_id,
+                    },
+                })?;
+                // Give the notification time to be written before the process exits.
+                smol_sleep()(Duration::from_millis(500)).await;
+                println!("sent");
+                Ok(())
             }
             "terminals" => {
                 let cwd = args.get(1).context("terminals needs a cwd")?.clone();
@@ -146,6 +189,19 @@ async fn list_agents(client: &Client) -> Result<()> {
                 agent.workspace_id,
                 agent.title.as_deref().unwrap_or("")
             );
+            for permission in &agent.pending_permissions {
+                println!(
+                    "    pending permission id={} kind={:?} title={:?} actions={:?}",
+                    permission.id,
+                    permission.kind,
+                    permission.title,
+                    permission
+                        .actions
+                        .iter()
+                        .map(|action| (&action.id, action.behavior))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
     }
     Ok(())
@@ -294,12 +350,31 @@ async fn timeline(
     let deadline = Instant::now() + duration;
     while let Some(event) = next_event_before(events, deadline).await {
         if let Event::Message(ServerMessage::AgentStream(stream)) = event {
-            println!(
-                "  live seq={:?} {}: {}",
-                stream.seq,
-                stream.event_type().unwrap_or("?"),
-                preview(&stream.event)
-            );
+            match stream.event() {
+                AgentStreamEvent::PermissionRequested(request) => println!(
+                    "  live permission request id={} kind={:?} title={:?} actions={:?}",
+                    request.id,
+                    request.kind,
+                    request.title,
+                    request
+                        .actions
+                        .iter()
+                        .map(|action| (&action.id, &action.label, action.behavior))
+                        .collect::<Vec<_>>()
+                ),
+                AgentStreamEvent::PermissionResolved {
+                    request_id,
+                    resolution,
+                } => {
+                    println!("  live permission resolved id={request_id} {resolution}")
+                }
+                _ => println!(
+                    "  live seq={:?} {}: {}",
+                    stream.seq,
+                    stream.event_type().unwrap_or("?"),
+                    preview(&stream.event)
+                ),
+            }
         }
     }
     Ok(())

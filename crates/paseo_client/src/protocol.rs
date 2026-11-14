@@ -630,6 +630,372 @@ impl Request for CancelAgent {
     type Response = CancelAgentResponse;
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionConfig {
+    pub provider: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// Creates an agent in an existing workspace (or the workspace for `cwd`) and optionally starts
+/// its first turn.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAgent {
+    pub config: AgentSessionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentResponse {
+    pub agent: Option<Agent>,
+    pub error: Option<String>,
+}
+
+impl Request for CreateAgent {
+    const TYPE: &'static str = "agent.create.request";
+    const RESPONSE_TYPE: &'static str = "agent.create.response";
+    type Response = CreateAgentResponse;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "behavior",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum PermissionResponse {
+    Allow {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_action_id: Option<String>,
+    },
+    Deny {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selected_action_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        interrupt: Option<bool>,
+    },
+}
+
+/// Answers a pending permission request. `request_id` is the permission request's own id
+/// ([`PermissionRequest::id`]); the daemon announces the outcome with `agent_permission_resolved`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RespondToPermission {
+    pub agent_id: String,
+    pub request_id: String,
+    pub response: PermissionResponse,
+}
+
+impl Notification for RespondToPermission {
+    const TYPE: &'static str = "agent_permission_response";
+}
+
+/// One `AgentTimelineItemPayload`. History entries carry merged items; live `timeline` stream
+/// events carry deltas (an `assistant_message` event holds the next chunk of text).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TimelineItem {
+    UserMessage {
+        text: String,
+        message_id: Option<String>,
+    },
+    AssistantMessage {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolCall(ToolCall),
+    Todo {
+        items: Vec<TodoItem>,
+    },
+    Error {
+        message: String,
+    },
+    Notification {
+        level: String,
+        message: String,
+    },
+    /// Compaction markers, plugin items and anything newer than this crate.
+    Other(Value),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub status: ToolCallStatus,
+    #[serde(default)]
+    pub detail: Value,
+    pub error: Option<Value>,
+}
+
+impl ToolCall {
+    pub fn detail(&self) -> ToolCallDetail {
+        ToolCallDetail::from_value(&self.detail)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolCallDetail {
+    Shell {
+        command: String,
+        cwd: Option<String>,
+        output: Option<String>,
+        exit_code: Option<i64>,
+    },
+    Read {
+        file_path: String,
+        content: Option<String>,
+    },
+    Edit {
+        file_path: String,
+        old_string: Option<String>,
+        new_string: Option<String>,
+        unified_diff: Option<String>,
+    },
+    Write {
+        file_path: String,
+        content: Option<String>,
+    },
+    Search {
+        query: String,
+        content: Option<String>,
+    },
+    Fetch {
+        url: String,
+        result: Option<String>,
+    },
+    SubAgent {
+        description: Option<String>,
+        child_session_id: Option<String>,
+    },
+    PlainText {
+        label: Option<String>,
+        text: Option<String>,
+    },
+    Plan {
+        text: String,
+    },
+    Other(Value),
+}
+
+impl ToolCallDetail {
+    fn from_value(value: &Value) -> Self {
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        let required = |key: &str| text(key).unwrap_or_default();
+        match value.get("type").and_then(Value::as_str) {
+            Some("shell") => Self::Shell {
+                command: required("command"),
+                cwd: text("cwd"),
+                output: text("output"),
+                exit_code: value.get("exitCode").and_then(Value::as_i64),
+            },
+            Some("read") => Self::Read {
+                file_path: required("filePath"),
+                content: text("content"),
+            },
+            Some("edit") => Self::Edit {
+                file_path: required("filePath"),
+                old_string: text("oldString"),
+                new_string: text("newString"),
+                unified_diff: text("unifiedDiff"),
+            },
+            Some("write") => Self::Write {
+                file_path: required("filePath"),
+                content: text("content"),
+            },
+            Some("search") => Self::Search {
+                query: required("query"),
+                content: text("content"),
+            },
+            Some("fetch") => Self::Fetch {
+                url: required("url"),
+                result: text("result"),
+            },
+            Some("sub_agent") => Self::SubAgent {
+                description: text("description"),
+                child_session_id: text("childSessionId"),
+            },
+            Some("plain_text") => Self::PlainText {
+                label: text("label"),
+                text: text("text"),
+            },
+            Some("plan") => Self::Plan {
+                text: required("text"),
+            },
+            _ => Self::Other(value.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoItem {
+    pub text: String,
+    pub completed: bool,
+    pub status: Option<String>,
+}
+
+impl TimelineItem {
+    pub fn from_value(value: &Value) -> Self {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "type",
+            rename_all = "snake_case",
+            rename_all_fields = "camelCase"
+        )]
+        enum Known {
+            UserMessage {
+                text: String,
+                message_id: Option<String>,
+            },
+            AssistantMessage {
+                text: String,
+            },
+            Reasoning {
+                text: String,
+            },
+            Todo {
+                items: Vec<TodoItem>,
+            },
+            Error {
+                message: String,
+            },
+            Notification {
+                level: String,
+                message: String,
+            },
+        }
+
+        if value.get("type").and_then(Value::as_str) == Some("tool_call") {
+            return match serde_json::from_value::<ToolCall>(value.clone()) {
+                Ok(tool_call) => Self::ToolCall(tool_call),
+                Err(_) => Self::Other(value.clone()),
+            };
+        }
+        match serde_json::from_value::<Known>(value.clone()) {
+            Ok(Known::UserMessage { text, message_id }) => Self::UserMessage { text, message_id },
+            Ok(Known::AssistantMessage { text }) => Self::AssistantMessage { text },
+            Ok(Known::Reasoning { text }) => Self::Reasoning { text },
+            Ok(Known::Todo { items }) => Self::Todo { items },
+            Ok(Known::Error { message }) => Self::Error { message },
+            Ok(Known::Notification { level, message }) => Self::Notification { level, message },
+            Err(_) => Self::Other(value.clone()),
+        }
+    }
+}
+
+/// One `AgentStreamEventPayload` pushed on an agent timeline subscription.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentStreamEvent {
+    TurnStarted {
+        turn_id: Option<String>,
+    },
+    TurnCompleted {
+        turn_id: Option<String>,
+    },
+    TurnFailed {
+        turn_id: Option<String>,
+        error: String,
+    },
+    TurnCanceled {
+        turn_id: Option<String>,
+        reason: String,
+    },
+    Timeline {
+        item: TimelineItem,
+        turn_id: Option<String>,
+    },
+    PermissionRequested(PermissionRequest),
+    PermissionResolved {
+        request_id: String,
+        resolution: Value,
+    },
+    AttentionRequired {
+        reason: AttentionReason,
+    },
+    /// `thread_started` and anything newer than this crate.
+    Other(Value),
+}
+
+impl AgentStreamEvent {
+    pub fn from_value(value: &Value) -> Self {
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        match value.get("type").and_then(Value::as_str) {
+            Some("turn_started") => Self::TurnStarted {
+                turn_id: text("turnId"),
+            },
+            Some("turn_completed") => Self::TurnCompleted {
+                turn_id: text("turnId"),
+            },
+            Some("turn_failed") => Self::TurnFailed {
+                turn_id: text("turnId"),
+                error: text("error").unwrap_or_default(),
+            },
+            Some("turn_canceled") => Self::TurnCanceled {
+                turn_id: text("turnId"),
+                reason: text("reason").unwrap_or_default(),
+            },
+            Some("timeline") => match value.get("item") {
+                Some(item) => Self::Timeline {
+                    item: TimelineItem::from_value(item),
+                    turn_id: text("turnId"),
+                },
+                None => Self::Other(value.clone()),
+            },
+            Some("permission_requested") => {
+                match value
+                    .get("request")
+                    .cloned()
+                    .map(serde_json::from_value::<PermissionRequest>)
+                {
+                    Some(Ok(request)) => Self::PermissionRequested(request),
+                    _ => Self::Other(value.clone()),
+                }
+            }
+            Some("permission_resolved") => Self::PermissionResolved {
+                request_id: text("requestId").unwrap_or_default(),
+                resolution: value.get("resolution").cloned().unwrap_or_default(),
+            },
+            Some("attention_required") => {
+                match value
+                    .get("reason")
+                    .cloned()
+                    .map(serde_json::from_value::<AttentionReason>)
+                {
+                    Some(Ok(reason)) => Self::AttentionRequired { reason },
+                    _ => Self::Other(value.clone()),
+                }
+            }
+            _ => Self::Other(value.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineCursor {
     pub epoch: String,
@@ -683,6 +1049,10 @@ pub struct TimelineEntry {
 impl TimelineEntry {
     pub fn item_type(&self) -> Option<&str> {
         self.item.get("type").and_then(Value::as_str)
+    }
+
+    pub fn item(&self) -> TimelineItem {
+        TimelineItem::from_value(&self.item)
     }
 }
 
@@ -747,6 +1117,10 @@ pub struct AgentStream {
 impl AgentStream {
     pub fn event_type(&self) -> Option<&str> {
         self.event.get("type").and_then(Value::as_str)
+    }
+
+    pub fn event(&self) -> AgentStreamEvent {
+        AgentStreamEvent::from_value(&self.event)
     }
 }
 
@@ -1131,6 +1505,62 @@ mod tests {
         assert_eq!(workspace.status, WorkspaceStatus::Unknown);
         assert_eq!(workspace.project_kind, ProjectKind::Unknown);
         assert_eq!(workspace.directory(), "/p");
+    }
+
+    #[test]
+    fn decodes_timeline_items_and_stream_events() {
+        // Shapes captured from a 0.15.4 daemon running the mock provider.
+        let tool_call = TimelineItem::from_value(&json!({
+            "type": "tool_call",
+            "callId": "call-1",
+            "name": "edit",
+            "status": "completed",
+            "error": null,
+            "detail": {"type": "edit", "filePath": "src/main.rs", "unifiedDiff": "@@ -1 +1 @@"}
+        }));
+        let TimelineItem::ToolCall(tool_call) = tool_call else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.status, ToolCallStatus::Completed);
+        assert!(matches!(
+            tool_call.detail(),
+            ToolCallDetail::Edit { file_path, unified_diff: Some(_), .. } if file_path == "src/main.rs"
+        ));
+
+        assert_eq!(
+            AgentStreamEvent::from_value(&json!({
+                "type": "timeline",
+                "provider": "mock",
+                "turnId": "t1",
+                "item": {"type": "assistant_message", "text": " Cycle 1"}
+            })),
+            AgentStreamEvent::Timeline {
+                item: TimelineItem::AssistantMessage {
+                    text: " Cycle 1".into()
+                },
+                turn_id: Some("t1".into()),
+            }
+        );
+        assert!(matches!(
+            AgentStreamEvent::from_value(&json!({
+                "type": "permission_requested",
+                "provider": "mock",
+                "request": {"id": "p1", "provider": "mock", "name": "ExitPlanMode", "kind": "plan",
+                            "actions": [{"id": "approve", "label": "Approve", "behavior": "allow"}]}
+            })),
+            AgentStreamEvent::PermissionRequested(request) if request.actions.len() == 1
+        ));
+        assert!(matches!(
+            TimelineItem::from_value(&json!({"type": "compaction", "status": "completed"})),
+            TimelineItem::Other(_)
+        ));
+        assert_eq!(
+            serde_json::to_value(PermissionResponse::Allow {
+                selected_action_id: Some("approve".into())
+            })
+            .unwrap(),
+            json!({"behavior": "allow", "selectedActionId": "approve"})
+        );
     }
 
     #[test]
