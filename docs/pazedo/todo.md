@@ -27,6 +27,11 @@ done; record decisions where the code or docs that implement them live.
 
 ## Daily-use gaps
 
+- `Pazedo.app` keeps settings and data in `~/Library/Application Support/Pazedo`, but on macOS
+  Zed's log (`~/Library/Logs/Zed/Zed.log`), cache (`~/Library/Caches/Zed`) and state
+  (`~/.local/state/Zed`) ignore the custom data directory, so the app and dev builds share them;
+  their logs interleave in one file. Fix in `crates/paths` if it gets in the way.
+
 - Opening an agent whose workspace is the pazedo repository itself switches the window to that
   repository; trust it only if rust-analyzer may build there.
 
