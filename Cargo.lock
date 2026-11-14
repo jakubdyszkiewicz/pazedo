@@ -12611,6 +12611,7 @@ dependencies = [
  "node_runtime",
  "paseo_client",
  "paseo_ui",
+ "picker",
  "platform_title_bar",
  "pretty_assertions",
  "project",

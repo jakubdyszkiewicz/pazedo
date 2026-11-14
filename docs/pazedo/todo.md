@@ -27,6 +27,14 @@ done; record decisions where the code or docs that implement them live.
 
 ## Daily-use gaps
 
+- New workspaces start without an agent; Paseo's app starts one right away with a first
+  prompt (`workspace.create.request` takes `agent` / `firstAgentContext`).
+- The new-workspace picker only branches off existing branches; no "check out a branch" or
+  pull request, and no custom branch name.
+- Adding a project uses the native folder dialog only; no GitHub clone
+  (`project.github.clone.request`) or "create a folder" (`project.create_directory.request`).
+- Archive workspaces and remove projects from the sidebar.
+
 - `Pazedo.app` keeps settings and data in `~/Library/Application Support/Pazedo`, but on macOS
   Zed's log (`~/Library/Logs/Zed/Zed.log`), cache (`~/Library/Caches/Zed`) and state
   (`~/.local/state/Zed`) ignore the custom data directory, so the app and dev builds share them;
@@ -43,10 +51,6 @@ done; record decisions where the code or docs that implement them live.
 
 - One pane only: no splits inside the panel yet (Zed's terminal panel has them).
 - The panel's dock position is not persisted; moving it to the right lasts until restart.
-- Closed agents (status `closed`, e.g. after a daemon restart) get tabs but open with an empty
-  history: the daemon returns no timeline entries for them. Paseo's app probably reloads them
-  with `refresh_agent_request`, which restarts the provider session; decide whether opening a
-  closed agent's tab should do that.
 - The panel's tab bar scrolls when a workspace has many agents; there is no overview of them.
 - Rename terminals from the panel.
 

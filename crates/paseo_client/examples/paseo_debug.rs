@@ -3,7 +3,7 @@
 //!   cargo run -p paseo_client --example paseo_debug -- [--endpoint 127.0.0.1:6868] <command>
 //!
 //! Commands: `info`, `workspaces`, `agents`, `watch [seconds]`, `timeline <agent-id> [seconds]`,
-//! `terminals <cwd> [workspace-id]`, `terminal-stream <cwd> [terminal-id] [restore-mode]`. The endpoint defaults to the isolated test daemon
+//! `terminals <cwd> [workspace-id]`, `raw <message type> [json body]`, `terminal-stream <cwd> [terminal-id] [restore-mode]`. The endpoint defaults to the isolated test daemon
 //! (docs/pazedo/development.md), never to the user's real daemon.
 
 use anyhow::{Context as _, Result, bail};
@@ -139,6 +139,17 @@ fn main() -> Result<()> {
                         terminal.id, terminal.name, terminal.title, terminal.workspace_id
                     );
                 }
+                Ok(())
+            }
+            // Any request, e.g. `raw branch_suggestions_request '{"cwd":"/repo"}'`.
+            "raw" => {
+                let message_type = args.get(1).context("raw needs a message type")?;
+                let body: serde_json::Value = match args.get(2) {
+                    Some(body) => serde_json::from_str(body).context("raw body must be JSON")?,
+                    None => serde_json::json!({}),
+                };
+                let response = client.request_raw(message_type, body).await?;
+                println!("{} {}", response.message_type, response.payload);
                 Ok(())
             }
             "terminal-stream" => {

@@ -184,6 +184,7 @@ pub struct Workspace {
     pub last_user_message_at: Option<String>,
     pub diff_stat: Option<DiffStat>,
     pub git_runtime: Option<GitRuntime>,
+    pub github_runtime: Option<GithubRuntime>,
 }
 
 impl Workspace {
@@ -208,6 +209,25 @@ pub struct GitRuntime {
     pub remote_url: Option<String>,
     pub is_paseo_owned_worktree: Option<bool>,
     pub is_dirty: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRuntime {
+    pub pull_request: Option<PullRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequest {
+    pub number: Option<u64>,
+    pub url: String,
+    pub title: String,
+    /// GitHub's state, e.g. `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    #[serde(default)]
+    pub is_merged: bool,
+    pub is_draft: Option<bool>,
 }
 
 /// A project as listed by `project.list.request`, or a project with no active workspaces.
@@ -1530,6 +1550,127 @@ impl Request for KillTerminal {
     type Response = KillTerminalResponse;
 }
 
+/// Reloads a closed agent: the daemon resumes its provider session and rebuilds its timeline,
+/// as "Reload agent" in Paseo's apps does.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshAgent {
+    pub agent_id: String,
+}
+
+/// The daemon answers with a `status` message (`agent_refreshed`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshAgentResponse {
+    pub status: String,
+    pub agent_id: Option<String>,
+}
+
+impl Request for RefreshAgent {
+    const TYPE: &'static str = "refresh_agent_request";
+    const RESPONSE_TYPE: &'static str = "status";
+    type Response = RefreshAgentResponse;
+}
+
+/// Creates a workspace: always a new one, never a lookup by directory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspace {
+    pub source: WorkspaceSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WorkspaceSource {
+    /// The project's existing checkout.
+    #[serde(rename_all = "camelCase")]
+    Directory {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
+    /// A new git worktree of the project, on a new branch off `ref_name` (the daemon names the
+    /// branch unless `branch_name` is given).
+    #[serde(rename_all = "camelCase")]
+    Worktree {
+        cwd: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        action: WorktreeAction,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ref_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch_name: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorktreeAction {
+    BranchOff,
+    Checkout,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceResponse {
+    pub workspace: Option<Workspace>,
+    pub setup_terminal_id: Option<String>,
+    pub error: Option<String>,
+}
+
+impl Request for CreateWorkspace {
+    const TYPE: &'static str = "workspace.create.request";
+    const RESPONSE_TYPE: &'static str = "workspace.create.response";
+    type Response = CreateWorkspaceResponse;
+}
+
+/// Branches of the repository at `cwd`, most recently committed first.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSuggestions {
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSuggestionsResponse {
+    #[serde(default)]
+    pub branches: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl Request for BranchSuggestions {
+    const TYPE: &'static str = "branch_suggestions_request";
+    const RESPONSE_TYPE: &'static str = "branch_suggestions_response";
+    type Response = BranchSuggestionsResponse;
+}
+
+/// Adds a directory as a project, without creating a workspace in it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddProject {
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddProjectResponse {
+    pub project: Option<ProjectSummary>,
+    pub error: Option<String>,
+}
+
+impl Request for AddProject {
+    const TYPE: &'static str = "project.add.request";
+    const RESPONSE_TYPE: &'static str = "project.add.response";
+    type Response = AddProjectResponse;
+}
+
 /// Closes agents and terminals the way closing their tabs in Paseo's apps does: agents are
 /// archived, terminals killed.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1721,6 +1862,37 @@ mod tests {
         assert_eq!(
             workspace.git_runtime.and_then(|git| git.current_branch),
             Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn encodes_workspace_creation_like_paseo_app() {
+        // The shapes `workspace.create.request` accepted on a 0.15.4 daemon.
+        let worktree = CreateWorkspace {
+            source: WorkspaceSource::Worktree {
+                cwd: "/repo".into(),
+                project_id: Some("prj_1".into()),
+                action: WorktreeAction::BranchOff,
+                ref_name: Some("main".into()),
+                branch_name: None,
+            },
+            title: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&worktree).unwrap(),
+            json!({"source": {"kind": "worktree", "cwd": "/repo", "projectId": "prj_1",
+                              "action": "branch-off", "refName": "main"}})
+        );
+        let local = CreateWorkspace {
+            source: WorkspaceSource::Directory {
+                path: "/repo".into(),
+                project_id: None,
+            },
+            title: Some("Fix tests".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            json!({"source": {"kind": "directory", "path": "/repo"}, "title": "Fix tests"})
         );
     }
 

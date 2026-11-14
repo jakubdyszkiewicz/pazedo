@@ -2,7 +2,7 @@ use agent_client_protocol::v2::schema as acp_v2;
 use agent_ui::{Agent, AgentConnectionStore, AgentThreadSource, ConversationView};
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Render,
-    SharedString, Subscription, WeakEntity, Window,
+    SharedString, Subscription, Task, WeakEntity, Window,
 };
 use project::{AgentId, Project};
 use std::{cell::Cell, rc::Rc};
@@ -11,9 +11,11 @@ use util::path_list::PathList;
 use workspace::{Item, Workspace};
 
 use crate::{
+    PaseoStore,
     agent_session::{NewAgent, PASEO_AGENT_ID, PaseoAgentServer, PaseoConnection},
     panel::PaseoPanel,
 };
+use paseo_client::protocol::AgentStatus;
 
 /// A Paseo agent session in a tab of the Paseo panel, rendered by Zed's thread UI.
 pub struct PaseoAgentItem {
@@ -31,6 +33,8 @@ pub struct PaseoAgentItem {
     focus_handle: FocusHandle,
     /// Set when pazedo removes the tab itself. Only a tab the user closes archives its agent.
     detached: Cell<bool>,
+    /// While a closed agent is being reloaded.
+    reloading: Option<Task<()>>,
     _conversation_subscription: Option<Subscription>,
 }
 
@@ -90,6 +94,7 @@ impl PaseoAgentItem {
             conversation_view: None,
             focus_handle: cx.focus_handle(),
             detached: Cell::new(false),
+            reloading: None,
             _conversation_subscription: None,
         }
     }
@@ -172,6 +177,75 @@ impl PaseoAgentItem {
             cx,
         );
         self.set_conversation_view(conversation_view, window, cx);
+    }
+
+    /// Resumes a closed agent (its provider session ended, e.g. when the daemon restarted), which
+    /// also brings back its history, then reopens the session; "Reload agent" in Paseo's apps.
+    fn reload_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.agent_id(cx) else {
+            return;
+        };
+        let refresh = PaseoStore::global(cx)
+            .read(cx)
+            .refresh_agent(agent_id.clone(), cx);
+        self.reloading = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = refresh.await;
+            this.update_in(cx, |this, window, cx| {
+                this.reloading = None;
+                match result {
+                    Ok(()) => {
+                        let conversation_view = build_conversation_view(
+                            Some(agent_id),
+                            this.title.clone(),
+                            this.workspace.clone(),
+                            this.project.clone(),
+                            this.work_dirs.clone(),
+                            window,
+                            cx,
+                        );
+                        this.set_conversation_view(conversation_view, window, cx);
+                    }
+                    Err(error) => {
+                        log::error!("could not reload Paseo agent {agent_id}: {error:#}");
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_closed_notice(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let reloading = self.reloading.is_some();
+        h_flex()
+            .flex_none()
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Label::new(
+                    "This agent's session is closed. Reload it to see its history and continue.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                Button::new(
+                    "paseo-reload-agent",
+                    if reloading {
+                        "Reloading…"
+                    } else {
+                        "Reload Agent"
+                    },
+                )
+                .label_size(LabelSize::Small)
+                .disabled(reloading)
+                .on_click(cx.listener(|this, _, window, cx| this.reload_agent(window, cx))),
+            )
     }
 
     /// For the screenshot runner's consistency checks.
@@ -280,12 +354,20 @@ impl Focusable for PaseoAgentItem {
 impl Render for PaseoAgentItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_conversation_view(window, cx);
-        let truncated = self
-            .agent_id(cx)
-            .is_some_and(|agent_id| PaseoConnection::global(cx).history_truncated(&agent_id));
+        let agent_id = self.agent_id(cx);
+        let truncated = agent_id
+            .as_ref()
+            .is_some_and(|agent_id| PaseoConnection::global(cx).history_truncated(agent_id));
+        let closed = agent_id.as_ref().is_some_and(|agent_id| {
+            PaseoStore::global(cx)
+                .read(cx)
+                .agent(agent_id)
+                .is_some_and(|agent| agent.status == AgentStatus::Closed)
+        });
         v_flex()
             .track_focus(&self.focus_handle)
             .size_full()
+            .when(closed, |this| this.child(self.render_closed_notice(cx)))
             .when(truncated, |this| {
                 this.child(
                     h_flex()

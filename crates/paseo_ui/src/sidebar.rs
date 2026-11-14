@@ -2,10 +2,12 @@ use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WID
 use chrono::{DateTime, Utc};
 use collections::HashSet;
 use gpui::{
-    App, Context, Decorations, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
-    ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, px,
+    App, Context, Decorations, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
+    Pixels, Render, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, px,
 };
-use paseo_client::protocol::{Workspace, WorkspaceKind, WorkspaceStatus};
+use paseo_client::protocol::{
+    Workspace, WorkspaceKind, WorkspaceSource, WorkspaceStatus, WorktreeAction,
+};
 use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
 use settings::Settings as _;
 use std::path::{Path, PathBuf};
@@ -17,9 +19,11 @@ use ui::{
 use util::path_list::PathList;
 use workspace::{
     CloseWindow, MultiWorkspace, MultiWorkspaceEvent, OpenMode, Sidebar, SidebarEvent, SidebarSide,
+    notifications::DetachAndPromptErr as _,
 };
 
 use crate::{
+    new_workspace::{NewWorkspaceChoice, open_new_workspace_picker},
     panel::PaseoPanel,
     store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry},
 };
@@ -149,6 +153,7 @@ impl PaseoSidebar {
             Tab::container_height(cx)
         };
 
+        let is_connected = matches!(self.store.read(cx).status(), ConnectionStatus::Connected(_));
         let (indicator_color, status_text): (Color, SharedString) =
             match self.store.read(cx).status() {
                 ConnectionStatus::Connected(server_info) => (
@@ -220,16 +225,114 @@ impl PaseoSidebar {
                         move |_window, cx| Tooltip::simple(tooltip.clone(), cx)
                     }),
             )
-            .when(right_window_controls, |this| {
-                this.child(div().flex_1()).children(
-                    platform_title_bar::render_right_window_controls(
-                        cx.button_layout(),
-                        Box::new(CloseWindow),
-                        window,
-                    ),
+            .child(div().flex_1())
+            .when(is_connected, |this| {
+                this.child(
+                    IconButton::new("paseo-add-project", IconName::Plus)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Add Project…"))
+                        .on_click(cx.listener(|this, _, window, cx| this.add_project(window, cx))),
                 )
             })
+            .when(right_window_controls, |this| {
+                this.children(platform_title_bar::render_right_window_controls(
+                    cx.button_layout(),
+                    Box::new(CloseWindow),
+                    window,
+                ))
+            })
             .into_any_element()
+    }
+
+    /// Asks where a new workspace of the project lives (its checkout, or a new worktree off a
+    /// branch), creates it and opens it.
+    fn new_workspace(
+        &mut self,
+        project_id: String,
+        project_name: SharedString,
+        root_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        let sidebar = cx.entity().downgrade();
+        workspace.update(cx, |workspace, cx| {
+            open_new_workspace_picker(
+                workspace,
+                project_name,
+                root_path.clone(),
+                move |choice, window, cx| {
+                    let source = match choice {
+                        NewWorkspaceChoice::Local => WorkspaceSource::Directory {
+                            path: root_path.clone(),
+                            project_id: Some(project_id.clone()),
+                        },
+                        NewWorkspaceChoice::Worktree { base_branch } => WorkspaceSource::Worktree {
+                            cwd: root_path.clone(),
+                            project_id: Some(project_id.clone()),
+                            action: WorktreeAction::BranchOff,
+                            ref_name: Some(base_branch),
+                            branch_name: None,
+                        },
+                    };
+                    sidebar
+                        .update(cx, |sidebar, cx| {
+                            sidebar.create_workspace(source, window, cx)
+                        })
+                        .ok();
+                },
+                window,
+                cx,
+            );
+        });
+    }
+
+    fn create_workspace(
+        &mut self,
+        source: WorkspaceSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let create = self
+            .store
+            .update(cx, |store, cx| store.create_workspace(source, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let workspace = create.await?;
+            this.update_in(cx, |this, window, cx| {
+                this.open_workspace(&workspace.id, window, cx);
+            })
+        })
+        .detach_and_prompt_err(
+            "Could not create the workspace",
+            window,
+            cx,
+            |error, _, _| Some(format!("{error:#}")),
+        );
+    }
+
+    /// Asks for a folder and adds it to Paseo as a project.
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add Project".into()),
+        });
+        let store = self.store.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let Some(path) = paths.await??.and_then(|paths| paths.into_iter().next()) else {
+                return Ok(());
+            };
+            store
+                .update(cx, |store, cx| store.add_project(path, cx))
+                .await
+        })
+        .detach_and_prompt_err("Could not add the project", window, cx, |error, _, _| {
+            Some(format!("{error:#}"))
+        });
     }
 
     fn connection_tooltip(&self, cx: &App) -> SharedString {
@@ -341,6 +444,30 @@ impl PaseoSidebar {
             .when(is_collapsed && attention_count > 0, |this| {
                 this.child(Indicator::dot().color(Color::Accent))
             })
+            .child(div().flex_1())
+            .child(
+                IconButton::new(
+                    SharedString::from(format!("paseo-new-workspace-{}", group.project_id)),
+                    IconName::Plus,
+                )
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("New Workspace…"))
+                .on_click(cx.listener({
+                    let project_id = group.project_id.clone();
+                    let name = group.name.clone();
+                    let root_path = group.root_path.clone();
+                    move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.new_workspace(
+                            project_id.clone(),
+                            name.clone(),
+                            root_path.to_string(),
+                            window,
+                            cx,
+                        );
+                    }
+                })),
+            )
             .tooltip(Tooltip::text(group.root_path.clone()))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if !this.collapsed_projects.remove(&project_id) {
@@ -400,24 +527,39 @@ impl PaseoSidebar {
             .git_runtime
             .as_ref()
             .and_then(|git| git.current_branch.clone());
-        // `name` is the branch unless the workspace was titled; show the branch only when it adds
-        // information.
-        let worktrees = match &branch {
-            Some(branch) if is_worktree || branch != &workspace.name => {
-                vec![ThreadItemWorktreeInfo {
-                    worktree_name: workspace.worktree_slug.clone().map(Into::into),
-                    branch_name: Some(branch.clone().into()),
-                    full_path: workspace.directory().to_string().into(),
-                    highlight_positions: Vec::new(),
-                    kind: if is_worktree {
-                        WorktreeKind::Linked
-                    } else {
-                        WorktreeKind::Main
-                    },
-                }]
-            }
-            _ => Vec::new(),
+        // A worktree shows its name, and its branch when that differs (the daemon names new
+        // worktrees and their branches alike); a checkout shows its branch. `ThreadItem` only
+        // renders linked worktrees, hence the kind for both.
+        let worktree_name = workspace.worktree_slug.clone().filter(|_| is_worktree);
+        let branch_name = branch.filter(|branch| Some(branch) != worktree_name.as_ref());
+        let worktrees = if worktree_name.is_some() || branch_name.is_some() {
+            vec![ThreadItemWorktreeInfo {
+                worktree_name: worktree_name.map(Into::into),
+                branch_name: branch_name.map(Into::into),
+                full_path: workspace.directory().to_string().into(),
+                highlight_positions: Vec::new(),
+                kind: WorktreeKind::Linked,
+            }]
+        } else {
+            Vec::new()
         };
+        let pull_request = workspace
+            .github_runtime
+            .as_ref()
+            .and_then(|github| github.pull_request.as_ref())
+            .and_then(|pull_request| {
+                let number = pull_request.number?;
+                let state = if pull_request.is_merged {
+                    " merged"
+                } else if pull_request.is_draft == Some(true) {
+                    " draft"
+                } else if pull_request.state.eq_ignore_ascii_case("closed") {
+                    " closed"
+                } else {
+                    ""
+                };
+                Some(format!("PR #{number}{state}"))
+            });
 
         let mut item = ThreadItem::new(
             SharedString::from(format!("paseo-workspace-{}", workspace.id)),
@@ -425,7 +567,7 @@ impl PaseoSidebar {
         )
         .base_bg(cx.theme().colors().panel_background)
         .icon(if is_worktree {
-            IconName::GitBranch
+            IconName::GitWorktree
         } else {
             IconName::Folder
         })
@@ -445,6 +587,9 @@ impl PaseoSidebar {
         .on_click(cx.listener(move |this, _, window, cx| {
             this.open_workspace(&workspace_id, window, cx);
         }));
+        if let Some(pull_request) = pull_request {
+            item = item.project_name(pull_request);
+        }
         if let Some(diff_stat) = &workspace.diff_stat {
             if diff_stat.additions > 0 {
                 item = item.added(diff_stat.additions as usize);

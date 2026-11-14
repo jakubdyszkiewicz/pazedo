@@ -6,11 +6,12 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedSt
 use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
-        Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement, AgentUpdate,
-        CloseItems, CreateTerminal, FetchAgents, FetchWorkspaces, GetProvidersSnapshot,
-        ListProjects, Page, ProjectSummary, ProjectUpdate, ProviderEntry, ServerInfo,
-        ServerMessage, SetSessionEventSubscription, Subscribe, SubscribeTerminals, TerminalInfo,
-        TerminalStreamExit, TerminalsChanged, Workspace, WorkspaceUpdate,
+        AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
+        AgentUpdate, BranchSuggestions, CloseItems, CreateTerminal, CreateWorkspace, FetchAgents,
+        FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page, ProjectSummary, ProjectUpdate,
+        ProviderEntry, RefreshAgent, ServerInfo, ServerMessage, SetSessionEventSubscription,
+        Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged,
+        Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
 use std::{
@@ -308,6 +309,106 @@ impl PaseoStore {
 
     pub fn is_closing(&self, id: &str) -> bool {
         self.closing.contains(id)
+    }
+
+    fn connected_client(&self) -> Result<Client> {
+        self.client
+            .clone()
+            .filter(Client::is_connected)
+            .context("not connected to a Paseo daemon")
+    }
+
+    /// Adds a folder as a Paseo project. The project shows up without workspaces until one is
+    /// created in it.
+    pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.spawn(async move |this, cx| {
+            let response = client
+                .request(&AddProject {
+                    cwd: path.to_string_lossy().to_string(),
+                })
+                .await?;
+            let project = response.project.with_context(|| {
+                format!(
+                    "Paseo did not add {}: {}",
+                    path.display(),
+                    response.error.as_deref().unwrap_or("no reason given")
+                )
+            })?;
+            // The `project.update` push may arrive later than the response.
+            this.update(cx, |this, cx| {
+                this.projects.insert(project.project_id.clone(), project);
+                cx.notify();
+            })
+        })
+    }
+
+    /// Creates a workspace in a project, from its checkout or as a new worktree.
+    pub fn create_workspace(
+        &mut self,
+        source: WorkspaceSource,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Workspace>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.spawn(async move |this, cx| {
+            let response = client
+                .request(&CreateWorkspace {
+                    source,
+                    title: None,
+                })
+                .await?;
+            let workspace = response.workspace.with_context(|| {
+                format!(
+                    "Paseo did not create the workspace: {}",
+                    response.error.as_deref().unwrap_or("no reason given")
+                )
+            })?;
+            this.update(cx, |this, cx| {
+                this.workspaces
+                    .insert(workspace.id.clone(), workspace.clone());
+                cx.notify();
+            })?;
+            Ok(workspace)
+        })
+    }
+
+    /// The repository's branches at `cwd`, most recently committed first.
+    pub fn branch_suggestions(&self, cwd: String, cx: &App) -> Task<Result<Vec<String>>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.background_spawn(async move {
+            let response = client
+                .request(&BranchSuggestions {
+                    cwd,
+                    query: None,
+                    limit: Some(200),
+                })
+                .await?;
+            if let Some(error) = response.error {
+                anyhow::bail!("could not list branches: {error}");
+            }
+            Ok(response.branches)
+        })
+    }
+
+    /// Resumes a closed agent's provider session, which also rebuilds its timeline.
+    pub fn refresh_agent(&self, agent_id: String, cx: &App) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.background_spawn(async move {
+            client.request(&RefreshAgent { agent_id }).await?;
+            Ok(())
+        })
     }
 
     /// Archives agents and kills terminals, as closing their tabs in Paseo's apps does.

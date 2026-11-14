@@ -127,6 +127,10 @@ models and created a Claude Haiku 5.5 agent whose composer showed mode, thinking
 model; a six-hour Opus session with hundreds of tool calls opened and scrolled without
 problems.
 
+A closed agent (its provider session ended) is resumed by the daemon when its tab is opened;
+while it is still closed the tab shows a "Reload Agent" notice that calls
+`refresh_agent_request`, as "Reload agent" in Paseo's apps.
+
 ## Known gaps
 
 - Questions (`kind: question` permission requests) are shown as allow/deny.

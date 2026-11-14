@@ -195,6 +195,27 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   terminalId, error?}` ends a stream: without `error` the process exited (verified with
   `exit`); with `error` the daemon lost track of it and the process may still run.
 
+## Projects, workspaces and closed agents (verified 2026-11-14, test daemon)
+
+- `project.add.request {cwd}` adds a folder as a project (git or not) without a workspace:
+  `project.add.response {project, error, errorCode?}`. pazedo's sidebar **+** uses it.
+- `workspace.create.request {source, title?, ...}` always creates a new workspace (unlike
+  `open_project_request`, which looks one up by directory). `source` is `{kind: directory,
+  path, projectId?}` for the project's checkout, or `{kind: worktree, cwd, projectId?, action:
+  branch-off|checkout, refName?, branchName?, ...}` for a new git worktree. With `branch-off`
+  and no `branchName` the daemon picks a name (e.g. `black-piranha`) for both the worktree
+  directory (`<paseo home>/worktrees/<hash>/<name>`) and its branch, off `refName`. Answered by
+  `workspace.create.response {workspace, setupTerminalId, error, creation, ...}`. An optional
+  `agent` / `firstAgentContext` starts an agent too (Paseo's app does; pazedo does not yet).
+- `branch_suggestions_request {cwd, query?, limit?}` lists branches, most recently committed
+  first: `{branches, branchDetails?, error}`.
+- Agents whose provider session ended (status `closed`, e.g. after a daemon restart) are
+  resumed by the daemon when a client opens them (they turned `idle` as soon as pazedo
+  subscribed to their timeline). `refresh_agent_request {agentId}` resumes one explicitly; it
+  is answered by a `status` message `{status: agent_refreshed, agentId, timelineSize}`. Paseo's
+  app offers it as "Reload agent". Mock agents that never received a prompt have no history
+  either way.
+
 ## Observations and open questions
 
 - Each `paseo run` from the CLI created a **new** workspace for the same directory

@@ -4,6 +4,7 @@
 
 mod agent_item;
 mod agent_session;
+mod new_workspace;
 mod panel;
 mod sidebar;
 mod store;
