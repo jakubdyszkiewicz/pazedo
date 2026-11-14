@@ -399,6 +399,38 @@ impl PaseoStore {
     }
 }
 
+/// Lets tests and the screenshot runner show a scripted directory without a daemon.
+#[cfg(any(test, feature = "test-support"))]
+impl PaseoStore {
+    pub fn set_global(store: Entity<Self>, cx: &mut App) {
+        cx.set_global(GlobalPaseoStore(store));
+    }
+
+    pub fn load_fixture(
+        &mut self,
+        status: ConnectionStatus,
+        projects: Vec<ProjectSummary>,
+        workspaces: Vec<Workspace>,
+        agents: Vec<Agent>,
+        cx: &mut Context<Self>,
+    ) {
+        self.status = status;
+        self.begin_sync();
+        self.finish_sync(Ok(DirectorySnapshot {
+            projects,
+            workspaces,
+            agents,
+            subscriptions: DirectorySubscriptions::default(),
+        }));
+        cx.notify();
+    }
+
+    pub fn set_sync_error(&mut self, error: Option<SharedString>, cx: &mut Context<Self>) {
+        self.sync_error = error;
+        cx.notify();
+    }
+}
+
 async fn fetch_directory(client: &Client) -> Result<DirectorySnapshot> {
     // Subscribe to project events first so a project created during the fetch is not missed.
     client

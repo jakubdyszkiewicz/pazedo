@@ -271,9 +271,11 @@ impl PaseoSidebar {
                 .border_color(cx.theme().colors().border_variant)
                 .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                 .child(
-                    Label::new(message)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
+                    div().flex_1().min_w_0().child(
+                        Label::new(message)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
                 )
                 .into_any_element(),
         )

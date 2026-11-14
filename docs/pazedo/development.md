@@ -59,9 +59,30 @@ rust-analyzer with `cargo run`'s environment and invalidates the build cache. Er
 missing Anthropic key or `canonicalizing "crates/grammars/src"` (the binary was not started
 from the repo root) are expected.
 
-## Screenshots
+## Testing UI work
 
-Agents on this machine must check UI work on screen, not only compile it:
+Three layers, cheapest first. UI work that was only compiled, never looked at, is not done.
+
+1. **gpui tests** (`cargo test -p paseo_ui`): real views on a fake platform with a deterministic
+   scheduler and `FakeFs`, as Zed tests its own UI. Use them for behaviour: what a click does,
+   what the store does with each daemon message. Example: selecting a Paseo workspace activates
+   the Zed workspace for its directory.
+2. **Off-screen screenshots** (`cargo run -p paseo_ui --example sidebar_screenshots --features
+   test-support`): renders the sidebar in a real Zed window (title bar, workspace, sidebar) with
+   gpui's `VisualTestAppContext`, the same machinery as Zed's `zed-visual-test-runner`: real
+   Metal rendering into a texture, no visible window, no Screen Recording permission, nothing
+   on the user's screen. The store is fed scripted fixtures, one scenario per state
+   (connected with every workspace and agent status, disconnected, not configured, sync
+   error). PNGs go to `target/pazedo-screenshots/`. Add a scenario for every new visual state
+   and look at the images. Verified 2026-11-14; it caught message banners that did not wrap.
+   No baselines are compared yet.
+3. **The real app** against the test daemon (`script/pazedo/run-dev`, then
+   `script/pazedo/screenshot`): for what fixtures cannot show, such as the live connection,
+   updates arriving, and opening real directories. Needs the window in front (see below).
+
+## Screenshots of the running app
+
+Agents on this machine can check the real app on screen:
 
 ```sh
 script/pazedo/screenshot                      # newest target/*/zed -> /tmp/pazedo-screenshot.png
