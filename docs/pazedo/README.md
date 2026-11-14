@@ -9,6 +9,8 @@ Docs in this folder:
 
 - [development.md](./development.md): building on the Mac mini, measurements, screenshots,
   the Paseo test daemon.
+- [paseo-protocol.md](./paseo-protocol.md): the daemon protocol as `crates/paseo_client` uses
+  it, with what was verified against a real daemon.
 
 This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore it.
 
@@ -16,9 +18,10 @@ This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore i
 
 - Local only for now: there is no GitHub fork yet. The clone's remote for Zed is named
   `upstream` (not `origin`) so that a fork can be added as `origin` later without renaming.
-- Fork code goes into new crates (planned: `crates/paseo_client`, `crates/paseo_ui`) and fork
-  tooling into `script/pazedo/`. Upstream files are changed only where there is no seam, and
-  every such change is listed under [Upstream touch points](#upstream-touch-points).
+- Fork code goes into new crates and fork tooling into `script/pazedo/`. Crates so far:
+  `crates/paseo_client` (daemon protocol client; no gpui dependency). Planned: `paseo_ui`.
+  Upstream files are changed only where there is no seam, and every such change is listed
+  under [Upstream touch points](#upstream-touch-points).
 
 ## Syncing with upstream
 
@@ -48,6 +51,7 @@ makes syncing tractable.
 
 | File | Change | Why |
 | --- | --- | --- |
+| `Cargo.toml` | `crates/paseo_client` in `members` and `[workspace.dependencies]` | Every new crate. Conflicts here are trivial: keep both sides, sorted. |
 | `README.md` | Two `> [!IMPORTANT]` lines at the top | Required by upstream's `.rules` (symlinked as `CLAUDE.md`) whenever an agent modifies source files: a reminder that a human must review the change. Only a human removes them. |
 
 Planned (from the brief, not yet done):

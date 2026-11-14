@@ -12563,6 +12563,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35ffd90b3f3b6477db7478016b9efb1b7e9d38eafd095f0542fe0ec2ea884a13"
 
 [[package]]
+name = "paseo_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-tungstenite",
+ "collections",
+ "env_logger 0.11.8",
+ "futures 0.3.34",
+ "log",
+ "parking_lot",
+ "paseo_client",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "smol",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -131,6 +131,24 @@ accounts, and OpenCode in particular is shared: both daemons log
 `opencode serve --service` running under launchd. OpenCode sessions started from the test
 daemon would appear in the owner's real OpenCode.
 
+### Checking `paseo_client` against the test daemon
+
+```sh
+cargo test -p paseo_client                                   # unit and fake-daemon tests
+cargo test -p paseo_client --test live_daemon_tests -- --ignored   # needs the test daemon
+cargo run -p paseo_client --example paseo_debug -- workspaces
+cargo run -p paseo_client --example paseo_debug -- agents
+cargo run -p paseo_client --example paseo_debug -- watch 30          # live updates
+cargo run -p paseo_client --example paseo_debug -- timeline <agent-id> 30
+```
+
+`paseo_debug` defaults to `127.0.0.1:6868`; `--endpoint` overrides it. While `watch` runs,
+start a mock agent with `script/pazedo/paseo-test run ...` to see the updates arrive.
+
+`paseo_client` takes its timer from `ConnectOptions::sleep`: Zed's clippy configuration bans
+`smol::Timer` because gpui tests need gpui's deterministic executor. Code in Zed passes
+`BackgroundExecutor::timer`; tests and the example pass `fake_daemon::smol_sleep()`.
+
 Findings about the daemon from the installed bundle (Paseo 0.15.4, read from
 `app.asar`, not from source):
 
