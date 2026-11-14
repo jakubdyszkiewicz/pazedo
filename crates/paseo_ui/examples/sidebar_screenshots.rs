@@ -231,24 +231,28 @@ mod screenshots {
             );
             dump_thread(window, cx)?;
         }
-        // `x,y` in window points (the PNGs are captured at that scale), e.g. a permission button.
-        if let Ok(click) = std::env::var("PAZEDO_SCREENSHOT_CLICK") {
-            let (x, y) = click
-                .split_once(',')
-                .and_then(|(x, y)| {
-                    Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
-                })
-                .context("PAZEDO_SCREENSHOT_CLICK must be x,y")?;
-            // A real pointer hovers before it clicks; some controls only react once hovered.
-            cx.simulate_mouse_move(
-                window.into(),
-                point(px(x), px(y)),
-                None,
-                gpui::Modifiers::none(),
-            );
-            cx.run_until_parked();
-            cx.simulate_click(window.into(), point(px(x), px(y)), gpui::Modifiers::none());
-            wait(cx, Duration::from_secs(12))?;
+        // `x,y` in window points (the PNGs are captured at that scale), e.g. a permission button;
+        // several clicks are separated by `;`.
+        if let Ok(clicks) = std::env::var("PAZEDO_SCREENSHOT_CLICK") {
+            for click in clicks.split(';') {
+                let (x, y) = click
+                    .split_once(',')
+                    .and_then(|(x, y)| {
+                        Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+                    })
+                    .context("PAZEDO_SCREENSHOT_CLICK must be x,y[;x,y...]")?;
+                // A real pointer hovers before it clicks; some controls only react once hovered.
+                cx.simulate_mouse_move(
+                    window.into(),
+                    point(px(x), px(y)),
+                    None,
+                    gpui::Modifiers::none(),
+                );
+                cx.run_until_parked();
+                cx.simulate_click(window.into(), point(px(x), px(y)), gpui::Modifiers::none());
+                wait(cx, Duration::from_secs(2))?;
+            }
+            wait(cx, Duration::from_secs(10))?;
             capture(
                 cx,
                 window,

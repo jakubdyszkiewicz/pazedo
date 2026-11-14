@@ -26,8 +26,9 @@ use paseo_client::{
         AgentSessionConfig, AgentStatus, AgentStream, AgentStreamEvent, CancelAgent, CreateAgent,
         FetchAgentTimeline, FetchAgentTimelineResponse, PermissionBehavior, PermissionRequest,
         PermissionResponse, ReleaseSubscription, RespondToPermission, SendAgentMessage,
-        SetAgentMode, SetAgentModel, SetAgentTimelineSubscription, TimelineDirection, TimelineItem,
-        TimelineProjection, TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
+        SetAgentMode, SetAgentModel, SetAgentThinking, SetAgentTimelineSubscription,
+        TimelineDirection, TimelineItem, TimelineProjection, TodoItem, ToolCall, ToolCallDetail,
+        ToolCallStatus,
     },
 };
 use project::{AgentId, Project};
@@ -456,7 +457,7 @@ impl AgentConnection for PaseoConnection {
             store: self.store.downgrade(),
             options: RefCell::default(),
         };
-        *options.options.borrow_mut() = options.compute(cx);
+        *options.options.borrow_mut() = options.compute(None, cx);
         Some(Rc::new(options))
     }
 
@@ -481,8 +482,10 @@ impl AgentConnection for PaseoConnection {
 
 const MODEL_OPTION: &str = "model";
 const MODE_OPTION: &str = "mode";
+const THINKING_OPTION: &str = "thinking";
 
-/// The agent's model and mode as ACP config options, so Zed's own dropdowns change them.
+/// The agent's model, thinking level and mode as ACP config options, so Zed's own dropdowns
+/// change them.
 /// The provider cannot change after creation, so it is not offered.
 struct PaseoConfigOptions {
     agent_id: String,
@@ -493,7 +496,9 @@ struct PaseoConfigOptions {
 }
 
 impl PaseoConfigOptions {
-    fn compute(&self, cx: &App) -> Vec<acp_v2::SessionConfigOption> {
+    /// The options for the agent as the store knows it, with `change` applied first so a set
+    /// shows its result (and a new model its own thinking levels) before the daemon confirms.
+    fn compute(&self, change: Option<(&str, &str)>, cx: &App) -> Vec<acp_v2::SessionConfigOption> {
         let Some(store) = self.store.upgrade() else {
             return Vec::new();
         };
@@ -501,7 +506,22 @@ impl PaseoConfigOptions {
         let Some(agent) = store.agent(&self.agent_id) else {
             return Vec::new();
         };
-        config_options(agent, store.provider(&agent.provider))
+        let mut agent = agent.clone();
+        match change {
+            Some((MODEL_OPTION, value)) => {
+                agent.model = Some(value.to_string());
+                // The new model's default thinking level applies until one is picked.
+                agent.thinking_option_id = None;
+                agent.effective_thinking_option_id = None;
+            }
+            Some((MODE_OPTION, value)) => agent.current_mode_id = Some(value.to_string()),
+            Some((THINKING_OPTION, value)) => {
+                agent.thinking_option_id = Some(value.to_string());
+                agent.effective_thinking_option_id = Some(value.to_string());
+            }
+            _ => {}
+        }
+        config_options(&agent, store.provider(&agent.provider))
     }
 }
 
@@ -530,19 +550,7 @@ impl AgentSessionConfigOptions for PaseoConfigOptions {
             return Task::ready(Err(anyhow!("Unsupported value for {}", config_id.0)));
         };
         let config_id = config_id.0.to_string();
-        let options: Vec<acp_v2::SessionConfigOption> = self
-            .compute(cx)
-            .into_iter()
-            .map(|option| {
-                let mut value_json = serde_json::to_value(&option).unwrap_or_default();
-                if value_json["configId"] == config_id.as_str() {
-                    value_json["currentValue"] = Value::String(value.clone());
-                    wire(value_json)
-                } else {
-                    option
-                }
-            })
-            .collect();
+        let options = self.compute(Some((config_id.as_str(), value.as_str())), cx);
         *self.options.borrow_mut() = options.clone();
         cx.background_spawn(async move {
             let client = client.context("Not connected to Paseo")?;
@@ -563,6 +571,14 @@ impl AgentSessionConfigOptions for PaseoConfigOptions {
                         })
                         .await?
                 }
+                THINKING_OPTION => {
+                    client
+                        .request(&SetAgentThinking {
+                            agent_id,
+                            thinking_option_id: Some(value),
+                        })
+                        .await?
+                }
                 other => bail!("Paseo agents have no {other} option"),
             };
             if !response.accepted {
@@ -576,8 +592,9 @@ impl AgentSessionConfigOptions for PaseoConfigOptions {
     }
 }
 
-/// Model and mode selectors for an agent. The provider's models come from the daemon's
-/// provider snapshot; the agent's own snapshot lists its modes.
+/// Model, thinking level and mode selectors for an agent. The provider's models and their
+/// thinking levels come from the daemon's provider snapshot; the agent's snapshot lists its
+/// modes.
 fn config_options(
     agent: &paseo_client::protocol::Agent,
     provider: Option<&paseo_client::protocol::ProviderEntry>,
@@ -624,6 +641,39 @@ fn config_options(
         })));
     }
 
+    let model = provider.and_then(|provider| options_model(provider, agent.model.as_deref()));
+    if let Some(model) = model
+        && let Some(first) = model.thinking_options.first()
+    {
+        let current = agent
+            .effective_thinking_option_id
+            .clone()
+            .or_else(|| agent.thinking_option_id.clone())
+            .or_else(|| model.default_thinking_option_id.clone())
+            .or_else(|| {
+                model
+                    .thinking_options
+                    .iter()
+                    .find(|option| option.is_default)
+                    .map(|option| option.id.clone())
+            })
+            .unwrap_or_else(|| first.id.clone());
+        options.push(wire(json!({
+            "configId": THINKING_OPTION,
+            "name": "Thinking",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": current,
+            "options": model
+                .thinking_options
+                .iter()
+                .map(|option| {
+                    json!({"value": option.id, "name": option.label, "description": option.description})
+                })
+                .collect::<Vec<_>>(),
+        })));
+    }
+
     if let Some(current_mode) = &agent.current_mode_id
         && !agent.available_modes.is_empty()
     {
@@ -641,6 +691,17 @@ fn config_options(
         })));
     }
     options
+}
+
+/// The provider's model an agent runs: the one it names, else the provider's default.
+fn options_model<'a>(
+    provider: &'a paseo_client::protocol::ProviderEntry,
+    model: Option<&str>,
+) -> Option<&'a paseo_client::protocol::ProviderModel> {
+    match model {
+        Some(id) => provider.models.iter().find(|model| model.id == id),
+        None => provider.default_model(),
+    }
 }
 
 struct PaseoSubmissions {
@@ -1812,6 +1873,28 @@ mod tests {
         );
         assert_eq!(options[1]["configId"], "mode");
         assert_eq!(options[1]["currentValue"], "plan");
+
+        // A model with thinking levels adds a thought-level selector; its value comes from the
+        // agent, else the model's default.
+        let provider: paseo_client::protocol::ProviderEntry = serde_json::from_value(json!({
+            "provider": "claude", "status": "ready",
+            "models": [{"provider": "claude", "id": "opus", "label": "Opus", "isDefault": true,
+                        "thinkingOptions": [{"id": "low", "label": "Low"}, {"id": "high", "label": "High"}],
+                        "defaultThinkingOptionId": "low"}],
+        }))
+        .unwrap();
+        let thinking = |agent: &paseo_client::protocol::Agent| -> Value {
+            config_options(agent, Some(&provider))
+                .iter()
+                .map(|option| serde_json::to_value(option).unwrap())
+                .find(|option| option["configId"] == "thinking")
+                .unwrap()
+        };
+        assert_eq!(thinking(&agent)["category"], "thought_level");
+        assert_eq!(thinking(&agent)["currentValue"], "low");
+        let mut thinking_agent = agent.clone();
+        thinking_agent.effective_thinking_option_id = Some("high".into());
+        assert_eq!(thinking(&thinking_agent)["currentValue"], "high");
 
         // Without a provider snapshot the agent's model is still shown.
         let mut agent = agent;

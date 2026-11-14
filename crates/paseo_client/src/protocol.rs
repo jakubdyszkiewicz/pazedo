@@ -251,6 +251,9 @@ pub struct Agent {
     pub cwd: String,
     pub workspace_id: Option<String>,
     pub model: Option<String>,
+    pub thinking_option_id: Option<String>,
+    /// The thinking level in effect, after the model's default fills in an unset one.
+    pub effective_thinking_option_id: Option<String>,
     pub title: Option<String>,
     pub status: AgentStatus,
     pub created_at: String,
@@ -1177,6 +1180,20 @@ impl Request for SetAgentMode {
     type Response = AgentActionResponse;
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAgentThinking {
+    pub agent_id: String,
+    /// `None` returns to the model's default thinking level.
+    pub thinking_option_id: Option<String>,
+}
+
+impl Request for SetAgentThinking {
+    const TYPE: &'static str = "set_agent_thinking_request";
+    const RESPONSE_TYPE: &'static str = "set_agent_thinking_response";
+    type Response = AgentActionResponse;
+}
+
 /// The providers the daemon can run, with their models and modes. Without the
 /// `compact_provider_snapshots` capability the daemon answers with full entries.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1251,6 +1268,19 @@ pub struct ProviderModel {
     pub is_default: bool,
     /// Hidden aliases and legacy ids are not offered for selection.
     pub is_selectable: Option<bool>,
+    #[serde(default)]
+    pub thinking_options: Vec<SelectOption>,
+    pub default_thinking_option_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectOption {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 // ---------------------------------------------------------------------------------------------

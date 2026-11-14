@@ -3,7 +3,7 @@
 Clicking an agent in the Paseo sidebar opens its session in a center-pane tab rendered by
 Zed's own thread UI (`agent_ui::ConversationView`): streaming markdown, reasoning, tool call
 cards (edits as real diffs), plans, permission prompts, the message editor, queueing and the
-stop button. The composer's dropdowns change the agent's model and mode. The **+** button on
+stop button. The composer's dropdowns change the agent's model, thinking level and mode. The **+** button on
 a workspace row opens a menu of the daemon's providers and their models and starts a new agent
 with the one picked. Paseo owns the agents; Zed only
 observes and steers them, so agents started from the phone, the CLI or other agents show up
@@ -34,9 +34,11 @@ same features.
     session itself (fallback: `PAZEDO_AGENT_PROVIDER`, default `claude`, and
     `PAZEDO_AGENT_MODEL`).
   - `session_config_options` exposes the agent's model (choices from the daemon's provider
-    snapshot) and mode (from the agent snapshot) as ACP config options, so Zed shows its own
-    dropdowns; changes go out as `set_agent_model_request` / `set_agent_mode_request`. The
-    provider is fixed after creation and not offered.
+    snapshot), thinking level (the current model's `thinkingOptions`, ACP category
+    `thought_level`) and mode (from the agent snapshot) as ACP config options, so Zed shows its
+    own dropdowns; changes go out as `set_agent_model_request` / `set_agent_thinking_request` /
+    `set_agent_mode_request`. Changing the model recomputes the thinking levels. The provider is
+    fixed after creation and not offered.
   - History: the latest 2000 timeline *rows* (every streamed chunk is a row, so this is a
     handful of turns to a few hundred); when there is more, the tab shows "Load Full History",
     which reopens the session with all rows. `PAZEDO_AGENT_HISTORY_LIMIT` overrides the row
@@ -100,11 +102,14 @@ tab whose composer showed that model and created the agent with it; an edit card
 syntax-highlighted diff of the right file; "Load Full History" (with the limit set to 5 rows)
 grew the thread from 20 to 82 entries.
 
+Thinking level, verified 2026-11-14 off screen against the test daemon: the composer showed
+Load Test · Low · Ten second stream; picking High in the dropdown set the agent's thinking to
+`high` on the daemon (`paseo-test ls`).
+
 ## Known gaps
 
 - Questions (`kind: question` permission requests) are shown as allow/deny.
-- No images or file attachments in prompts (mentions are sent as plain text). The thinking
-  level is not offered yet.
+- No images or file attachments in prompts (mentions are sent as plain text).
 - "Load Full History" reloads everything at once; there is no incremental paging.
 - A timeline gap is only logged; it should reload the session.
 - Diffs generated from an edit's old and new text show snippet line numbers (`@@ -1 +1 @@`),
