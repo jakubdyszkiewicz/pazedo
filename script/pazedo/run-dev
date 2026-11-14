@@ -13,6 +13,9 @@ profile="${PAZEDO_PROFILE:-debug}"
 binary="$repo/target/$profile/zed"
 bundle="$repo/target/$profile/PazedoDev.app"
 endpoint="${PAZEDO_PASEO_ENDPOINT:-127.0.0.1:6868}"
+# Agents created from Zed use the test daemon's mock provider unless told otherwise.
+provider="${PAZEDO_AGENT_PROVIDER:-mock}"
+model="${PAZEDO_AGENT_MODEL:-one-minute-stream}"
 
 if [ ! -x "$binary" ]; then
   echo "$binary not found; run cargo build -p zed first" >&2
@@ -38,8 +41,10 @@ PLIST
 pkill -f "$repo/target/[a-z]*/zed" 2>/dev/null && sleep 1 || true
 
 if [ "$#" -gt 0 ]; then
-  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" --args "$@"
+  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" \
+    --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model" --args "$@"
 else
-  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint"
+  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" \
+    --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model"
 fi
-echo "started $bundle (Paseo endpoint $endpoint)"
+echo "started $bundle (Paseo endpoint $endpoint, new agents: $provider/$model)"

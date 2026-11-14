@@ -6,6 +6,11 @@
 //! into a texture, a deterministic scheduler, and no visible window, so it needs neither Screen
 //! Recording permission nor an uncovered window. The store is fed scripted fixtures instead of
 //! a daemon. Images go to `target/pazedo-screenshots/` (override with `PAZEDO_SCREENSHOT_DIR`).
+//!
+//! With `PAZEDO_PASEO_ENDPOINT` (the test daemon) and `PAZEDO_SCREENSHOT_AGENT=<agent id>` set,
+//! it also renders that agent's session from the live daemon, opened in a tab with Zed's thread
+//! UI, as `agent-session.png`. Real network I/O completes while the deterministic scheduler is
+//! pumped, so this works with the screen locked.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -35,10 +40,14 @@ mod screenshots {
         WindowOptions, point, px, size,
     };
     use paseo_client::protocol::{Agent, ProjectSummary, ServerInfo, Workspace};
-    use paseo_ui::{ConnectionStatus, PaseoSidebar, PaseoStore};
+    use paseo_ui::{ConnectionStatus, PaseoAgentItem, PaseoSidebar, PaseoStore};
     use project::Project;
     use serde_json::{Value, json};
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use std::{
+        path::PathBuf,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
     use workspace::{AppState, MultiWorkspace};
 
     struct Scenario {
@@ -102,9 +111,16 @@ mod screenshots {
         cx.update(|cx| {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             workspace::init(app_state.clone(), cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
             call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             title_bar::init(cx);
+            // The runner loads no keymap; this is the default binding for sending a message.
+            cx.bind_keys([gpui::KeyBinding::new(
+                "enter",
+                zed_actions::agent::Chat,
+                Some("AcpThread > Editor"),
+            )]);
         });
         cx.run_until_parked();
 
@@ -134,7 +150,150 @@ mod screenshots {
             window.update(&mut cx, |_, window, _| window.remove_window())?;
             cx.run_until_parked();
         }
+
+        if let (Ok(endpoint), Ok(agent_id)) = (
+            std::env::var(paseo_ui::ENDPOINT_ENV_VAR),
+            std::env::var("PAZEDO_SCREENSHOT_AGENT"),
+        ) {
+            let path = output_dir.join("agent-session.png");
+            live_agent_session(&endpoint, &agent_id, &app_state, &mut cx, &path)?;
+            println!("{}", path.display());
+        }
         Ok(())
+    }
+
+    fn live_agent_session(
+        endpoint: &str,
+        agent_id: &str,
+        app_state: &Arc<AppState>,
+        cx: &mut VisualTestAppContext,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        let store = cx.update(|cx| {
+            let store = cx.new(|cx| PaseoStore::new(Some(endpoint.to_string()), cx));
+            PaseoStore::set_global(store.clone(), cx);
+            store
+        });
+        // `new` starts a new agent in the sandbox, as the sidebar's + button does.
+        let new_agent = agent_id == "new";
+        let (directory, title) = if new_agent {
+            pump(cx, Duration::from_secs(15), |cx| {
+                store.read_with(cx, |store, _| {
+                    store.client().is_some_and(|client| client.is_connected())
+                })
+            })
+            .context("could not connect to the test daemon")?;
+            (
+                dirs_home().join("dev/pazedo-sandbox"),
+                "New Agent".to_string(),
+            )
+        } else {
+            pump(cx, Duration::from_secs(15), |cx| {
+                store.read_with(cx, |store, _| store.agent(agent_id).is_some())
+            })
+            .context("the test daemon did not list the agent")?;
+            store.read_with(cx, |store, _| {
+                let agent = store.agent(agent_id).expect("checked above");
+                (
+                    PathBuf::from(&agent.cwd),
+                    agent.title.clone().unwrap_or_default(),
+                )
+            })
+        };
+
+        let window = open_window(&directory, app_state, cx)?;
+        window.update(cx, |multi_workspace, window, cx| {
+            multi_workspace.workspace().update(cx, |workspace, cx| {
+                PaseoAgentItem::open(
+                    workspace,
+                    (!new_agent).then(|| agent_id.to_string()),
+                    title.into(),
+                    window,
+                    cx,
+                );
+            });
+        })?;
+        // History and live state arrive over the network; give the view time to fill.
+        wait(cx, Duration::from_secs(8))?;
+        capture(cx, window, path)?;
+
+        // Typing into the message editor and pressing enter sends through Paseo, like a user.
+        if let Ok(message) = std::env::var("PAZEDO_SCREENSHOT_SEND") {
+            cx.simulate_input(window.into(), &message);
+            cx.simulate_keystrokes(window.into(), "enter");
+            wait(cx, Duration::from_secs(3))?;
+            capture(cx, window, &path.with_file_name("agent-session-sent.png"))?;
+            println!(
+                "{}",
+                path.with_file_name("agent-session-sent.png").display()
+            );
+        }
+        // `x,y` in window points (the PNGs are captured at that scale), e.g. a permission button.
+        if let Ok(click) = std::env::var("PAZEDO_SCREENSHOT_CLICK") {
+            let (x, y) = click
+                .split_once(',')
+                .and_then(|(x, y)| {
+                    Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+                })
+                .context("PAZEDO_SCREENSHOT_CLICK must be x,y")?;
+            cx.simulate_click(window.into(), point(px(x), px(y)), gpui::Modifiers::none());
+            wait(cx, Duration::from_secs(12))?;
+            capture(
+                cx,
+                window,
+                &path.with_file_name("agent-session-clicked.png"),
+            )?;
+            println!(
+                "{}",
+                path.with_file_name("agent-session-clicked.png").display()
+            );
+        }
+        Ok(())
+    }
+
+    fn dirs_home() -> PathBuf {
+        std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
+    }
+
+    fn wait(cx: &mut VisualTestAppContext, duration: Duration) -> Result<()> {
+        let deadline = Instant::now() + duration;
+        pump(cx, duration + Duration::from_secs(2), |_| {
+            Instant::now() > deadline
+        })
+    }
+
+    fn capture(
+        cx: &mut VisualTestAppContext,
+        window: WindowHandle<MultiWorkspace>,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        cx.update_window(window.into(), |_, window, _| window.refresh())?;
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into())?.save(path)?;
+        Ok(())
+    }
+
+    /// Runs the deterministic scheduler while real I/O (the daemon socket) makes progress.
+    fn pump(
+        cx: &mut VisualTestAppContext,
+        timeout: Duration,
+        mut done: impl FnMut(&mut VisualTestAppContext) -> bool,
+    ) -> Result<()> {
+        cx.background_executor.allow_parking();
+        let start = Instant::now();
+        let result = loop {
+            if done(cx) {
+                break Ok(());
+            }
+            if start.elapsed() > timeout {
+                break Err(anyhow::anyhow!("timed out after {timeout:?}"));
+            }
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+            cx.advance_clock(Duration::from_millis(20));
+        };
+        cx.background_executor.forbid_parking();
+        result
     }
 
     fn connected() -> ConnectionStatus {

@@ -122,6 +122,16 @@ holds the next chunk of text (verified; history entries are merged). Other strea
 - While a permission is pending the agent's `status` stays `running` with
   `requiresAttention: false`; the pending permission itself is the signal.
 
+### Ordering and identity details that matter to a client (verified 2026-11-14)
+
+- Request ids must be unique beyond one process. The daemon deduplicates `agent.create.request`
+  by client id and request id; a client whose ids restart at zero after a restart gets
+  `agent_request_key_conflict`. `paseo_client` prefixes ids with a random per-client value.
+- A message sent with `send_agent_message_request {messageId}` comes back on the timeline as a
+  `user_message` with `messageId` and `clientMessageId` equal to that id, both in history and
+  in the live event. The live event can arrive before the send's response.
+- `turn_completed` can arrive before `permission_resolved` for the same turn.
+
 ### Scripted mock prompts
 
 The `mock` provider (test daemon only) reacts to phrases in the prompt, which makes session UI

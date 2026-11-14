@@ -1,13 +1,14 @@
 use anyhow::Result;
 use collections::{BTreeMap, HashMap};
 use futures::{FutureExt as _, StreamExt as _};
-use gpui::{App, AppContext as _, Context, Entity, Global, SharedString, Task};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task};
 use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
-        Agent, AgentScope, AgentStatus, AgentUpdate, FetchAgents, FetchWorkspaces, ListProjects,
-        Page, ProjectSummary, ProjectUpdate, ServerInfo, ServerMessage,
-        SetSessionEventSubscription, Subscribe, Workspace, WorkspaceUpdate,
+        Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement, AgentUpdate,
+        FetchAgents, FetchWorkspaces, ListProjects, Page, ProjectSummary, ProjectUpdate,
+        ServerInfo, ServerMessage, SetSessionEventSubscription, Subscribe, Workspace,
+        WorkspaceUpdate,
     },
 };
 use std::{cmp::Reverse, sync::Arc};
@@ -33,6 +34,15 @@ pub enum ConnectionStatus {
     Connecting(Endpoint),
     Connected(Arc<ServerInfo>),
     Disconnected(SharedString),
+}
+
+/// For open agent sessions, which follow their own timeline subscriptions.
+#[derive(Clone, Debug)]
+pub enum PaseoStoreEvent {
+    Connected,
+    Disconnected,
+    AgentStream(AgentStream),
+    AgentTimelineReplacement(AgentTimelineReplacement),
 }
 
 struct GlobalPaseoStore(Entity<PaseoStore>);
@@ -170,6 +180,27 @@ impl PaseoStore {
         this
     }
 
+    /// The client, once the store has been configured with an endpoint. Requests fail while
+    /// disconnected.
+    pub fn client(&self) -> Option<Client> {
+        self.client.clone()
+    }
+
+    pub fn agent(&self, id: &str) -> Option<&Agent> {
+        self.agents.get(id)
+    }
+
+    /// Several Paseo workspaces can share a directory; new agents go to the newest one.
+    pub fn newest_workspace_for_directory(
+        &self,
+        directory: &std::path::Path,
+    ) -> Option<&Workspace> {
+        self.workspaces
+            .values()
+            .filter(|workspace| std::path::Path::new(workspace.directory()) == directory)
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+    }
+
     pub fn status(&self) -> &ConnectionStatus {
         &self.status
     }
@@ -262,6 +293,7 @@ impl PaseoStore {
             Event::Connected(server_info) => {
                 self.status = ConnectionStatus::Connected(server_info);
                 self.sync(cx);
+                cx.emit(PaseoStoreEvent::Connected);
             }
             Event::Disconnected { reason } => {
                 // Keep the last known directory on screen; the next sync replaces it.
@@ -269,6 +301,13 @@ impl PaseoStore {
                 self.subscriptions = DirectorySubscriptions::default();
                 self.queued_messages = None;
                 self.sync_task = None;
+                cx.emit(PaseoStoreEvent::Disconnected);
+            }
+            Event::Message(ServerMessage::AgentStream(stream)) => {
+                cx.emit(PaseoStoreEvent::AgentStream(stream));
+            }
+            Event::Message(ServerMessage::AgentTimelineReplacement(replacement)) => {
+                cx.emit(PaseoStoreEvent::AgentTimelineReplacement(replacement));
             }
             Event::Message(message) => match &mut self.queued_messages {
                 Some(queued) => queued.push(message),
@@ -430,6 +469,8 @@ impl PaseoStore {
         cx.notify();
     }
 }
+
+impl EventEmitter<PaseoStoreEvent> for PaseoStore {}
 
 async fn fetch_directory(client: &Client) -> Result<DirectorySnapshot> {
     // Subscribe to project events first so a project created during the fetch is not missed.

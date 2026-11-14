@@ -20,7 +20,12 @@ name = "sidebar_screenshots"
 required-features = ["test-support"]
 
 [dependencies]
+acp_thread.workspace = true
+action_log.workspace = true
+agent-client-protocol.workspace = true
+agent_servers.workspace = true
 agent_settings.workspace = true
+agent_ui.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 collections.workspace = true
@@ -29,11 +34,16 @@ gpui.workspace = true
 log.workspace = true
 paseo_client.workspace = true
 platform_title_bar.workspace = true
+project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+watch.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
@@ -53,9 +63,11 @@ node_runtime.workspace = true
 paseo_ui = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true
 project = { workspace = true, features = ["test-support"] }
-serde_json.workspace = true
+release_channel.workspace = true
+semver.workspace = true
 session = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 title_bar = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
+zed_actions.workspace = true

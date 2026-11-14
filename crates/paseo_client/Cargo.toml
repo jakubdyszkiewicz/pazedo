@@ -25,6 +25,7 @@ parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 smol.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 env_logger.workspace = true

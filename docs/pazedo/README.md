@@ -11,6 +11,7 @@ Docs in this folder:
   the Paseo test daemon.
 - [paseo-protocol.md](./paseo-protocol.md): the daemon protocol as `crates/paseo_client` uses
   it, with what was verified against a real daemon.
+- [agent-sessions.md](./agent-sessions.md): how Paseo agents are shown with Zed's thread UI.
 
 This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore it.
 
@@ -20,7 +21,8 @@ This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore i
   `upstream` (not `origin`) so that a fork can be added as `origin` later without renaming.
 - Fork code goes into new crates and fork tooling into `script/pazedo/`. Crates so far:
   `crates/paseo_client` (daemon protocol client; no gpui dependency) and `crates/paseo_ui`
-  (the Paseo workspace sidebar and the store behind it).
+  (the Paseo workspace sidebar, the store behind it, and Paseo agent sessions shown with Zed's
+  thread UI; see [agent-sessions.md](./agent-sessions.md)).
   Upstream files are changed only where there is no seam, and every such change is listed
   under [Upstream touch points](#upstream-touch-points).
 

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use collections::HashSet;
 use gpui::{
     App, Context, Decorations, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
-    ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window, px,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, WeakEntity, Window, px,
 };
 use paseo_client::protocol::{
     Agent, AgentStatus, AttentionReason, Workspace, WorkspaceKind, WorkspaceStatus,
@@ -21,7 +21,10 @@ use workspace::{
     CloseWindow, MultiWorkspace, MultiWorkspaceEvent, OpenMode, Sidebar, SidebarEvent, SidebarSide,
 };
 
-use crate::store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry};
+use crate::{
+    agent_item::PaseoAgentItem,
+    store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry},
+};
 
 /// Lists the workspaces of a Paseo daemon, grouped by project, in place of Zed's threads
 /// sidebar. Selecting a workspace opens its directory as the window's active Zed workspace.
@@ -88,28 +91,54 @@ impl PaseoSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(workspace) = self.store.read(cx).workspace(workspace_id) else {
+        if let Some(task) = self.activate_workspace(workspace_id, window, cx) {
+            task.detach_and_log_err(cx);
+        }
+    }
+
+    /// Opens the agent's tab in its workspace. With no agent id, starts a new agent there.
+    fn open_agent(
+        &mut self,
+        workspace_id: &str,
+        agent_id: Option<String>,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(activate) = self.activate_workspace(workspace_id, window, cx) else {
             return;
         };
-        let directory = PathBuf::from(workspace.directory());
+        cx.spawn_in(window, async move |_, cx| {
+            let workspace = activate.await?;
+            workspace.update_in(cx, |workspace, window, cx| {
+                PaseoAgentItem::open(workspace, agent_id, title, window, cx);
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn activate_workspace(
+        &mut self,
+        workspace_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<Entity<workspace::Workspace>>>> {
+        let directory = PathBuf::from(self.store.read(cx).workspace(workspace_id)?.directory());
         self.selected_workspace = Some(workspace_id.to_string());
         cx.notify();
-        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
-            return;
-        };
-        multi_workspace
-            .update(cx, |multi_workspace, cx| {
-                multi_workspace.find_or_create_local_workspace(
-                    PathList::new(&[directory]),
-                    None,
-                    None,
-                    OpenMode::Activate,
-                    None,
-                    window,
-                    cx,
-                )
-            })
-            .detach_and_log_err(cx);
+        let multi_workspace = self.multi_workspace.upgrade()?;
+        Some(multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.find_or_create_local_workspace(
+                PathList::new(&[directory]),
+                None,
+                None,
+                OpenMode::Activate,
+                None,
+                window,
+                cx,
+            )
+        }))
     }
 
     /// The single root directory of the window's active Zed workspace.
@@ -439,6 +468,21 @@ impl PaseoSidebar {
                 cx.notify();
             }
         }))
+        .when(is_hovered, |item| {
+            let workspace_id = workspace_id.clone();
+            item.action_slot(
+                IconButton::new(
+                    SharedString::from(format!("paseo-new-agent-{}", workspace.id)),
+                    IconName::Plus,
+                )
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("New Agent"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_agent(&workspace_id, None, "New Agent".into(), window, cx);
+                })),
+            )
+        })
         .on_click(cx.listener(move |this, _, window, cx| {
             this.open_workspace(&workspace_id, window, cx);
         }));
@@ -485,9 +529,17 @@ impl PaseoSidebar {
             )
             .children(entry.agents.iter().map(|agent| {
                 let workspace_id = open_workspace_id.clone();
+                let agent_id = agent.id.clone();
+                let title = agent_title(agent);
                 self.render_agent(agent, cx)
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_workspace(&workspace_id, window, cx);
+                        this.open_agent(
+                            &workspace_id,
+                            Some(agent_id.clone()),
+                            title.clone(),
+                            window,
+                            cx,
+                        );
                     }))
                     .into_any_element()
             }))
@@ -497,7 +549,7 @@ impl PaseoSidebar {
 
 impl PaseoSidebar {
     /// One line per agent under its workspace: status, title and age. Clicking opens the
-    /// workspace until agent sessions get their own view.
+    /// agent's session in a tab.
     fn render_agent(&self, agent: &Agent, cx: &mut Context<Self>) -> Stateful<Div> {
         let color = cx.theme().colors();
         let waiting_for_permission = !agent.pending_permissions.is_empty()
@@ -549,12 +601,7 @@ impl PaseoSidebar {
             )
         };
 
-        let title: SharedString = agent
-            .title
-            .clone()
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| format!("{} agent", agent.provider))
-            .into();
+        let title = agent_title(agent);
         let highlighted = running || waiting_for_permission || failed || agent.requires_attention;
         let tooltip: SharedString = format!("{title}\n{} · {status_text}", agent.provider).into();
 
@@ -593,6 +640,15 @@ impl PaseoSidebar {
             )
             .tooltip(Tooltip::text(tooltip))
     }
+}
+
+fn agent_title(agent: &Agent) -> SharedString {
+    agent
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("{} agent", agent.provider))
+        .into()
 }
 
 fn active_workspace_id(

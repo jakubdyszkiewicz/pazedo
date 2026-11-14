@@ -278,8 +278,11 @@ struct Connection {
     server_info: Arc<ServerInfo>,
 }
 
-#[derive(Default)]
 struct Shared {
+    /// Request ids must be unique beyond this process: the daemon deduplicates agent creation
+    /// by client id and request id, so ids that restart at zero after a restart look like
+    /// replays of earlier requests (`agent_request_key_conflict`).
+    request_id_prefix: String,
     /// `pending` entries are only added while holding this lock and seeing `Some`, and the
     /// driver clears it before failing all pending requests, so no request is left waiting for
     /// a connection that is already gone.
@@ -329,7 +332,12 @@ impl Client {
         mpsc::UnboundedReceiver<Event>,
         impl Future<Output = ()> + Send + 'static,
     ) {
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            request_id_prefix: format!("pazedo-{}", uuid::Uuid::new_v4().simple()),
+            connection: Mutex::default(),
+            pending: Mutex::default(),
+            next_request_id: AtomicU64::default(),
+        });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded();
         let client = Self {
@@ -381,7 +389,8 @@ impl Client {
             bail!("{message_type} body must be a JSON object");
         };
         let request_id = format!(
-            "pazedo-{}",
+            "{}-{}",
+            self.shared.request_id_prefix,
             self.shared.next_request_id.fetch_add(1, Ordering::Relaxed)
         );
         message.insert("type".into(), message_type.into());

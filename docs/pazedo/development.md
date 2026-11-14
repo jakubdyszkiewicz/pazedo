@@ -46,8 +46,9 @@ cargo build -p zed
 script/pazedo/run-dev ~/dev/pazedo-sandbox     # stops a running dev build first
 ```
 
-`run-dev` starts the build with `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868`, the test daemon, unless
-the variable is already set. pazedo connects to Paseo only when that variable is set, so a
+`run-dev` starts the build with `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868`, the test daemon, and
+`PAZEDO_AGENT_PROVIDER=mock` / `PAZEDO_AGENT_MODEL=one-minute-stream` for agents created from
+Zed, unless the variables are already set. pazedo connects to Paseo only when that variable is set, so a
 plain `target/debug/zed` shows "Not connected" in the sidebar and never reaches the real daemon.
 
 The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorkspace` hides the
@@ -76,6 +77,13 @@ Three layers, cheapest first. UI work that was only compiled, never looked at, i
    error). PNGs go to `target/pazedo-screenshots/`. Add a scenario for every new visual state
    and look at the images. Verified 2026-11-14; it caught message banners that did not wrap.
    No baselines are compared yet.
+   With `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868 PAZEDO_SCREENSHOT_AGENT=<agent id>` (or `new`)
+   it also opens that agent's session from the live test daemon in a tab and captures it
+   (`agent-session.png`); `PAZEDO_SCREENSHOT_SEND="text"` types and sends a message
+   (`agent-session-sent.png`), and `PAZEDO_SCREENSHOT_CLICK=x,y` clicks a point in window
+   coordinates, e.g. a permission button (`agent-session-clicked.png`). Real socket I/O runs
+   while the deterministic scheduler is pumped, so this works with the screen locked. With
+   `new`, set `PAZEDO_AGENT_PROVIDER=mock` (and a mock model) or a real agent is created.
 3. **The real app** against the test daemon (`script/pazedo/run-dev`, then
    `script/pazedo/screenshot`): for what fixtures cannot show, such as the live connection,
    updates arriving, and opening real directories. Needs the window in front (see below).

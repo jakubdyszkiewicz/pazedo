@@ -14,9 +14,9 @@ use paseo_client::{
     protocol::{
         AgentFilter, AgentSessionConfig, AgentStreamEvent, AgentUpdate, CreateAgent,
         FetchAgentTimeline, FetchAgents, FetchWorkspaces, ListProjects, PermissionResponse,
-        ProjectUpdate, RespondToPermission, ServerMessage, SetAgentTimelineSubscription,
-        SetSessionEventSubscription, Subscribe, SubscribeTerminals, TimelineDirection,
-        TimelineProjection, WorkspaceUpdate,
+        ProjectUpdate, RespondToPermission, SendAgentMessage, ServerMessage,
+        SetAgentTimelineSubscription, SetSessionEventSubscription, Subscribe, SubscribeTerminals,
+        TimelineDirection, TimelineProjection, WorkspaceUpdate,
     },
 };
 use std::time::{Duration, Instant};
@@ -84,6 +84,20 @@ fn main() -> Result<()> {
                     (Some(agent), _) => println!("created agent {} ({:?})", agent.id, agent.status),
                     (None, error) => bail!("create failed: {error:?}"),
                 }
+                Ok(())
+            }
+            "send" => {
+                let agent_id = args.get(1).context("send needs an agent id")?.clone();
+                let text = args.get(2).context("send needs a text")?.clone();
+                let response = client
+                    .request(&SendAgentMessage {
+                        agent_id,
+                        text,
+                        message_id: args.get(3).cloned(),
+                        active_turn_behavior: None,
+                    })
+                    .await?;
+                println!("{response:?}");
                 Ok(())
             }
             "respond" => {
@@ -339,11 +353,16 @@ async fn timeline(
     );
     for entry in &history.entries {
         println!(
-            "  [{}..{}] {}: {}",
+            "  [{}..{}] {}: {} {}",
             entry.seq_start,
             entry.seq_end,
             entry.item_type().unwrap_or("?"),
-            preview(&entry.item)
+            preview(&entry.item),
+            ["messageId", "clientMessageId"]
+                .iter()
+                .filter_map(|key| entry.item.get(*key).map(|value| format!("{key}={value}")))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
     }
 
