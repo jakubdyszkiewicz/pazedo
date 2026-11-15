@@ -303,6 +303,9 @@ pub(crate) struct DirectorySnapshot {
 
 pub struct ProjectGroup {
     pub project_id: String,
+    /// The same on every daemon for one repository (from its git remote), so the sidebar can
+    /// show a repository checked out on several machines as one project.
+    pub project_key: Option<String>,
     pub name: SharedString,
     pub root_path: SharedString,
     pub workspaces: Vec<WorkspaceEntry>,
@@ -1007,6 +1010,7 @@ impl PaseoStore {
                     project.project_id.as_str(),
                     ProjectGroup {
                         project_id: project.project_id.clone(),
+                        project_key: project.project_key.clone(),
                         name: project.project_display_name.clone().into(),
                         root_path: project.project_root_path.clone().into(),
                         workspaces: Vec::new(),
@@ -1043,6 +1047,7 @@ impl PaseoStore {
                 .entry(workspace.project_id.as_str())
                 .or_insert_with(|| ProjectGroup {
                     project_id: workspace.project_id.clone(),
+                    project_key: None,
                     name: workspace.project_display_name.clone().into(),
                     root_path: workspace.project_root_path.clone().into(),
                     workspaces: Vec::new(),

@@ -13,6 +13,7 @@ use paseo_client::protocol::{
 };
 use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
 use settings::Settings as _;
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
@@ -36,8 +37,8 @@ use crate::{
     },
 };
 
-/// How the sidebar groups workspaces, as Paseo's app offers: under their daemon and project, or
-/// across daemons by what needs the user (Needs input, Failed, Ready to review, Working, Done).
+/// How the sidebar groups workspaces, as Paseo's app offers: by project, or by what needs the
+/// user (Needs input, Failed, Ready to review, Working, Done), across daemons either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Grouping {
     #[default]
@@ -56,8 +57,54 @@ enum RenameTarget {
 /// Where a row came from, shown when rows of several projects and daemons are mixed.
 struct RowOrigin {
     branch: Option<SharedString>,
-    project: SharedString,
+    /// Unset when the rows are already under their project.
+    project: Option<SharedString>,
     host: Option<SharedString>,
+}
+
+/// A project as the sidebar lists it when grouping by project. A repository on several daemons
+/// is one project, as in Paseo's app: daemons give it the same `projectKey` (from its git
+/// remote). A daemon with two projects of one key keeps them apart, as Paseo's app does.
+struct MergedProject<D> {
+    name: SharedString,
+    /// In the order of the daemons.
+    placements: Vec<(D, ProjectGroup)>,
+}
+
+fn merge_projects<D: Clone + Eq + std::hash::Hash>(
+    placements: Vec<(D, ProjectGroup)>,
+) -> Vec<MergedProject<D>> {
+    let mut key_counts: collections::HashMap<(D, String), usize> =
+        collections::HashMap::default();
+    for (daemon, group) in &placements {
+        if let Some(key) = &group.project_key {
+            *key_counts.entry((daemon.clone(), key.clone())).or_default() += 1;
+        }
+    }
+    let mut projects: Vec<MergedProject<D>> = Vec::new();
+    let mut index_by_key: collections::HashMap<String, usize> = collections::HashMap::default();
+    for (daemon, group) in placements {
+        let shared_key = group
+            .project_key
+            .clone()
+            .filter(|key| key_counts.get(&(daemon.clone(), key.clone())) == Some(&1));
+        if let Some(key) = shared_key {
+            if let Some(&index) = index_by_key.get(&key) {
+                if let Some(project) = projects.get_mut(index) {
+                    project.placements.push((daemon, group));
+                    continue;
+                }
+            }
+            index_by_key.insert(key, projects.len());
+        }
+        projects.push(MergedProject {
+            name: group.name.clone(),
+            placements: vec![(daemon, group)],
+        });
+    }
+    // Stable, so one name on several daemons (not merged) keeps the daemons' order.
+    projects.sort_by_key(|project| project.name.to_lowercase());
+    projects
 }
 
 /// A workspace or project of one daemon. Ids are only unique per daemon: two machines with
@@ -81,7 +128,7 @@ impl DaemonItemKey {
     }
 }
 
-/// Lists the workspaces of the configured Paseo daemons, grouped by daemon and project, in place
+/// Lists the workspaces of the configured Paseo daemons, grouped by project or status, in place
 /// of Zed's threads sidebar. Selecting a workspace opens its directory, on the daemon's
 /// machine, as the window's active Zed workspace.
 pub struct PaseoSidebar {
@@ -90,7 +137,6 @@ pub struct PaseoSidebar {
     focus_handle: FocusHandle,
     width: Pixels,
     grouping: Grouping,
-    collapsed_daemons: HashSet<EntityId>,
     collapsed_projects: HashSet<DaemonItemKey>,
     collapsed_buckets: HashSet<WorkspaceStatus>,
     hovered_workspace: Option<DaemonItemKey>,
@@ -144,7 +190,6 @@ impl PaseoSidebar {
                 .flatten()
                 .and_then(|json| serde_json::from_str(&json).log_err())
                 .unwrap_or_default(),
-            collapsed_daemons: HashSet::default(),
             collapsed_projects: HashSet::default(),
             collapsed_buckets: HashSet::default(),
             hovered_workspace: None,
@@ -862,41 +907,25 @@ impl PaseoSidebar {
         Some(render_notice(icon, message, cx))
     }
 
-    /// One daemon's projects. With several daemons they sit under a collapsible row with the
-    /// daemon's status and Add Project.
+    /// A daemon's problems (not connected, errors) and, with several daemons, its row with the
+    /// daemon's status, name and Add Project. Its workspaces are listed under projects or
+    /// statuses, mixed with other daemons'.
     fn render_daemon(
         &self,
         store: &Entity<PaseoStore>,
-        active_workspace: Option<&str>,
         with_header: bool,
-        show_projects: bool,
         is_first: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let daemon = store.entity_id();
-        let is_collapsed = with_header && show_projects && self.collapsed_daemons.contains(&daemon);
-        let store_ref = store.read(cx);
-        let is_connected = matches!(store_ref.status(), ConnectionStatus::Connected(_));
-        let groups = store_ref.project_groups();
-        let message = self.render_message(store_ref, cx);
+        let message = self.render_message(store.read(cx), cx);
         let colors = cx.theme().colors();
-        let (panel_background, hover, border) = (
-            colors.panel_background,
-            colors.ghost_element_hover,
-            colors.border,
-        );
-        let add_project = self.render_add_project_button(store, cx);
-        let row_group = SharedString::from(format!("paseo-daemon-row-{daemon}"));
-        let status = with_header.then(|| self.render_daemon_status(store, Color::Default, cx));
-        let rename = if with_header {
-            self.render_daemon_rename_button(store, row_group.clone(), cx)
-        } else {
-            None
-        };
+        let (panel_background, border) = (colors.panel_background, colors.border);
         let header = with_header.then(|| {
+            let row_group = SharedString::from(format!("paseo-daemon-row-{daemon}"));
             h_flex()
                 .id(SharedString::from(format!("paseo-daemon-{daemon}")))
-                .group(row_group)
+                .group(row_group.clone())
                 .h(Tab::container_height(cx))
                 .w_full()
                 .px_2()
@@ -905,51 +934,15 @@ impl PaseoSidebar {
                 .when(!is_first, |this| this.border_t_1())
                 .border_b_1()
                 .border_color(border)
-                .when(show_projects, |this| {
-                    this.cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .child(
-                            Icon::new(if is_collapsed {
-                                IconName::ChevronRight
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
-                        )
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            if !this.collapsed_daemons.remove(&daemon) {
-                                this.collapsed_daemons.insert(daemon);
-                            }
-                            cx.notify();
-                        }))
-                })
-                .children(status)
+                .child(self.render_daemon_status(store, Color::Default, cx))
                 .child(div().flex_1())
-                .children(rename)
-                .children(add_project)
+                .children(self.render_daemon_rename_button(store, row_group, cx))
+                .children(self.render_add_project_button(store, cx))
         });
-        let projects: Vec<AnyElement> = if is_collapsed || !show_projects {
-            Vec::new()
-        } else {
-            groups
-                .into_iter()
-                .enumerate()
-                .map(|(index, group)| {
-                    self.render_project(store, group, active_workspace, index == 0, cx)
-                })
-                .collect()
-        };
         v_flex()
             .w_full()
             .children(header)
-            .when(!is_collapsed, |this| this.children(message))
-            .child(
-                v_flex()
-                    .w_full()
-                    .when(!is_connected, |this| this.opacity(0.6))
-                    .children(projects),
-            )
+            .children(message)
             .into_any_element()
     }
 
@@ -1051,7 +1044,7 @@ impl PaseoSidebar {
                         });
                         let origin = RowOrigin {
                             branch: None,
-                            project,
+                            project: Some(project),
                             host: several_daemons.then(|| store.read(cx).display_name()),
                         };
                         self.render_workspace(&store, entry, is_active, Some(origin), cx)
@@ -1084,19 +1077,53 @@ impl PaseoSidebar {
 
     fn render_project(
         &self,
-        store: &Entity<PaseoStore>,
-        group: ProjectGroup,
-        active_workspace: Option<&str>,
+        project: MergedProject<Entity<PaseoStore>>,
+        active_workspace: Option<&(Entity<PaseoStore>, String)>,
+        show_hosts: bool,
         is_first: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let project_key = DaemonItemKey::new(store, &group.project_id);
+        let Some((first_store, first_group)) = project.placements.first() else {
+            return div().into_any_element();
+        };
+        let project_key = DaemonItemKey::new(first_store, &first_group.project_id);
         let is_collapsed = self.collapsed_projects.contains(&project_key);
-        let attention_count = group
-            .workspaces
+        let mut rows: Vec<(Entity<PaseoStore>, WorkspaceEntry)> = Vec::new();
+        let mut placements: Vec<(Entity<PaseoStore>, String, SharedString)> = Vec::new();
+        for (store, group) in project.placements {
+            placements.push((store.clone(), group.project_id, group.root_path));
+            rows.extend(
+                group
+                    .workspaces
+                    .into_iter()
+                    .map(|entry| (store.clone(), entry)),
+            );
+        }
+        // The order each daemon uses, across daemons: pinned, then newest first.
+        rows.sort_by(|(_, a), (_, b)| {
+            let (a, b) = (&a.workspace, &b.workspace);
+            Reverse(&a.pinned_at)
+                .cmp(&Reverse(&b.pinned_at))
+                .then_with(|| Reverse(&a.created_at).cmp(&Reverse(&b.created_at)))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let attention_count = rows
             .iter()
-            .filter(|entry| entry.workspace.status != WorkspaceStatus::Done)
+            .filter(|(_, entry)| entry.workspace.status != WorkspaceStatus::Done)
             .count();
+        let tooltip: SharedString = match placements.as_slice() {
+            [(_, _, root_path)] => root_path.clone(),
+            placements => placements
+                .iter()
+                .map(|(store, _, root_path)| {
+                    format!("{}: {root_path}", store.read(cx).display_name())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        };
+        let new_workspace_button =
+            self.render_new_workspace_button(&project_key, &project.name, placements, cx);
         let color = cx.theme().colors();
 
         let header = h_flex()
@@ -1118,7 +1145,7 @@ impl PaseoSidebar {
                 .color(Color::Muted),
             )
             .child(
-                Label::new(group.name.clone())
+                Label::new(project.name.clone())
                     .size(LabelSize::Small)
                     .color(Color::Muted)
                     .truncate(),
@@ -1127,32 +1154,8 @@ impl PaseoSidebar {
                 this.child(Indicator::dot().color(Color::Accent))
             })
             .child(div().flex_1())
-            .child(
-                IconButton::new(
-                    project_key.element_id("paseo-new-workspace"),
-                    IconName::Plus,
-                )
-                .icon_size(IconSize::Small)
-                .tooltip(Tooltip::text("New Workspace…"))
-                .on_click(cx.listener({
-                    let store = store.clone();
-                    let project_id = group.project_id.clone();
-                    let name = group.name.clone();
-                    let root_path = group.root_path.clone();
-                    move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.new_workspace(
-                            store.clone(),
-                            project_id.clone(),
-                            name.clone(),
-                            root_path.to_string(),
-                            window,
-                            cx,
-                        );
-                    }
-                })),
-            )
-            .tooltip(Tooltip::text(group.root_path.clone()))
+            .child(new_workspace_button)
+            .tooltip(Tooltip::text(tooltip))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if !this.collapsed_projects.remove(&project_key) {
                     this.collapsed_projects.insert(project_key.clone());
@@ -1168,7 +1171,7 @@ impl PaseoSidebar {
             .child(header)
             .when(!is_collapsed, |this| {
                 this.map(|this| {
-                    if group.workspaces.is_empty() {
+                    if rows.is_empty() {
                         this.child(
                             div().pl_6().pb_1().child(
                                 Label::new("No workspaces")
@@ -1177,13 +1180,111 @@ impl PaseoSidebar {
                             ),
                         )
                     } else {
-                        this.children(group.workspaces.into_iter().map(|entry| {
-                            let is_active = active_workspace == Some(entry.workspace.id.as_str());
-                            self.render_workspace(store, entry, is_active, None, cx)
+                        this.children(rows.into_iter().map(|(store, entry)| {
+                            let is_active = active_workspace.is_some_and(|(active_store, id)| {
+                                *active_store == store && *id == entry.workspace.id
+                            });
+                            let is_connected = matches!(
+                                store.read(cx).status(),
+                                ConnectionStatus::Connected(_)
+                            );
+                            let origin = show_hosts.then(|| RowOrigin {
+                                branch: None,
+                                project: None,
+                                host: Some(store.read(cx).display_name()),
+                            });
+                            let row = self.render_workspace(&store, entry, is_active, origin, cx);
+                            div()
+                                .w_full()
+                                .when(!is_connected, |this| this.opacity(0.6))
+                                .child(row)
                         }))
                     }
                 })
             })
+            .into_any_element()
+    }
+
+    /// The project's New Workspace button. A project on several daemons first asks which
+    /// machine the workspace goes on.
+    fn render_new_workspace_button(
+        &self,
+        project_key: &DaemonItemKey,
+        name: &SharedString,
+        placements: Vec<(Entity<PaseoStore>, String, SharedString)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let button_id = project_key.element_id("paseo-new-workspace");
+        if let [(store, project_id, root_path)] = placements.as_slice() {
+            return IconButton::new(button_id, IconName::Plus)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("New Workspace…"))
+                .on_click(cx.listener({
+                    let store = store.clone();
+                    let project_id = project_id.clone();
+                    let name = name.clone();
+                    let root_path = root_path.clone();
+                    move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.new_workspace(
+                            store.clone(),
+                            project_id.clone(),
+                            name.clone(),
+                            root_path.to_string(),
+                            window,
+                            cx,
+                        );
+                    }
+                }))
+                .into_any_element();
+        }
+        let sidebar = cx.weak_entity();
+        let name = name.clone();
+        let hosts: Vec<_> = placements
+            .into_iter()
+            .map(|(store, project_id, root_path)| {
+                let host = store.read(cx).display_name();
+                (store, project_id, root_path, host)
+            })
+            .collect();
+        // The header toggles the project on click; the menu's button must not.
+        div()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                PopoverMenu::new(project_key.element_id("paseo-new-workspace-menu"))
+                    .trigger_with_tooltip(
+                        IconButton::new(button_id, IconName::Plus).icon_size(IconSize::Small),
+                        Tooltip::text("New Workspace…"),
+                    )
+                    .anchor(gpui::Anchor::TopRight)
+                    .menu(move |window, cx| {
+                        let sidebar = sidebar.clone();
+                        let name = name.clone();
+                        let hosts = hosts.clone();
+                        Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                            let mut menu = menu.header("New Workspace On");
+                            for (store, project_id, root_path, host) in hosts {
+                                let sidebar = sidebar.clone();
+                                let name = name.clone();
+                                menu = menu.entry(host, None, move |window, cx| {
+                                    sidebar
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.new_workspace(
+                                                store.clone(),
+                                                project_id.clone(),
+                                                name.clone(),
+                                                root_path.to_string(),
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .ok();
+                                });
+                            }
+                            menu
+                        }))
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1223,21 +1324,24 @@ impl PaseoSidebar {
         // worktrees and their branches alike); a checkout shows its branch. `ThreadItem` only
         // renders linked worktrees, hence the kind for both. Rows that also show their project
         // and daemon keep to the branch, as Paseo's app does.
+        let mixes_projects = origin
+            .as_ref()
+            .is_some_and(|origin| origin.project.is_some());
         let worktree_name = workspace
             .worktree_slug
             .clone()
-            .filter(|_| is_worktree && origin.is_none());
-        let branch = branch.or_else(|| worktree_name.clone().filter(|_| origin.is_some()));
+            .filter(|_| is_worktree && !mixes_projects);
+        let branch = branch.or_else(|| worktree_name.clone().filter(|_| mixes_projects));
         let branch_name = branch.filter(|branch| Some(branch) != worktree_name.as_ref());
         // Rows with their project and daemon show the branch among those details instead, so
         // that it gives way before them.
         let mut origin = origin;
         let branch_name = match origin.as_mut() {
-            Some(origin) => {
+            Some(origin) if mixes_projects => {
                 origin.branch = branch_name.map(Into::into);
                 None
             }
-            None => branch_name,
+            _ => branch_name,
         };
         let worktrees = if worktree_name.is_some() || branch_name.is_some() {
             vec![ThreadItemWorktreeInfo {
@@ -1514,7 +1618,9 @@ fn render_row_details(
         if let Some(branch) = origin.branch {
             parts.push(detail(IconName::GitBranch, branch, false));
         }
-        parts.push(detail(IconName::Folder, origin.project, true));
+        if let Some(project) = origin.project {
+            parts.push(detail(IconName::Folder, project, true));
+        }
         if let Some(host) = origin.host {
             parts.push(detail(IconName::Server, host, true));
         }
@@ -1689,35 +1795,52 @@ impl Render for PaseoSidebar {
         let several_daemons = stores.len() > 1;
         let sections: Vec<AnyElement> = if stores.is_empty() {
             vec![self.render_not_configured(cx)]
-        } else if self.grouping == Grouping::Status {
+        } else {
             // The daemons' status rows (or only their problems, with one daemon), then every
-            // daemon's workspaces by status.
+            // daemon's workspaces by status or by project.
             let mut sections: Vec<AnyElement> = stores
                 .iter()
                 .enumerate()
-                .map(|(index, store)| {
-                    self.render_daemon(store, None, several_daemons, false, index == 0, cx)
-                })
+                .map(|(index, store)| self.render_daemon(store, several_daemons, index == 0, cx))
                 .collect();
-            sections.extend(self.render_status_groups(
-                &stores,
-                active_workspace.as_ref(),
-                several_daemons,
-                cx,
-            ));
+            match self.grouping {
+                Grouping::Status => sections.extend(self.render_status_groups(
+                    &stores,
+                    active_workspace.as_ref(),
+                    several_daemons,
+                    cx,
+                )),
+                Grouping::Project => {
+                    let placements = stores
+                        .iter()
+                        .flat_map(|store| {
+                            store
+                                .read(cx)
+                                .project_groups()
+                                .into_iter()
+                                .map(move |group| (store.clone(), group))
+                        })
+                        .collect();
+                    let projects = merge_projects(placements);
+                    // As in Paseo's app, rows name their machine once the projects span several.
+                    let show_hosts = projects
+                        .iter()
+                        .flat_map(|project| project.placements.iter().map(|(store, _)| store))
+                        .collect::<HashSet<_>>()
+                        .len()
+                        > 1;
+                    sections.extend(projects.into_iter().enumerate().map(|(index, project)| {
+                        self.render_project(
+                            project,
+                            active_workspace.as_ref(),
+                            show_hosts,
+                            index == 0,
+                            cx,
+                        )
+                    }));
+                }
+            }
             sections
-        } else {
-            stores
-                .iter()
-                .enumerate()
-                .map(|(index, store)| {
-                    let active = active_workspace
-                        .as_ref()
-                        .filter(|(active_store, _)| active_store == store)
-                        .map(|(_, id)| id.as_str());
-                    self.render_daemon(store, active, several_daemons, true, index == 0, cx)
-                })
-                .collect()
         };
 
         v_flex()
@@ -1778,6 +1901,70 @@ impl Render for PaseoSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn project(id: &str, key: Option<&str>, name: &str) -> ProjectGroup {
+        ProjectGroup {
+            project_id: id.to_string(),
+            project_key: key.map(str::to_string),
+            name: name.to_string().into(),
+            root_path: format!("/dev/{name}").into(),
+            workspaces: Vec::new(),
+        }
+    }
+
+    fn summarize(projects: &[MergedProject<&'static str>]) -> Vec<(String, Vec<String>)> {
+        projects
+            .iter()
+            .map(|project| {
+                let placements = project
+                    .placements
+                    .iter()
+                    .map(|(daemon, group)| format!("{daemon}/{}", group.project_id))
+                    .collect();
+                (project.name.to_string(), placements)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_repository_on_several_daemons_is_one_project() {
+        let webapp = "remote:github.com/example/webapp";
+        let projects = merge_projects(vec![
+            ("mini", project("prj_1", Some(webapp), "webapp")),
+            ("mini", project("prj_2", Some("host:mini:/tmp/notes"), "notes")),
+            ("devbox", project("prj_9", Some(webapp), "webapp")),
+            ("devbox", project("prj_8", None, "Docs")),
+        ]);
+        assert_eq!(
+            summarize(&projects),
+            [
+                ("Docs".to_string(), vec!["devbox/prj_8".to_string()]),
+                ("notes".to_string(), vec!["mini/prj_2".to_string()]),
+                (
+                    "webapp".to_string(),
+                    vec!["mini/prj_1".to_string(), "devbox/prj_9".to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_key_shared_within_one_daemon_keeps_its_projects_apart() {
+        let key = "remote:github.com/example/monorepo";
+        let projects = merge_projects(vec![
+            ("mini", project("prj_1", Some(key), "monorepo")),
+            ("mini", project("prj_2", Some(key), "monorepo")),
+            ("devbox", project("prj_9", Some(key), "monorepo")),
+        ]);
+        assert_eq!(
+            summarize(&projects),
+            [
+                ("monorepo".to_string(), vec!["mini/prj_1".to_string()]),
+                ("monorepo".to_string(), vec!["mini/prj_2".to_string()]),
+                ("monorepo".to_string(), vec!["devbox/prj_9".to_string()]),
+            ]
+        );
+    }
 
     #[test]
     fn status_groups_follow_paseos_order() {

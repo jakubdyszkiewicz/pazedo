@@ -155,17 +155,27 @@ agents; gopls ran on the box (hover worked in a trusted project); the folder pic
 
 ### Grouping
 
-The sidebar header's group button (list-tree icon) switches between grouping by project (under
-each daemon, the default) and by status, as Paseo's app does: Needs input, Failed, Ready to
-review, Working, Done, most recent status change first, across all daemons. Status rows show
-their branch, project and (with several daemons) daemon; the daemons' status rows stay at the
-top. The choice is kept in Zed's key-value store (`pazedo_sidebar_grouping`), per data directory.
+The sidebar header's group button (list-tree icon) switches between grouping by project (the
+default) and by status, as Paseo's app does: Needs input, Failed, Ready to review, Working,
+Done, most recent status change first, across all daemons. Status rows show their branch,
+project and (with several daemons) daemon. The choice is kept in Zed's key-value store
+(`pazedo_sidebar_grouping`), per data directory.
+
+Grouping by project lists the projects of all daemons together, by name. As in Paseo's app, a
+repository on several daemons is one project: daemons give a project a `projectKey` from its
+git remote (`remote:github.com/owner/repo`; a folder without a remote gets a key of its daemon
+and path), and projects with the same key merge, unless one daemon has two projects with that
+key. The merged project takes its name from the first daemon in the settings. Once the listed
+projects span several daemons, each workspace row names its daemon. New Workspace on a project
+of several daemons first asks which machine the workspace goes on. Verified 2026-11-15 with a
+scratch clone of webapp (only its remote URL) on the test daemon, merged with the dev box's
+webapp, and a new workspace created through the machine menu on the test daemon.
 
 ### Several daemons
 
-`daemons` lists several daemons, shown side by side in the sidebar, each under a collapsible
-row with its connection status, name and Add Project; with a single daemon the sidebar looks as
-before (status and Add Project in its header). `endpoint` and `ssh` at the top level are
+`daemons` lists several daemons, each with a row at the top of the sidebar with its connection
+status, name and Add Project; their workspaces are listed together below (see "Grouping"). With
+a single daemon the sidebar looks as before (status and Add Project in its header). `endpoint` and `ssh` at the top level are
 shorthand for one more daemon, listed first:
 
 ```json
