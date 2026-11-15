@@ -142,6 +142,14 @@ workspaces of a checkout and of a Paseo worktree opened over SSH with their remo
 agents; gopls ran on the box (hover worked in a trusted project); the folder picker listed
 `/root/dev`.
 
+### Grouping
+
+The sidebar header's group button (list-tree icon) switches between grouping by project (under
+each daemon, the default) and by status, as Paseo's app does: Needs input, Failed, Ready to
+review, Working, Done, most recent status change first, across all daemons. Status rows show
+their branch, project and (with several daemons) daemon; the daemons' status rows stay at the
+top. The choice is kept in Zed's key-value store (`pazedo_sidebar_grouping`), per data directory.
+
 ### Several daemons
 
 `daemons` lists several daemons, shown side by side in the sidebar, each under a collapsible

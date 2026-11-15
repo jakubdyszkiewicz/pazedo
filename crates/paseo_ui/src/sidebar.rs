@@ -1,5 +1,6 @@
 use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WIDTH};
 use collections::HashSet;
+use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
     App, Context, Decorations, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
@@ -15,9 +16,11 @@ use settings::Settings as _;
 use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, ContextMenu, Indicator, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip,
-    WorktreeKind, prelude::*, right_click_menu, utils::platform_title_bar_height,
+    AgentThreadStatus, ContextMenu, IconPosition, Indicator, PopoverMenu, Tab, ThreadItem,
+    ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*, right_click_menu,
+    utils::platform_title_bar_height,
 };
+use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
     CloseWindow, MultiWorkspace, MultiWorkspaceEvent, OpenMode, Sidebar, SidebarEvent, SidebarSide,
@@ -32,6 +35,24 @@ use crate::{
         ConnectionStatus, ENDPOINT_ENV_VAR, PaseoDaemons, PaseoStore, ProjectGroup, WorkspaceEntry,
     },
 };
+
+/// How the sidebar groups workspaces, as Paseo's app offers: under their daemon and project, or
+/// across daemons by what needs the user (Needs input, Failed, Ready to review, Working, Done).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Grouping {
+    #[default]
+    Project,
+    Status,
+}
+
+const GROUPING_KEY: &str = "pazedo_sidebar_grouping";
+
+/// Where a row came from, shown when rows of several projects and daemons are mixed.
+struct RowOrigin {
+    branch: Option<SharedString>,
+    project: SharedString,
+    host: Option<SharedString>,
+}
 
 /// A workspace or project of one daemon. Ids are only unique per daemon: two machines with
 /// the same folder can have the same project id.
@@ -62,8 +83,10 @@ pub struct PaseoSidebar {
     daemons: Entity<PaseoDaemons>,
     focus_handle: FocusHandle,
     width: Pixels,
+    grouping: Grouping,
     collapsed_daemons: HashSet<EntityId>,
     collapsed_projects: HashSet<DaemonItemKey>,
+    collapsed_buckets: HashSet<WorkspaceStatus>,
     hovered_workspace: Option<DaemonItemKey>,
     /// Several Paseo workspaces can share a directory; this remembers which one was clicked so
     /// only it is highlighted.
@@ -109,8 +132,15 @@ impl PaseoSidebar {
             daemons,
             focus_handle: cx.focus_handle(),
             width: AgentSettings::get_global(cx).threads_sidebar.default_width,
+            grouping: KeyValueStore::global(cx)
+                .read_kvp(GROUPING_KEY)
+                .log_err()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).log_err())
+                .unwrap_or_default(),
             collapsed_daemons: HashSet::default(),
             collapsed_projects: HashSet::default(),
+            collapsed_buckets: HashSet::default(),
             hovered_workspace: None,
             selected_workspace: None,
             rename_editor,
@@ -121,6 +151,58 @@ impl PaseoSidebar {
         };
         this.observe_stores(cx);
         this
+    }
+
+    pub fn set_grouping(&mut self, grouping: Grouping, cx: &mut Context<Self>) {
+        if self.grouping == grouping {
+            return;
+        }
+        self.grouping = grouping;
+        cx.notify();
+        let Some(json) = serde_json::to_string(&grouping).log_err() else {
+            return;
+        };
+        let kvp = KeyValueStore::global(cx);
+        cx.background_spawn(async move {
+            kvp.write_kvp(GROUPING_KEY.to_string(), json)
+                .await
+                .log_err();
+        })
+        .detach();
+    }
+
+    fn render_grouping_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let sidebar = cx.weak_entity();
+        let grouping = self.grouping;
+        PopoverMenu::new("paseo-grouping-menu")
+            .trigger_with_tooltip(
+                IconButton::new("paseo-grouping", IconName::ListTree).icon_size(IconSize::Small),
+                Tooltip::text("Group Workspaces"),
+            )
+            .anchor(gpui::Anchor::TopRight)
+            .menu(move |window, cx| {
+                let sidebar = sidebar.clone();
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    let entry = |menu: ContextMenu, label: &'static str, choice: Grouping| {
+                        let sidebar = sidebar.clone();
+                        menu.toggleable_entry(
+                            label,
+                            grouping == choice,
+                            IconPosition::End,
+                            None,
+                            move |_, cx| {
+                                sidebar
+                                    .update(cx, |sidebar, cx| sidebar.set_grouping(choice, cx))
+                                    .ok();
+                            },
+                        )
+                    };
+                    let menu = menu.header("Group By");
+                    let menu = entry(menu, "Project", Grouping::Project);
+                    entry(menu, "Status", Grouping::Status)
+                }))
+            })
+            .into_any_element()
     }
 
     fn observe_stores(&mut self, cx: &mut Context<Self>) {
@@ -293,6 +375,7 @@ impl PaseoSidebar {
                 this.child(self.render_daemon_status(&store, Color::Muted, cx))
             })
             .child(div().flex_1())
+            .child(self.render_grouping_menu(cx))
             .when_some(single_daemon, |this, store| {
                 this.children(self.render_add_project_button(&store, cx))
             })
@@ -673,11 +756,12 @@ impl PaseoSidebar {
         store: &Entity<PaseoStore>,
         active_workspace: Option<&str>,
         with_header: bool,
+        show_projects: bool,
         is_first: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let daemon = store.entity_id();
-        let is_collapsed = with_header && self.collapsed_daemons.contains(&daemon);
+        let is_collapsed = with_header && show_projects && self.collapsed_daemons.contains(&daemon);
         let store_ref = store.read(cx);
         let is_connected = matches!(store_ref.status(), ConnectionStatus::Connected(_));
         let groups = store_ref.project_groups();
@@ -696,32 +780,34 @@ impl PaseoSidebar {
                 .w_full()
                 .px_2()
                 .gap_1()
-                .cursor_pointer()
                 .bg(panel_background)
-                .hover(move |style| style.bg(hover))
                 .when(!is_first, |this| this.border_t_1())
                 .border_b_1()
                 .border_color(border)
-                .child(
-                    Icon::new(if is_collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
-                )
+                .when(show_projects, |this| {
+                    this.cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .child(
+                            Icon::new(if is_collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if !this.collapsed_daemons.remove(&daemon) {
+                                this.collapsed_daemons.insert(daemon);
+                            }
+                            cx.notify();
+                        }))
+                })
                 .child(self.render_daemon_status(store, Color::Default, cx))
                 .child(div().flex_1())
                 .children(add_project)
-                .on_click(cx.listener(move |this, _, _window, cx| {
-                    if !this.collapsed_daemons.remove(&daemon) {
-                        this.collapsed_daemons.insert(daemon);
-                    }
-                    cx.notify();
-                }))
         });
-        let projects: Vec<AnyElement> = if is_collapsed {
+        let projects: Vec<AnyElement> = if is_collapsed || !show_projects {
             Vec::new()
         } else {
             groups
@@ -743,6 +829,102 @@ impl PaseoSidebar {
                     .children(projects),
             )
             .into_any_element()
+    }
+
+    fn render_status_groups(
+        &self,
+        stores: &[Entity<PaseoStore>],
+        active_workspace: Option<&(Entity<PaseoStore>, String)>,
+        several_daemons: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows: Vec<(Entity<PaseoStore>, SharedString, WorkspaceEntry)> = Vec::new();
+        for store in stores {
+            let store_ref = store.read(cx);
+            if !matches!(store_ref.status(), ConnectionStatus::Connected(_)) {
+                continue;
+            }
+            for group in store_ref.project_groups() {
+                for entry in group.workspaces {
+                    rows.push((store.clone(), group.name.clone(), entry));
+                }
+            }
+        }
+        let mut by_bucket: collections::HashMap<WorkspaceStatus, Vec<_>> =
+            collections::HashMap::default();
+        for row in rows {
+            by_bucket
+                .entry(status_bucket(row.2.workspace.status))
+                .or_default()
+                .push(row);
+        }
+        let mut sections = Vec::new();
+        for bucket in STATUS_BUCKETS {
+            let Some(mut bucket_rows) = by_bucket.remove(&bucket) else {
+                continue;
+            };
+            // Most recently changed first, as in Paseo's app.
+            bucket_rows.sort_by(|(_, project_a, a), (_, project_b, b)| {
+                b.workspace
+                    .status_entered_at
+                    .cmp(&a.workspace.status_entered_at)
+                    .then_with(|| project_a.cmp(project_b))
+                    .then_with(|| a.workspace.name.cmp(&b.workspace.name))
+            });
+            let is_collapsed = self.collapsed_buckets.contains(&bucket);
+            let (icon, color, label) = bucket_heading(bucket);
+            let hover = cx.theme().colors().ghost_element_hover;
+            let header = h_flex()
+                .id(SharedString::from(format!("paseo-status-{bucket:?}")))
+                .h(Tab::content_height(cx))
+                .w_full()
+                .px_2()
+                .gap_1p5()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .child(Icon::new(icon).size(IconSize::Small).color(color))
+                .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+                .when(is_collapsed, |this| {
+                    this.child(
+                        Label::new(bucket_rows.len().to_string())
+                            .size(LabelSize::Small)
+                            .color(Color::Disabled),
+                    )
+                })
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if !this.collapsed_buckets.remove(&bucket) {
+                        this.collapsed_buckets.insert(bucket);
+                    }
+                    cx.notify();
+                }));
+            let workspaces: Vec<AnyElement> = if is_collapsed {
+                Vec::new()
+            } else {
+                bucket_rows
+                    .into_iter()
+                    .map(|(store, project, entry)| {
+                        let is_active = active_workspace.is_some_and(|(active_store, id)| {
+                            *active_store == store && *id == entry.workspace.id
+                        });
+                        let origin = RowOrigin {
+                            branch: None,
+                            project,
+                            host: several_daemons.then(|| store.read(cx).display_name()),
+                        };
+                        self.render_workspace(&store, entry, is_active, Some(origin), cx)
+                    })
+                    .collect()
+            };
+            sections.push(
+                v_flex()
+                    .w_full()
+                    .pt_1()
+                    .child(header)
+                    .children(workspaces)
+                    .into_any_element(),
+            );
+        }
+        sections
     }
 
     fn render_not_configured(&self, cx: &App) -> AnyElement {
@@ -852,7 +1034,7 @@ impl PaseoSidebar {
                     } else {
                         this.children(group.workspaces.into_iter().map(|entry| {
                             let is_active = active_workspace == Some(entry.workspace.id.as_str());
-                            self.render_workspace(store, entry, is_active, cx)
+                            self.render_workspace(store, entry, is_active, None, cx)
                         }))
                     }
                 })
@@ -865,6 +1047,7 @@ impl PaseoSidebar {
         store: &Entity<PaseoStore>,
         entry: WorkspaceEntry,
         is_active: bool,
+        origin: Option<RowOrigin>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace = &entry.workspace;
@@ -892,9 +1075,24 @@ impl PaseoSidebar {
             .and_then(|git| git.current_branch.clone());
         // A worktree shows its name, and its branch when that differs (the daemon names new
         // worktrees and their branches alike); a checkout shows its branch. `ThreadItem` only
-        // renders linked worktrees, hence the kind for both.
-        let worktree_name = workspace.worktree_slug.clone().filter(|_| is_worktree);
+        // renders linked worktrees, hence the kind for both. Rows that also show their project
+        // and daemon keep to the branch, as Paseo's app does.
+        let worktree_name = workspace
+            .worktree_slug
+            .clone()
+            .filter(|_| is_worktree && origin.is_none());
+        let branch = branch.or_else(|| worktree_name.clone().filter(|_| origin.is_some()));
         let branch_name = branch.filter(|branch| Some(branch) != worktree_name.as_ref());
+        // Rows with their project and daemon show the branch among those details instead, so
+        // that it gives way before them.
+        let mut origin = origin;
+        let branch_name = match origin.as_mut() {
+            Some(origin) => {
+                origin.branch = branch_name.map(Into::into);
+                None
+            }
+            None => branch_name,
+        };
         let worktrees = if worktree_name.is_some() || branch_name.is_some() {
             vec![ThreadItemWorktreeInfo {
                 worktree_name: worktree_name.map(Into::into),
@@ -965,8 +1163,8 @@ impl PaseoSidebar {
                     ),
             );
         }
-        if let Some(pull_request) = &pull_request {
-            item = item.trailing_metadata(render_pull_request(&key, pull_request));
+        if origin.is_some() || pull_request.is_some() {
+            item = item.trailing_metadata(render_row_details(&key, origin, pull_request.as_ref()));
         }
 
         let agent_count = entry.agents.len();
@@ -1104,6 +1302,88 @@ fn active_workspace_id(
         .find(|workspace| Some(workspace.id.as_str()) == selected)
         .or(matching.first())
         .map(|workspace| workspace.id.clone())
+}
+
+const STATUS_BUCKETS: [WorkspaceStatus; 5] = [
+    WorkspaceStatus::NeedsInput,
+    WorkspaceStatus::Failed,
+    WorkspaceStatus::Attention,
+    WorkspaceStatus::Running,
+    WorkspaceStatus::Done,
+];
+
+fn status_bucket(status: WorkspaceStatus) -> WorkspaceStatus {
+    match status {
+        WorkspaceStatus::Unknown => WorkspaceStatus::Done,
+        status => status,
+    }
+}
+
+fn bucket_heading(bucket: WorkspaceStatus) -> (IconName, Color, &'static str) {
+    match bucket {
+        WorkspaceStatus::NeedsInput => (IconName::Warning, Color::Warning, "Needs input"),
+        WorkspaceStatus::Failed => (IconName::XCircle, Color::Error, "Failed"),
+        WorkspaceStatus::Attention => (IconName::Check, Color::Success, "Ready to review"),
+        WorkspaceStatus::Running => (IconName::LoadCircle, Color::Accent, "Working"),
+        WorkspaceStatus::Done | WorkspaceStatus::Unknown => (IconName::Check, Color::Muted, "Done"),
+    }
+}
+
+/// The end of a row's second line: its project and daemon when rows of several are mixed,
+/// then its pull request.
+fn render_row_details(
+    key: &DaemonItemKey,
+    origin: Option<RowOrigin>,
+    pull_request: Option<&PullRequest>,
+) -> AnyElement {
+    let separator = || {
+        Label::new("•")
+            .size(LabelSize::Small)
+            .color(Color::Disabled)
+            .into_any_element()
+    };
+    // The branch gives way first; the project and daemon are capped, the pull request stays.
+    let detail = |icon: IconName, text: SharedString, capped: bool| {
+        h_flex()
+            .min_w_0()
+            .gap_0p5()
+            .map(|this| {
+                if capped {
+                    this.flex_shrink_0().max_w(rems(6.))
+                } else {
+                    this.min_w(rems(3.5))
+                }
+            })
+            .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+            .child(
+                Label::new(text)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any_element()
+    };
+    let mut parts: Vec<AnyElement> = Vec::new();
+    if let Some(origin) = origin {
+        if let Some(branch) = origin.branch {
+            parts.push(detail(IconName::GitBranch, branch, false));
+        }
+        parts.push(detail(IconName::Folder, origin.project, true));
+        if let Some(host) = origin.host {
+            parts.push(detail(IconName::Server, host, true));
+        }
+    }
+    if let Some(pull_request) = pull_request {
+        parts.push(render_pull_request(key, pull_request));
+    }
+    let mut row = h_flex().min_w_0().gap_1();
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            row = row.child(separator());
+        }
+        row = row.child(part);
+    }
+    row.into_any_element()
 }
 
 /// The pull request's number and its CI's state, e.g. "<PR icon> 5 · CI ✓", with the details
@@ -1263,6 +1543,23 @@ impl Render for PaseoSidebar {
         let several_daemons = stores.len() > 1;
         let sections: Vec<AnyElement> = if stores.is_empty() {
             vec![self.render_not_configured(cx)]
+        } else if self.grouping == Grouping::Status {
+            // The daemons' status rows (or only their problems, with one daemon), then every
+            // daemon's workspaces by status.
+            let mut sections: Vec<AnyElement> = stores
+                .iter()
+                .enumerate()
+                .map(|(index, store)| {
+                    self.render_daemon(store, None, several_daemons, false, index == 0, cx)
+                })
+                .collect();
+            sections.extend(self.render_status_groups(
+                &stores,
+                active_workspace.as_ref(),
+                several_daemons,
+                cx,
+            ));
+            sections
         } else {
             stores
                 .iter()
@@ -1272,7 +1569,7 @@ impl Render for PaseoSidebar {
                         .as_ref()
                         .filter(|(active_store, _)| active_store == store)
                         .map(|(_, id)| id.as_str());
-                    self.render_daemon(store, active, several_daemons, index == 0, cx)
+                    self.render_daemon(store, active, several_daemons, true, index == 0, cx)
                 })
                 .collect()
         };
@@ -1335,6 +1632,25 @@ impl Render for PaseoSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_groups_follow_paseos_order() {
+        assert_eq!(
+            STATUS_BUCKETS.map(|bucket| bucket_heading(bucket).2),
+            [
+                "Needs input",
+                "Failed",
+                "Ready to review",
+                "Working",
+                "Done"
+            ]
+        );
+        assert_eq!(
+            status_bucket(WorkspaceStatus::Unknown),
+            WorkspaceStatus::Done,
+            "a status this build does not know is listed with the done ones"
+        );
+    }
 
     #[test]
     fn describes_a_pull_request_and_its_checks() {

@@ -46,8 +46,8 @@ mod screenshots {
     };
     use paseo_client::protocol::{Agent, ProjectSummary, ServerInfo, Workspace};
     use paseo_ui::{
-        ConnectionStatus, DaemonConfig, PaseoAgentItem, PaseoDaemons, PaseoSidebar, PaseoStore,
-        PaseoTerminalItem,
+        ConnectionStatus, DaemonConfig, Grouping, PaseoAgentItem, PaseoDaemons, PaseoSidebar,
+        PaseoStore, PaseoTerminalItem,
     };
     use project::Project;
     use serde_json::{Value, json};
@@ -188,6 +188,32 @@ mod screenshots {
         let path = output_dir.join("sidebar-two-daemons.png");
         screenshot.save(&path)?;
         println!("{}", path.display());
+
+        window.update(&mut cx, |multi_workspace, _, cx| {
+            if let Some(sidebar) = multi_workspace
+                .sidebar()
+                .and_then(|sidebar| sidebar.to_any().downcast::<PaseoSidebar>().ok())
+            {
+                sidebar.update(cx, |sidebar, cx| sidebar.set_grouping(Grouping::Status, cx));
+            }
+        })?;
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, _| window.refresh())?;
+        cx.run_until_parked();
+        let screenshot = cx.capture_screenshot(window.into())?;
+        let path = output_dir.join("sidebar-by-status.png");
+        screenshot.save(&path)?;
+        println!("{}", path.display());
+        window.update(&mut cx, |multi_workspace, _, cx| {
+            if let Some(sidebar) = multi_workspace
+                .sidebar()
+                .and_then(|sidebar| sidebar.to_any().downcast::<PaseoSidebar>().ok())
+            {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_grouping(Grouping::Project, cx)
+                });
+            }
+        })?;
         window.update(&mut cx, |_, window, _| window.remove_window())?;
         cx.run_until_parked();
 

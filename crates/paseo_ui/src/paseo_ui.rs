@@ -19,7 +19,7 @@ pub use agent_session::{
     MODEL_ENV_VAR, NewAgent, PROVIDER_ENV_VAR, PaseoAgentServer, PaseoConnection,
 };
 pub use panel::{PaseoPanel, REPLACES_ZED_AGENT_PANEL, ToggleFocus};
-pub use sidebar::PaseoSidebar;
+pub use sidebar::{Grouping, PaseoSidebar};
 pub use store::{
     ConnectionStatus, DaemonConfig, ENDPOINT_ENV_VAR, PaseoDaemons, PaseoStore, PaseoStoreEvent,
     ProjectGroup, SSH_ENV_VAR, WorkspaceEntry,
