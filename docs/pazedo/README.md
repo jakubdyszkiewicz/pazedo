@@ -50,6 +50,12 @@ each conflict once, instead of replaying every fork commit on every sync.
 Do it at least weekly. When a merge conflicts in an upstream file, update the touch point
 entry below if the seam moved.
 
+Merges so far:
+
+| Date | Upstream | Commits | Conflicts | Notes |
+| --- | --- | --- | --- | --- |
+| 2026-11-15 | `596dfdcf32` | 9 | none (`Cargo.toml`, `Cargo.lock` merged automatically) | Included an ACP SDK update (5.3.0) that reworked `acp_thread` and `agent_ui`'s conversation view, which the Paseo agent tabs reuse; the fork built without changes, its tests passed, and a mock agent ran in the dev build. The fork then changed 13 upstream files by about 290 lines (plus `Cargo.lock`), next to about 14,200 lines in its own crates. |
+
 ## Upstream touch points
 
 Every upstream file the fork changes, with the reason. Keep this list current; it is what

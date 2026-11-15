@@ -14,13 +14,9 @@ done; record decisions where the code or docs that implement them live.
   see development.md "Remote server for SSH projects", "Daemon on another machine" and "Several
   daemons"). Still open: reaching a daemon that listens only on localhost through an SSH
   tunnel; checking that file links in agent output and diffs open in the remote project.
-- **Practice upstream merge** while the fork is only days behind, to test the touch-point list
-  and the merge procedure in README.md.
 
 ## Daily-use gaps
 
-- New workspaces start without an agent; Paseo's app starts one right away with a first
-  prompt (`workspace.create.request` takes `agent` / `firstAgentContext`).
 - The new-workspace picker only branches off existing branches; no "check out a branch" or
   pull request, and no custom branch name.
 - Adding a project uses the native folder dialog only; no GitHub clone
@@ -54,3 +50,9 @@ done; record decisions where the code or docs that implement them live.
   protocol over Paseo; unknown whether Paseo can run a process with a clean binary pipe rather
   than a PTY. Do the SSH variant above first.
 - Show Paseo plugin views (such as a task board) inside pazedo.
+
+## Decided against
+
+- Starting a new workspace's first agent with a prompt from the new-workspace flow, as Paseo's
+  app does (`workspace.create.request` takes `agent` / `firstAgentContext`): the owner decided
+  against it on 2026-11-15.
