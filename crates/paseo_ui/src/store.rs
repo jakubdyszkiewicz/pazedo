@@ -66,7 +66,7 @@ impl Settings for PaseoSettings {
             return Self::default();
         };
         let top_level = DaemonConfig {
-            name: None,
+            name: non_empty(&paseo.name),
             endpoint: non_empty(&paseo.endpoint),
             ssh: non_empty(&paseo.ssh),
         };
@@ -99,6 +99,34 @@ fn configured_daemons(cx: &App) -> Vec<DaemonConfig> {
             ssh: non_empty_env_var(SSH_ENV_VAR),
         }],
         None => PaseoSettings::get_global(cx).daemons.clone(),
+    }
+}
+
+/// Sets or (with `None`) removes the `name` of the daemon at `endpoint` in the settings: the
+/// top-level daemon or its `daemons` entry. Returns whether a daemon with that endpoint is there.
+pub(crate) fn set_daemon_name(
+    content: &mut SettingsContent,
+    endpoint: &str,
+    name: Option<String>,
+) -> bool {
+    let Some(paseo) = content.paseo.as_mut() else {
+        return false;
+    };
+    if paseo.endpoint.as_deref().map(str::trim) == Some(endpoint) {
+        paseo.name = name;
+        return true;
+    }
+    let listed = paseo
+        .daemons
+        .iter_mut()
+        .flatten()
+        .find(|daemon| daemon.endpoint.as_deref().map(str::trim) == Some(endpoint));
+    match listed {
+        Some(daemon) => {
+            daemon.name = name;
+            true
+        }
+        None => false,
     }
 }
 
@@ -365,6 +393,28 @@ impl PaseoStore {
                 .into();
         }
         self.config.endpoint.clone().unwrap_or_default().into()
+    }
+
+    /// Names the daemon in settings.json (its `name`); `None` or an empty name removes the name,
+    /// so the daemon's host name shows. The settings change renames it everywhere.
+    pub fn rename(&self, name: Option<String>, cx: &App) -> Result<()> {
+        if non_empty_env_var(ENDPOINT_ENV_VAR).is_some() {
+            anyhow::bail!(
+                "this daemon comes from {ENDPOINT_ENV_VAR}, not from settings.json, so its name cannot be saved"
+            );
+        }
+        let endpoint = self
+            .config
+            .endpoint
+            .clone()
+            .context("the daemon has no endpoint")?;
+        let name = name.filter(|name| !name.trim().is_empty());
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |content, _| {
+            if !set_daemon_name(content, &endpoint, name) {
+                log::error!("no Paseo daemon with endpoint {endpoint} in settings.json to rename");
+            }
+        });
+        Ok(())
     }
 
     /// The SSH host the daemon's folders are on, or `None` for a daemon on this machine.

@@ -47,6 +47,12 @@ pub enum Grouping {
 
 const GROUPING_KEY: &str = "pazedo_sidebar_grouping";
 
+enum RenameTarget {
+    Workspace(Entity<PaseoStore>, String),
+    /// The daemon's name in the sidebar, kept in settings.json.
+    Daemon(Entity<PaseoStore>),
+}
+
 /// Where a row came from, shown when rows of several projects and daemons are mixed.
 struct RowOrigin {
     branch: Option<SharedString>,
@@ -92,8 +98,8 @@ pub struct PaseoSidebar {
     /// only it is highlighted.
     selected_workspace: Option<DaemonItemKey>,
     rename_editor: Entity<Editor>,
-    /// The workspace whose name is being edited in place.
-    renaming_workspace: Option<(Entity<PaseoStore>, String)>,
+    /// What is being renamed in place.
+    renaming: Option<RenameTarget>,
     scroll_handle: ScrollHandle,
     _store_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -144,7 +150,7 @@ impl PaseoSidebar {
             hovered_workspace: None,
             selected_workspace: None,
             rename_editor,
-            renaming_workspace: None,
+            renaming: None,
             scroll_handle: ScrollHandle::new(),
             _store_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
@@ -372,7 +378,13 @@ impl PaseoSidebar {
             .border_color(cx.theme().colors().border)
             .child(Label::new("Paseo").size(LabelSize::Small))
             .when_some(single_daemon.clone(), |this, store| {
-                this.child(self.render_daemon_status(&store, Color::Muted, cx))
+                this.group("paseo-sidebar-header")
+                    .child(self.render_daemon_status(&store, Color::Muted, cx))
+                    .children(self.render_daemon_rename_button(
+                        &store,
+                        "paseo-sidebar-header".into(),
+                        cx,
+                    ))
             })
             .child(div().flex_1())
             .child(self.render_grouping_menu(cx))
@@ -389,12 +401,13 @@ impl PaseoSidebar {
             .into_any_element()
     }
 
-    /// The daemon's connection dot and name, with the connection's details on hover.
+    /// The daemon's connection dot and name, with the connection's details on hover, a
+    /// right-click menu to rename it, and the name editor while renaming.
     fn render_daemon_status(
         &self,
         store: &Entity<PaseoStore>,
         name_color: Color,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let store_ref = store.read(cx);
         let (indicator_color, status_text): (Color, SharedString) = match store_ref.status() {
@@ -411,11 +424,22 @@ impl PaseoSidebar {
                 (Color::Muted, "Not connected".into())
             }
         };
+        let daemon = store.entity_id();
+        let is_renaming =
+            matches!(&self.renaming, Some(RenameTarget::Daemon(renaming)) if renaming == store);
+        if is_renaming {
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(Indicator::dot().color(indicator_color))
+                .child(self.render_rename_editor(cx))
+                .into_any_element();
+        }
         let tooltip = connection_tooltip(store_ref);
-        h_flex()
+        let status = h_flex()
             .id(SharedString::from(format!(
-                "paseo-connection-status-{}",
-                store.entity_id()
+                "paseo-connection-status-{daemon}"
             )))
             .min_w_0()
             .gap_1()
@@ -426,8 +450,54 @@ impl PaseoSidebar {
                     .color(name_color)
                     .truncate(),
             )
-            .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx))
+            .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx));
+        let sidebar = cx.weak_entity();
+        let store = store.clone();
+        right_click_menu(SharedString::from(format!("paseo-daemon-menu-{daemon}")))
+            .trigger(move |_, _, _| status)
+            .menu(move |window, cx| {
+                let sidebar = sidebar.clone();
+                let store = store.clone();
+                ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.entry("Rename…", None, move |window, cx| {
+                        sidebar
+                            .update(cx, |sidebar, cx| {
+                                sidebar.start_daemon_rename(&store, window, cx)
+                            })
+                            .ok();
+                    })
+                })
+            })
             .into_any_element()
+    }
+
+    /// A pencil shown while the daemon's row is hovered.
+    fn render_daemon_rename_button(
+        &self,
+        store: &Entity<PaseoStore>,
+        group: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if matches!(&self.renaming, Some(RenameTarget::Daemon(renaming)) if renaming == store) {
+            return None;
+        }
+        Some(
+            IconButton::new(
+                SharedString::from(format!("paseo-rename-daemon-{}", store.entity_id())),
+                IconName::Pencil,
+            )
+            .icon_size(IconSize::Small)
+            .tooltip(Tooltip::text("Rename"))
+            .visible_on_hover(group)
+            .on_click(cx.listener({
+                let store = store.clone();
+                move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.start_daemon_rename(&store, window, cx)
+                }
+            }))
+            .into_any_element(),
+        )
     }
 
     fn render_add_project_button(
@@ -540,10 +610,35 @@ impl PaseoSidebar {
         else {
             return;
         };
-        if self.renaming_workspace.is_some() {
+        self.begin_rename(
+            RenameTarget::Workspace(store.clone(), workspace_id.to_string()),
+            name,
+            window,
+            cx,
+        );
+    }
+
+    fn start_daemon_rename(
+        &mut self,
+        store: &Entity<PaseoStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = store.read(cx).display_name().to_string();
+        self.begin_rename(RenameTarget::Daemon(store.clone()), name, window, cx);
+    }
+
+    fn begin_rename(
+        &mut self,
+        target: RenameTarget,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.renaming.is_some() {
             self.finish_rename(true, window, cx);
         }
-        self.renaming_workspace = Some((store.clone(), workspace_id.to_string()));
+        self.renaming = Some(target);
         self.rename_editor.update(cx, |editor, cx| {
             editor.set_text(name, window, cx);
             editor.select_all(&editor::actions::SelectAll, window, cx);
@@ -553,9 +648,10 @@ impl PaseoSidebar {
     }
 
     /// Ends renaming in place, saving the edited name unless `save` is false. Like Paseo, an
-    /// empty or unchanged name leaves the workspace as it was.
+    /// empty or unchanged name leaves a workspace as it was; an empty daemon name goes back to
+    /// the daemon's host name.
     fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((store, workspace_id)) = self.renaming_workspace.take() else {
+        let Some(target) = self.renaming.take() else {
             return;
         };
         cx.notify();
@@ -566,6 +662,23 @@ impl PaseoSidebar {
             return;
         }
         let title = self.rename_editor.read(cx).text(cx).trim().to_string();
+        let (store, workspace_id) = match target {
+            RenameTarget::Workspace(store, workspace_id) => (store, workspace_id),
+            RenameTarget::Daemon(store) => {
+                if store.read(cx).display_name() == title {
+                    return;
+                }
+                if let Err(error) = store.read(cx).rename(Some(title), cx) {
+                    Task::<anyhow::Result<()>>::ready(Err(error)).detach_and_prompt_err(
+                        "Could not rename the daemon",
+                        window,
+                        cx,
+                        |error, _, _| Some(format!("{error:#}")),
+                    );
+                }
+                return;
+            }
+        };
         let unchanged = store
             .read(cx)
             .workspace(&workspace_id)
@@ -773,9 +886,17 @@ impl PaseoSidebar {
             colors.border,
         );
         let add_project = self.render_add_project_button(store, cx);
+        let row_group = SharedString::from(format!("paseo-daemon-row-{daemon}"));
+        let status = with_header.then(|| self.render_daemon_status(store, Color::Default, cx));
+        let rename = if with_header {
+            self.render_daemon_rename_button(store, row_group.clone(), cx)
+        } else {
+            None
+        };
         let header = with_header.then(|| {
             h_flex()
                 .id(SharedString::from(format!("paseo-daemon-{daemon}")))
+                .group(row_group)
                 .h(Tab::container_height(cx))
                 .w_full()
                 .px_2()
@@ -803,8 +924,9 @@ impl PaseoSidebar {
                             cx.notify();
                         }))
                 })
-                .child(self.render_daemon_status(store, Color::Default, cx))
+                .children(status)
                 .child(div().flex_1())
+                .children(rename)
                 .children(add_project)
         });
         let projects: Vec<AnyElement> = if is_collapsed || !show_projects {
@@ -1077,10 +1199,11 @@ impl PaseoSidebar {
         let workspace_id = workspace.id.clone();
         let key = DaemonItemKey::new(store, &workspace.id);
         let is_hovered = self.hovered_workspace.as_ref() == Some(&key);
-        let is_renaming = self
-            .renaming_workspace
-            .as_ref()
-            .is_some_and(|(renaming_store, id)| renaming_store == store && *id == workspace.id);
+        let is_renaming = matches!(
+            &self.renaming,
+            Some(RenameTarget::Workspace(renaming_store, id))
+                if renaming_store == store && *id == workspace.id
+        );
 
         let (status, notified) = match workspace.status {
             WorkspaceStatus::Running => (AgentThreadStatus::Running, false),

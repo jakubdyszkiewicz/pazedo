@@ -1218,6 +1218,10 @@ pub struct PaseoSettingsContent {
     ///
     /// Default: null
     pub endpoint: Option<String>,
+    /// The name shown in the sidebar for this daemon. Defaults to the daemon's host name.
+    ///
+    /// Default: null
+    pub name: Option<String>,
     /// The SSH host the daemon's folders are on, for a daemon on another machine, e.g.
     /// `user@devbox` or `ssh -p 2222 user@devbox`. Its workspaces then open as remote projects
     /// over SSH, with the options of a matching `ssh_connections` entry. Leave it unset for a

@@ -166,7 +166,9 @@ shorthand for one more daemon, listed first:
 }
 ```
 
-`name` defaults to the daemon's host name. Each daemon has its own `PaseoStore` and
+`name` defaults to the daemon's host name. The pencil on a daemon's row (or its right-click
+menu) renames it in place and writes `name` to settings.json; an empty name removes it. The
+top-level shorthand takes a `name` too. Each daemon has its own `PaseoStore` and
 `PaseoConnection`; `PaseoDaemons` keeps the list in step with the settings, keeping a daemon's
 store (and connection) while its endpoint stays. Agent and terminal tabs hold their daemon's
 store. A Zed workspace's panel shows the first daemon whose folders are on the workspace's

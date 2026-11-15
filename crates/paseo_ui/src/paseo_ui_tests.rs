@@ -791,6 +791,7 @@ fn test_the_daemon_settings_connect_and_reconnect(cx: &mut TestAppContext) {
     set_paseo(
         Some(settings::PaseoSettingsContent {
             endpoint: Some("127.0.0.1:1".into()),
+            name: None,
             ssh: None,
             daemons: Some(vec![settings::PaseoDaemonContent {
                 name: Some("dev box".into()),
@@ -887,6 +888,7 @@ async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppC
             settings.update_user_settings(cx, |content| {
                 content.paseo = Some(settings::PaseoSettingsContent {
                     endpoint: Some("127.0.0.1:1".into()),
+                    name: None,
                     ssh: None,
                     daemons: Some(vec![
                         settings::PaseoDaemonContent {
@@ -973,4 +975,48 @@ async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppC
 
         assert!(invalid.read(cx).host(cx).is_err());
     });
+}
+
+#[test]
+fn renaming_a_daemon_writes_its_settings_entry() {
+    let mut content = settings::SettingsContent::default();
+    content.paseo = Some(settings::PaseoSettingsContent {
+        endpoint: Some("100.64.0.1:6767".into()),
+        name: None,
+        ssh: None,
+        daemons: Some(vec![settings::PaseoDaemonContent {
+            name: None,
+            endpoint: Some("100.64.0.2:6767".into()),
+            ssh: Some("root@dev-box".into()),
+        }]),
+    });
+
+    assert!(crate::store::set_daemon_name(
+        &mut content,
+        "100.64.0.1:6767",
+        Some("mini".into())
+    ));
+    assert!(crate::store::set_daemon_name(
+        &mut content,
+        "100.64.0.2:6767",
+        Some("dev box".into())
+    ));
+    assert!(!crate::store::set_daemon_name(
+        &mut content,
+        "127.0.0.1:1",
+        Some("nowhere".into())
+    ));
+    let paseo = content.paseo.as_ref().unwrap();
+    assert_eq!(paseo.name.as_deref(), Some("mini"));
+    assert_eq!(
+        paseo.daemons.as_ref().unwrap()[0].name.as_deref(),
+        Some("dev box")
+    );
+
+    assert!(crate::store::set_daemon_name(
+        &mut content,
+        "100.64.0.2:6767",
+        None
+    ));
+    assert_eq!(content.paseo.unwrap().daemons.unwrap()[0].name, None);
 }
