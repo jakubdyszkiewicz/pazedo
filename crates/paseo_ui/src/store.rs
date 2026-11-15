@@ -11,14 +11,17 @@ use paseo_client::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
         AgentUpdate, ArchiveWorkspace, AttentionReason, BranchSuggestions, ClearAgentAttention,
         CloseItems, CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents,
-        FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page, ProjectSummary, ProjectUpdate,
-        ProviderEntry, RefreshAgent, ServerInfo, ServerMessage, SetSessionEventSubscription,
-        SetWorkspaceTitle, Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit,
-        TerminalsChanged, Workspace, WorkspaceSource, WorkspaceUpdate,
+        FetchWorkspaces, GetProvidersSnapshot, HelloAuth, ListProjects, Page, ProjectSummary,
+        ProjectUpdate, ProviderEntry, RefreshAgent, ServerInfo, ServerMessage,
+        SetSessionEventSubscription, SetWorkspaceTitle, Subscribe, SubscribeTerminals,
+        TerminalInfo, TerminalStreamExit, TerminalsChanged, Workspace, WorkspaceSource,
+        WorkspaceUpdate,
     },
 };
 use project::Project;
 use recent_projects::RemoteSettings;
+
+use crate::daemon_auth;
 use remote::{RemoteConnectionOptions, SshConnectionOptions};
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
 use std::{
@@ -231,6 +234,12 @@ pub enum ConnectionStatus {
     Connecting(Endpoint),
     Connected(Arc<ServerInfo>),
     Disconnected(SharedString),
+    /// The daemon has a password and refused what was sent (nothing, the local credential or
+    /// a password); the client waits for [`PaseoStore::submit_password`].
+    PasswordRequired {
+        /// A password was sent and refused, rather than none.
+        rejected: bool,
+    },
 }
 
 /// For open agent sessions and terminals, which follow their own subscriptions.
@@ -249,6 +258,12 @@ pub struct PaseoStore {
     config: DaemonConfig,
     client: Option<Client>,
     status: ConnectionStatus,
+    endpoint: Option<Endpoint>,
+    /// Whether the credentials in use are a password, as opposed to the local credential or
+    /// none; tells a refused password apart from a missing one.
+    sends_password: bool,
+    /// A password typed into the prompt, saved once the daemon accepts it.
+    typed_password: Option<String>,
     sync_error: Option<SharedString>,
     projects: BTreeMap<String, ProjectSummary>,
     workspaces: HashMap<String, Workspace>,
@@ -347,6 +362,9 @@ impl PaseoStore {
             config,
             client: None,
             status: ConnectionStatus::NotConfigured,
+            endpoint: None,
+            sends_password: false,
+            typed_password: None,
             sync_error: None,
             projects: BTreeMap::default(),
             workspaces: HashMap::default(),
@@ -456,6 +474,9 @@ impl PaseoStore {
         // Dropping the driver task closes the old connection.
         self._tasks.clear();
         self.status = ConnectionStatus::NotConfigured;
+        self.endpoint = None;
+        self.sends_password = false;
+        self.typed_password = None;
         self.sync_error = None;
         self.projects.clear();
         self.workspaces.clear();
@@ -476,6 +497,7 @@ impl PaseoStore {
         let Some(endpoint) = endpoint else {
             return;
         };
+        let password_url = daemon_auth::password_url(&endpoint);
         let endpoint = match Endpoint::parse(&endpoint) {
             Ok(endpoint) => endpoint,
             Err(error) => {
@@ -483,11 +505,29 @@ impl PaseoStore {
                 return;
             }
         };
+        self.endpoint = Some(endpoint.clone());
+        self.status = ConnectionStatus::Connecting(endpoint.clone());
+        // The saved password comes from the keychain, asynchronously; connecting without it
+        // first would show a password prompt for a moment.
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let auth = daemon_auth::initial_auth(endpoint.clone(), password_url, cx).await;
+            this.update(cx, |this, cx| this.start_client(endpoint, auth, cx))
+                .ok();
+        }));
+    }
 
+    fn start_client(
+        &mut self,
+        endpoint: Endpoint,
+        auth: Option<HelloAuth>,
+        cx: &mut Context<Self>,
+    ) {
         let executor = cx.background_executor().clone();
         let sleep: Sleep = Arc::new(move |duration| executor.timer(duration).boxed());
-        let mut options = ConnectOptions::new(endpoint.clone(), CLIENT_ID, sleep);
+        let mut options = ConnectOptions::new(endpoint, CLIENT_ID, sleep);
         options.app_version = Some(format!("pazedo {}", env!("CARGO_PKG_VERSION")));
+        self.sends_password = matches!(auth, Some(HelloAuth::Password { .. }));
+        options.auth = auth;
         let (client, mut events, driver) = Client::new(options);
         self._tasks.push(cx.background_spawn(driver));
         self._tasks.push(cx.spawn(async move |this, cx| {
@@ -501,7 +541,22 @@ impl PaseoStore {
             }
         }));
         self.client = Some(client);
+        cx.notify();
+    }
+
+    /// Tries the password; it is saved once the daemon accepts it.
+    pub fn submit_password(&mut self, password: String, cx: &mut Context<Self>) {
+        let (Some(client), Some(endpoint)) = (self.client.clone(), self.endpoint.clone()) else {
+            return;
+        };
+        client.set_auth(Some(HelloAuth::Password {
+            password: password.clone(),
+        }));
+        self.sends_password = true;
+        self.typed_password = Some(password);
         self.status = ConnectionStatus::Connecting(endpoint);
+        client.reconnect_now();
+        cx.notify();
     }
 
     /// The client, once the store has been configured with an endpoint. Requests fail while
@@ -1080,6 +1135,12 @@ impl PaseoStore {
         match event {
             Event::Connected(server_info) => {
                 self.status = ConnectionStatus::Connected(server_info);
+                if let Some(password) = self.typed_password.take()
+                    && let Some(endpoint) = self.config.endpoint.as_deref()
+                {
+                    daemon_auth::save_password(daemon_auth::password_url(endpoint), password, cx)
+                        .detach();
+                }
                 self.sync(cx);
                 self.refresh_providers(cx);
                 cx.emit(PaseoStoreEvent::Connected);
@@ -1095,6 +1156,13 @@ impl PaseoStore {
                     *subscription = None;
                 }
                 cx.emit(PaseoStoreEvent::Disconnected);
+            }
+            Event::Rejected(_) => {
+                self.typed_password = None;
+                self.status = ConnectionStatus::PasswordRequired {
+                    rejected: self.sends_password,
+                };
+                cx.notify();
             }
             Event::Message(ServerMessage::AgentStream(stream)) => {
                 cx.emit(PaseoStoreEvent::AgentStream(stream));

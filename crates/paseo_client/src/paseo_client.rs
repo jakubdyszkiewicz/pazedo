@@ -219,6 +219,10 @@ pub enum Event {
     },
     Message(ServerMessage),
     Terminal(TerminalFrame),
+    /// The daemon refused the credentials (follows `Disconnected`). The driver does not retry
+    /// with the same credentials; it waits for [`Client::reconnect_now`], typically after
+    /// [`Client::set_auth`].
+    Rejected(HelloRejectionReason),
 }
 
 /// A correlated response before typed decoding.
@@ -298,6 +302,10 @@ struct Shared {
     /// subscribe response, so the restore frame that follows it cannot be missed.
     terminal_routes: Mutex<HashMap<u8, mpsc::UnboundedSender<TerminalFrame>>>,
     next_request_id: AtomicU64,
+    /// Sent with every `hello`; starts as [`ConnectOptions::auth`].
+    auth: Mutex<Option<HelloAuth>>,
+    /// Wakes the driver from its wait between attempts.
+    reconnect: mpsc::UnboundedSender<()>,
 }
 
 impl Shared {
@@ -343,12 +351,15 @@ impl Client {
         mpsc::UnboundedReceiver<Event>,
         impl Future<Output = ()> + Send + 'static,
     ) {
+        let (reconnect_tx, reconnect_rx) = mpsc::unbounded();
         let shared = Arc::new(Shared {
             request_id_prefix: format!("pazedo-{}", uuid::Uuid::new_v4().simple()),
             connection: Mutex::default(),
             pending: Mutex::default(),
             terminal_routes: Mutex::default(),
             next_request_id: AtomicU64::default(),
+            auth: Mutex::new(options.auth.clone()),
+            reconnect: reconnect_tx,
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded();
@@ -361,8 +372,19 @@ impl Client {
         (
             client,
             events_rx,
-            drive(shared, options, events_tx, shutdown_rx),
+            drive(shared, options, events_tx, shutdown_rx, reconnect_rx),
         )
+    }
+
+    /// Replaces the credentials sent from the next connection attempt on.
+    pub fn set_auth(&self, auth: Option<HelloAuth>) {
+        *self.shared.auth.lock() = auth;
+    }
+
+    /// Ends the wait before the next connection attempt: the backoff after a lost connection,
+    /// or the indefinite wait after the daemon rejected the credentials.
+    pub fn reconnect_now(&self) {
+        self.shared.reconnect.unbounded_send(()).ok();
     }
 
     /// The current connection's `server_info`, or `None` while disconnected.
@@ -521,6 +543,7 @@ async fn drive(
     options: ConnectOptions,
     events: mpsc::UnboundedSender<Event>,
     shutdown: oneshot::Receiver<()>,
+    mut reconnect: mpsc::UnboundedReceiver<()>,
 ) {
     // `oneshot::Receiver` reports itself terminated once its sender is dropped, which makes
     // `select!` skip it; `Fuse` only terminates after the future actually completed.
@@ -546,12 +569,34 @@ async fn drive(
         shared.disconnected(&reason);
         events.unbounded_send(Event::Disconnected { reason }).ok();
 
+        let rejection = error
+            .downcast_ref::<HelloRejected>()
+            .map(|rejected| rejected.0)
+            .filter(|reason| {
+                matches!(
+                    reason,
+                    HelloRejectionReason::PasswordRequired
+                        | HelloRejectionReason::IncorrectPassword
+                )
+            });
+        if let Some(reason) = rejection {
+            // The same credentials would be refused again.
+            events.unbounded_send(Event::Rejected(reason)).ok();
+            attempt = 0;
+            select_biased! {
+                _ = shutdown => return,
+                _ = reconnect.next() => {}
+            }
+            continue;
+        }
+
         let delay = options.reconnect_delay(attempt);
         attempt = attempt.saturating_add(1);
         let mut delay = (options.sleep)(delay).fuse();
         select_biased! {
             _ = shutdown => return,
             _ = delay => {}
+            _ = reconnect.next() => {}
         }
     }
 }
@@ -588,12 +633,13 @@ async fn run_connection(
         .context("WebSocket handshake failed")?;
     let (mut sink, mut stream) = websocket.split();
 
+    let auth = shared.auth.lock().clone();
     let hello = Hello {
         message_type: "hello",
         client_id: &options.client_id,
         client_type: options.client_type,
         protocol_version: PROTOCOL_VERSION,
-        auth: options.auth.as_ref(),
+        auth: auth.as_ref(),
         app_version: options.app_version.as_deref(),
         capabilities: &options.capabilities,
     };

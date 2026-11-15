@@ -12598,6 +12598,7 @@ dependencies = [
  "client",
  "clock",
  "collections",
+ "credentials_provider",
  "db",
  "editor",
  "env_logger 0.11.8",
@@ -12613,6 +12614,7 @@ dependencies = [
  "node_runtime",
  "paseo_client",
  "paseo_ui",
+ "paths",
  "picker",
  "platform_title_bar",
  "pretty_assertions",
@@ -12638,6 +12640,7 @@ dependencies = [
  "watch",
  "workspace",
  "zed_actions",
+ "zed_credentials_provider",
 ]
 
 [[package]]

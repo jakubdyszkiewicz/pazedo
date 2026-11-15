@@ -5,10 +5,6 @@ done; record decisions where the code or docs that implement them live.
 
 ## Next
 
-- **Authentication** for daemons with a password: send `hello.auth`, reading the local
-  credential from the Paseo home or a password from the keychain, never from settings.json.
-  The owner's daemon has no password and needs none (verified 2026-11-14). The endpoint is a
-  setting now (`"paseo": {"endpoint": ...}`); several daemons in one sidebar would extend it.
 - **Remote dev box, follow-ups.** Daemons on other machines work, several side by side, and
   Pazedo.app uploads its own remote server (Linux x86_64, macOS arm64) to SSH hosts (2026-11-15,
   see development.md "Remote server for SSH projects", "Daemon on another machine" and "Several

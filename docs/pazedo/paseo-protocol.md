@@ -35,7 +35,10 @@ messages, bump `PASEO_PROTOCOL_PACKAGE_VERSION`, and run the live tests.
   password). With a password, `hello.auth` must be `{kind: "password", password}` or
   `{kind: "localCredential", token}`; the Paseo CLI reads the token from
   `<paseo home>/local-credential` and the password from the host URI or `PASEO_PASSWORD`.
-  pazedo sends no `auth` yet.
+  A refused hello gets `{"type":"hello.rejected","reason":"password_required" |
+  "incorrect_password" | "incompatible_protocol"}` and the socket closes. pazedo sends a saved
+  password or, to a daemon on its own machine, the local credential (development.md, "Daemon
+  password"); verified 2026-11-15 against the test daemon with a password.
 - Liveness: send `{"type":"ping"}` every 10 s; any inbound frame proves liveness. The daemon
   closes sockets that stop pinging for 45 s after their first ping. Paseo reconnects after
   `min(1.5 s × 2^attempt, 30 s)` and resets the attempt counter on `server_info`. pazedo uses the

@@ -153,6 +153,36 @@ workspaces of a checkout and of a Paseo worktree opened over SSH with their remo
 agents; gopls ran on the box (hover worked in a trusted project); the folder picker listed
 `/root/dev`.
 
+### Daemon password
+
+A daemon with a password (`paseo daemon set-password`, then `paseo daemon restart`; or
+`PASEO_PASSWORD` in its environment) refuses Pazedo's `hello` until it sends one. Pazedo then
+shows the daemon as "Password required", with Enter Password… in the sidebar. The typed
+password is tried at once and saved only after the daemon accepts it; a refused one shows "…
+rejected the password" and the prompt again. The client does not retry refused credentials on
+its own (`Event::Rejected` in `paseo_client`); it waits for `Client::set_auth` and
+`Client::reconnect_now`.
+
+On connecting, Pazedo sends the saved password for the endpoint, else, for a daemon on this
+machine (a Unix socket, `localhost`, a loopback address or an address of one of this machine's
+interfaces, such as its own Tailscale address), the daemon's local credential from
+`$PASEO_HOME/local-credential` (default `~/.paseo`), which the daemon accepts like its password,
+so Pazedo needs no password for the Mac mini's own daemon. Passwords never go to settings.json:
+release builds keep them in the macOS Keychain under `paseo://<endpoint>`; debug builds use Zed's
+development credentials file (`<config dir>/development_credentials`), as Zed's own debug builds
+do, because every rebuild is signed differently and the Keychain would ask for access each
+time. Pazedo.app is ad-hoc signed per build too, so after an update macOS may ask once whether
+it may read the saved password; Always Allow lasts until the next build.
+
+The password travels in plain text inside the WebSocket (`ws://`); only use it over Tailscale,
+SSH or another encrypted link.
+
+Verified 2026-11-15 in a dev build against the test daemon with a password: the sidebar asked
+for it, a wrong one was refused and not saved, the right one connected and was saved, a restart
+connected with the saved password, and with no saved password and `PASEO_HOME` set to the test
+daemon's home it connected with the local credential. The log shows only the two refusals,
+never the password. The Keychain path of release builds was not exercised here.
+
 ### Grouping
 
 The sidebar header's group button (list-tree icon) switches between grouping by project (the
@@ -430,3 +460,6 @@ Findings about the daemon from the installed bundle (Paseo 0.15.4, read from
 - `daemon.listen` (or `PASEO_LISTEN`) accepts `host:port`, `/path/to/socket` or
   `unix:///path/to/socket`; the default is `127.0.0.1:6767`.
 - `PASEO_PASSWORD` or `paseo daemon set-password` enables a password; the test daemon has none.
+  To try one, add `"auth": {"password": "<bcrypt hash>"}` to `daemon` in
+  `~/.paseo-pazedo-test/config.json` (`htpasswd -bnBC 12 "" <password>` makes one; change its
+  `$2y$` prefix to `$2b$`) and restart the test daemon; remove it afterwards.

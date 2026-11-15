@@ -30,6 +30,7 @@ use workspace::{
 
 use crate::{
     add_project::open_add_project_picker,
+    daemon_auth::PasswordPrompt,
     new_workspace::{NewWorkspaceChoice, open_new_workspace_picker},
     panel::PaseoPanel,
     store::{
@@ -700,6 +701,10 @@ impl PaseoSidebar {
                 Color::Error,
                 format!("{} · Disconnected", store_ref.display_name()).into(),
             ),
+            ConnectionStatus::PasswordRequired { .. } => (
+                Color::Warning,
+                format!("{} · Password required", store_ref.display_name()).into(),
+            ),
             ConnectionStatus::NotConfigured | ConnectionStatus::InvalidEndpoint(_) => {
                 (Color::Muted, "Not connected".into())
             }
@@ -1131,6 +1136,8 @@ impl PaseoSidebar {
             ConnectionStatus::Disconnected(reason) => {
                 (IconName::Warning, format!("{reason}. Reconnecting…").into())
             }
+            // Rendered with its button by `render_password_notice`.
+            ConnectionStatus::PasswordRequired { .. } => return None,
             ConnectionStatus::Connecting(_) | ConnectionStatus::Connected(_) => {
                 let error = store.sync_error()?;
                 (
@@ -1140,6 +1147,78 @@ impl PaseoSidebar {
             }
         };
         Some(render_notice(icon, message, cx))
+    }
+
+    fn render_password_notice(
+        &self,
+        store: &Entity<PaseoStore>,
+        rejected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = store.read(cx).display_name();
+        let message: SharedString = if rejected {
+            format!("{name} rejected the password.").into()
+        } else {
+            format!("{name} needs a password.").into()
+        };
+        v_flex()
+            .flex_none()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                h_flex()
+                    .items_start()
+                    .gap_1p5()
+                    .child(
+                        Icon::new(IconName::Lock)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(message)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                    ),
+            )
+            .child(
+                h_flex().pl_5().child(
+                    Button::new(
+                        SharedString::from(format!("paseo-password-{}", store.entity_id())),
+                        "Enter Password…",
+                    )
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener({
+                        let store = store.clone();
+                        move |this, _, window, cx| {
+                            this.open_password_prompt(store.clone(), rejected, window, cx)
+                        }
+                    })),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn open_password_prompt(
+        &mut self,
+        store: Entity<PaseoStore>,
+        rejected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                PasswordPrompt::new(store, rejected, window, cx)
+            });
+        });
     }
 
     /// A daemon's problems (not connected, errors) and, with several daemons, its row with the
@@ -1153,7 +1232,12 @@ impl PaseoSidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let daemon = store.entity_id();
-        let message = self.render_message(store.read(cx), cx);
+        let message = match store.read(cx).status() {
+            ConnectionStatus::PasswordRequired { rejected } => {
+                Some(self.render_password_notice(store, *rejected, cx))
+            }
+            _ => self.render_message(store.read(cx), cx),
+        };
         let colors = cx.theme().colors();
         let (panel_background, border) = (colors.panel_background, colors.border);
         let header = with_header.then(|| {
@@ -1795,6 +1879,12 @@ fn connection_tooltip(store: &PaseoStore) -> SharedString {
         )
         .into(),
         ConnectionStatus::InvalidEndpoint(error) => error.clone(),
+        ConnectionStatus::PasswordRequired { rejected: true } => {
+            "The daemon rejected the password".into()
+        }
+        ConnectionStatus::PasswordRequired { rejected: false } => {
+            "The daemon needs a password".into()
+        }
     }
 }
 

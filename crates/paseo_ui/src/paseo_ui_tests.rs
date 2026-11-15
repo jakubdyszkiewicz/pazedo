@@ -321,6 +321,27 @@ fn test_disconnect_keeps_the_last_directory(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_a_refused_hello_asks_for_the_password(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.handle_event(
+            Event::Disconnected {
+                reason: "password required".into(),
+            },
+            cx,
+        );
+        store.handle_event(
+            Event::Rejected(paseo_client::protocol::HelloRejectionReason::PasswordRequired),
+            cx,
+        );
+        assert!(matches!(
+            store.status(),
+            crate::ConnectionStatus::PasswordRequired { rejected: false }
+        ));
+    });
+}
+
+#[gpui::test]
 async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
@@ -872,8 +893,9 @@ fn test_the_daemon_settings_connect_and_reconnect(cx: &mut TestAppContext) {
         "{:?}",
         statuses(cx)
     );
+    // The client itself starts once the saved password has been looked up; running that would
+    // open a real socket, which the test scheduler does not allow.
     let first = stores(cx)[0].clone();
-    assert!(first.read_with(cx, |store, _| store.client().is_some()));
 
     set_paseo(
         Some(settings::PaseoSettingsContent {

@@ -5,6 +5,7 @@
 mod add_project;
 mod agent_item;
 mod agent_session;
+mod daemon_auth;
 mod new_workspace;
 mod panel;
 mod sidebar;

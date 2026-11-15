@@ -5,7 +5,7 @@ use paseo_client::{
     fake_daemon::{FakeConnection, FakeDaemon, smol_sleep, with_timeout},
     frames::{TerminalFrame, TerminalOpcode},
     protocol::{
-        FetchWorkspaces, HelloRejectionReason, ListProjects, ServerMessage, Subscribe,
+        FetchWorkspaces, HelloAuth, HelloRejectionReason, ListProjects, ServerMessage, Subscribe,
         SubscribeTerminal, TerminalClientMessage, TerminalInput, WorkspaceStatus, WorkspaceUpdate,
     },
 };
@@ -267,12 +267,64 @@ fn requests_fail_fast_while_disconnected() -> Result<()> {
             }
             other => panic!("expected Disconnected, got {other:?}"),
         }
+        assert!(matches!(harness.next_event().await?, Event::Rejected(_)));
         let error = harness.client.request(&ListProjects {}).await.unwrap_err();
         assert!(format!("{error:#}").contains("not connected"), "{error:#}");
         assert!(harness.client.server_info().is_none());
 
         harness.daemon.set_hello_rejection(None);
+        harness.client.reconnect_now();
         harness.connect().await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn a_rejected_hello_waits_for_new_credentials() -> Result<()> {
+    smol::block_on(async {
+        let mut harness = Harness::start(|_| {}).await?;
+        harness
+            .daemon
+            .set_hello_rejection(Some("password_required"));
+        assert!(matches!(
+            harness.next_event().await?,
+            Event::Disconnected { .. }
+        ));
+        assert!(matches!(
+            harness.next_event().await?,
+            Event::Rejected(HelloRejectionReason::PasswordRequired)
+        ));
+
+        harness.daemon.set_hello_rejection(None);
+        let retried = matches!(
+            futures::future::select(
+                Box::pin(harness.daemon.next_connection()),
+                smol_sleep()(Duration::from_millis(300)),
+            )
+            .await,
+            futures::future::Either::Left(_)
+        );
+        assert!(!retried, "no retry with the credentials that were refused");
+
+        harness.client.set_auth(Some(HelloAuth::Password {
+            password: "secret".into(),
+        }));
+        harness.client.reconnect_now();
+        let connection = harness.connect().await?;
+        assert_eq!(
+            connection.hello["auth"],
+            json!({"kind": "password", "password": "secret"})
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                HelloAuth::Password {
+                    password: "secret".into()
+                }
+            ),
+            "Password { .. }",
+            "debug output leaves the password out"
+        );
         Ok(())
     })
 }

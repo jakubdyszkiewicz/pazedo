@@ -336,6 +336,7 @@ async fn watch(
                 subscribe_directory(client).await?;
             }
             Event::Disconnected { reason } => println!("disconnected: {reason}"),
+            Event::Rejected(reason) => println!("rejected: {reason:?}"),
             Event::Message(message) => print_message(&message),
             Event::Terminal(frame) => {
                 println!("terminal frame {:?} slot {}", frame.opcode, frame.slot)
