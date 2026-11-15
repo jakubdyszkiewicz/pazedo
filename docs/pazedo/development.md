@@ -64,12 +64,23 @@ data directory is new.
 
 Opening a folder on another machine over SSH (Zed's remote development) needs Zed's remote
 server on that machine, built from the same source as the app. Official Zed downloads its
-server from zed.dev; pazedo, on the dev channel, looks for
-`~/.zed_server/zed-remote-server-dev-build` on the remote, and only debug builds can build
-one on the fly. `script/pazedo/remote-server` cross-compiles it for Linux x86_64 (a static
-musl binary, with zig and cargo-zigbuild like Zed's own dev setup) and writes
-`target/zed-remote-server-dev-build.gz`; its header has the commands to install it on the
-remote. Rebuild it after merging upstream Zed; pazedo's own crates are not part of it.
+server from zed.dev; pazedo is on the dev channel, which has nothing to download.
+
+`script/pazedo/bundle` builds servers for Linux x86_64 and Apple Silicon macOS
+(`PAZEDO_REMOTE_SERVER_TARGETS` changes the list) with `script/pazedo/remote-server` and puts
+them in `Pazedo.app/Contents/Resources/remote_server` (`linux-x86_64.gz`, `macos-aarch64.gz`
+and a `version` file: the commit, plus a timestamp when the tree had uncommitted changes).
+Connecting to a host, the app uploads the matching server as
+`~/.zed_server/zed-remote-server-dev-<version>` unless it is already there, so every new build
+replaces the server on its next connection, and deletes pazedo servers that no build has
+uploaded for a week (`crates/remote/src/transport.rs`, `bundled_remote_server`). Linux servers
+are static musl binaries cross-compiled with zig and cargo-zigbuild, like Zed's own dev setup;
+macOS servers build natively and are ad-hoc signed after stripping.
+
+A debug build has no bundled servers: it builds one from source on connect (Zed's default for
+debug builds) or, with `ZED_BUILD_REMOTE_SERVER=false`, uses
+`~/.zed_server/zed-remote-server-dev-build` on the remote; the header of
+`script/pazedo/remote-server` has the commands to install one there.
 
 Measured 2026-11-15 on the Mac mini (M1, 8 cores, 16 GB): first build 12 min 10 s wall, 57 min
 user CPU, peak RSS 7.6 GB, `target/remote_server` 5.5 GB; the binary is 679 MB with debug info,
@@ -177,7 +188,9 @@ list with one daemon.
 
 A daemon on the machine Pazedo runs on needs no `ssh`. Run on another Mac (e.g. the MacBook),
 the Mac mini's daemon is remote too: its folders are on the mini, so it needs
-`"ssh": "me@my-mac"` and a macOS remote server there (not built yet, see todo.md).
+`"ssh": "me@my-mac"`; the app uploads its macOS remote server there. The mini
+needs Remote Login (System Settings, General, Sharing) and the MacBook's key in
+`~/.ssh/authorized_keys`.
 
 To try several daemons with a dev build without touching `~/.config/zed`, give it its own data
 directory: write `<dir>/config/settings.json`, then start the bundle that `run-dev` made with
@@ -191,8 +204,9 @@ The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorksp
 sidebar when `disable_ai` is set or the agent is disabled).
 
 Open a project other than this repository: a dev build that opens the Zed repo itself runs
-rust-analyzer with `cargo run`'s environment and invalidates the build cache. Errors in
-`~/Library/Logs/Zed/Zed.log` about local model providers (LM Studio, Ollama, llama.cpp), a
+rust-analyzer with `cargo run`'s environment and invalidates the build cache. Errors in the log
+(`~/Library/Logs/Zed/Zed.log`, or `logs/Zed.log` inside a custom data directory such as
+Pazedo.app's) about local model providers (LM Studio, Ollama, llama.cpp), a
 missing Anthropic key or `canonicalizing "crates/grammars/src"` (the binary was not started
 from the repo root) are expected.
 

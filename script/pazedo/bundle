@@ -5,8 +5,8 @@
 #   script/pazedo/bundle --skip-build    # bundle the existing target/release/zed
 #   script/pazedo/bundle --install       # also copy it to ~/Applications/Pazedo.app
 #
-# Leaner than Zed's script/bundle-mac, which also builds the CLI and the remote server, fetches
-# cargo-bundle and git, signs with Zed's identity and makes a DMG. This bundle is ad-hoc signed
+# Leaner than Zed's script/bundle-mac, which also builds the CLI, fetches cargo-bundle and git,
+# signs with Zed's identity and makes a DMG. This bundle is ad-hoc signed
 # for this machine only. Install it rather than running it from target/: target/ lives on the
 # external disk, and Zed offers to "move it to Applications" whenever it runs from /Volumes.
 #
@@ -19,6 +19,12 @@
 # The daemon to connect to is a setting, in the app's own settings.json
 # (~/Library/Application Support/Pazedo/config/settings.json):
 #   "paseo": { "endpoint": "100.64.0.1:6767" }
+#
+# Zed's remote servers for the platforms in PAZEDO_REMOTE_SERVER_TARGETS (Linux x86_64 and Apple
+# Silicon macOS by default) go into Contents/Resources/remote_server, built by
+# script/pazedo/remote-server; the app uploads the matching one to SSH hosts. --skip-build
+# reuses the servers built last time. The version file names the build, so hosts get a new
+# server whenever the app changes.
 #
 # The app stays on the "dev" release channel, which never auto-updates; an update from Zed's
 # servers would replace the fork with upstream Zed.
@@ -37,9 +43,22 @@ for argument in "$@"; do
 done
 
 cd "$repo"
+remote_server_targets="${PAZEDO_REMOTE_SERVER_TARGETS:-x86_64-unknown-linux-musl aarch64-apple-darwin}"
+remote_servers="$repo/target/remote_server/bundle"
 if $build; then
   ZED_UPDATE_EXPLANATION="pazedo is built from source with script/pazedo/bundle." \
     cargo build --release --package zed
+  rm -rf "$remote_servers"
+  for triple in $remote_server_targets; do
+    script/pazedo/remote-server "$triple" "$remote_servers/$(
+      echo "$triple" | sed -e 's/^\([^-]*\)-.*-linux-.*/linux-\1/' -e 's/^\([^-]*\)-apple-darwin$/macos-\1/'
+    ).gz"
+  done
+  if git diff --quiet HEAD; then
+    git rev-parse --short=12 HEAD > "$remote_servers/version"
+  else
+    echo "$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d%H%M%S)" > "$remote_servers/version"
+  fi
 fi
 
 binary="$repo/target/release/zed"
@@ -64,6 +83,11 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/Pazedo.icns"
 cp crates/zed/resources/Document.icns "$app/Contents/Resources/Document.icns"
+if [ -f "$remote_servers/version" ]; then
+  cp -R "$remote_servers" "$app/Contents/Resources/remote_server"
+else
+  echo "no remote servers in $remote_servers; SSH projects will need one installed by hand" >&2
+fi
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)
 {

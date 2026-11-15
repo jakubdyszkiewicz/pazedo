@@ -34,6 +34,7 @@ use std::{
 use tempfile::TempDir;
 use util::command::{Child, Command, Stdio};
 use util::{
+    ResultExt as _,
     paths::{PathStyle, RemotePathBuf},
     rel_path::RelPath,
     shell::ShellKind,
@@ -1022,8 +1023,15 @@ impl SshRemoteConnection {
         version: Version,
         cx: &mut AsyncApp,
     ) -> Result<Arc<RelPath>> {
-        let version_str = match release_channel {
-            ReleaseChannel::Dev => "build".to_string(),
+        // pazedo: a server bundled with the app is named after the build it came from, so a
+        // new build replaces an older server instead of reusing it.
+        let bundled_server = match release_channel {
+            ReleaseChannel::Dev => super::bundled_remote_server(&self.ssh_platform),
+            _ => None,
+        };
+        let version_str = match (release_channel, &bundled_server) {
+            (ReleaseChannel::Dev, Some(bundled_server)) => bundled_server.version.clone(),
+            (ReleaseChannel::Dev, None) => "build".to_string(),
             _ => version.to_string(),
         };
         let binary_name = format!(
@@ -1075,6 +1083,24 @@ impl SshRemoteConnection {
         }
 
         if binary_exists_on_server {
+            return Ok(dst_path.into());
+        }
+
+        if let Some(bundled_server) = bundled_server {
+            let tmp_path = remote_server_dir_relative().join(
+                RelPath::from_unix_str(&format!(
+                    "{binary_name}-download-{}.gz",
+                    std::process::id()
+                ))
+                .context("bundled remote server path")?,
+            );
+            self.upload_local_server_binary(&bundled_server.path, &tmp_path, delegate, cx)
+                .await
+                .context("uploading bundled server binary")?;
+            self.extract_server_binary(&dst_path, &tmp_path, delegate, cx)
+                .await
+                .context("extracting bundled server binary")?;
+            self.remove_old_bundled_servers(&binary_name).await.log_err();
             return Ok(dst_path.into());
         }
 
@@ -1146,6 +1172,42 @@ impl SshRemoteConnection {
             .await
             .context("extracting server binary")?;
         Ok(dst_path.into())
+    }
+
+    /// pazedo: every build of the app uploads its own server, so delete the ones no build has
+    /// uploaded for a week. Other Pazedo installs (another Mac on an older build) may still use
+    /// recent ones.
+    async fn remove_old_bundled_servers(&self, current_binary_name: &str) -> Result<()> {
+        if self.ssh_platform.os.is_windows() {
+            return Ok(());
+        }
+        let directory = remote_server_dir_relative().display(self.path_style());
+        self.socket
+            .run_command(
+                self.ssh_shell_kind,
+                "find",
+                &[
+                    directory.as_ref(),
+                    "-maxdepth",
+                    "1",
+                    "-type",
+                    "f",
+                    "-name",
+                    "zed-remote-server-dev-*",
+                    "!",
+                    "-name",
+                    "zed-remote-server-dev-build",
+                    "!",
+                    "-name",
+                    current_binary_name,
+                    "-mtime",
+                    "+7",
+                    "-delete",
+                ],
+                true,
+            )
+            .await?;
+        Ok(())
     }
 
     async fn download_binary_on_server(

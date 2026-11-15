@@ -9,14 +9,11 @@ done; record decisions where the code or docs that implement them live.
   credential from the Paseo home or a password from the keychain, never from settings.json.
   The owner's daemon has no password and needs none (verified 2026-11-14). The endpoint is a
   setting now (`"paseo": {"endpoint": ...}`); several daemons in one sidebar would extend it.
-- **Remote dev box, follow-ups.** Daemons on other machines work, several side by side
-  (2026-11-15, see development.md "Daemon on another machine" and "Several daemons"). Still
-  open: a macOS remote server, so that Pazedo on the MacBook can open the Mac mini's folders
-  over SSH (build `remote_server` natively for aarch64-apple-darwin and install it as
-  `~/.zed_server/zed-remote-server-dev-build` on the mini); reaching a daemon that listens only
-  on localhost through an SSH tunnel; shipping the remote servers inside Pazedo.app and
-  uploading them instead of copying them by hand; checking that file links in agent output and
-  diffs open in the remote project.
+- **Remote dev box, follow-ups.** Daemons on other machines work, several side by side, and
+  Pazedo.app uploads its own remote server (Linux x86_64, macOS arm64) to SSH hosts (2026-11-15,
+  see development.md "Remote server for SSH projects", "Daemon on another machine" and "Several
+  daemons"). Still open: reaching a daemon that listens only on localhost through an SSH
+  tunnel; checking that file links in agent output and diffs open in the remote project.
 - **Practice upstream merge** while the fork is only days behind, to test the touch-point list
   and the merge procedure in README.md.
 
@@ -28,19 +25,13 @@ done; record decisions where the code or docs that implement them live.
   pull request, and no custom branch name.
 - Adding a project uses the native folder dialog only; no GitHub clone
   (`project.github.clone.request`) or "create a folder" (`project.create_directory.request`).
-- Archive workspaces and remove projects from the sidebar.
-
-- `Pazedo.app` keeps settings and data in `~/Library/Application Support/Pazedo`, but on macOS
-  Zed's log (`~/Library/Logs/Zed/Zed.log`), cache (`~/Library/Caches/Zed`) and state
-  (`~/.local/state/Zed`) ignore the custom data directory, so the app and dev builds share them;
-  their logs interleave in one file. Fix in `crates/paths` if it gets in the way.
+- Remove projects from the sidebar.
 
 - Opening an agent whose workspace is the pazedo repository itself switches the window to that
   repository; trust it only if rust-analyzer may build there.
 
 - The sidebar lists every workspace, including ones without agents; consider hiding or
   archiving idle workspaces.
-- Several daemons (hosts) in one sidebar; the brief groups by host.
 
 ## Paseo panel
 

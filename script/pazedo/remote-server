@@ -1,36 +1,61 @@
 #!/bin/sh
-# Cross-compiles Zed's remote server for a Linux dev box, so pazedo can open SSH projects there.
+# Builds Zed's remote server, optimized, stripped and gzipped, so pazedo can open SSH projects.
 #
-#   script/pazedo/remote-server [target triple]   # default x86_64-unknown-linux-musl
+#   script/pazedo/remote-server [target triple] [output]
+#     default x86_64-unknown-linux-musl, target/remote_server/<os>-<arch>.gz
 #
-# pazedo builds as the `dev` release channel, so over SSH it looks for
-# ~/.zed_server/zed-remote-server-dev-build on the remote. Official Zed's servers do not fit:
-# the server must come from the same source as the app. Only debug builds can build one on
-# the fly, so this builds it ahead of time, the way Zed's debug builds do (cargo-zigbuild, a
-# static musl binary), but optimized and stripped. Rebuild after merging upstream Zed; pazedo's
-# own crates are not part of the server.
+# script/pazedo/bundle runs this for every platform it puts inside Pazedo.app; the app uploads
+# the matching server when it connects to a host (crates/remote/src/transport.rs,
+# bundled_remote_server). Official Zed's servers do not fit: the server must come from the same
+# source as the app, and pazedo is on the dev channel, which has nothing to download.
 #
-# Needs zig (Homebrew), cargo-zigbuild (`cargo install --locked cargo-zigbuild`), the rustup
-# target and the llvm-tools component. Prints the gzipped binary to copy to the remote:
+# Linux servers are static musl binaries cross-compiled with cargo-zigbuild, the way Zed's debug
+# builds do it. They need zig (Homebrew), cargo-zigbuild (`cargo install --locked
+# cargo-zigbuild`), the rustup target and the llvm-tools component. macOS servers build natively.
 #
-#   scp <printed path> devbox:
-#   ssh devbox 'mkdir -p ~/.zed_server && gunzip -c zed-remote-server-dev-build.gz \
+# A debug build (script/pazedo/run-dev) has no bundled servers. It looks for
+# ~/.zed_server/zed-remote-server-dev-build on the remote, so copy one there by hand:
+#
+#   scp target/remote_server/linux-x86_64.gz devbox:
+#   ssh devbox 'mkdir -p ~/.zed_server && gunzip -c linux-x86_64.gz \
 #     > ~/.zed_server/zed-remote-server-dev-build && chmod +x ~/.zed_server/zed-remote-server-dev-build'
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 triple="${1:-x86_64-unknown-linux-musl}"
 target_dir="$repo/target/remote_server"
-output="$repo/target/zed-remote-server-dev-build.gz"
+
+case "$triple" in
+  x86_64-unknown-linux-musl) platform=linux-x86_64 ;;
+  aarch64-unknown-linux-musl) platform=linux-aarch64 ;;
+  aarch64-apple-darwin) platform=macos-aarch64 ;;
+  x86_64-apple-darwin) platform=macos-x86_64 ;;
+  *) echo "unsupported target $triple" >&2; exit 1 ;;
+esac
+output="${2:-$target_dir/$platform.gz}"
 
 cd "$repo"
 rustup target add "$triple" >/dev/null
 rustup component add llvm-tools >/dev/null
-RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" \
-  cargo zigbuild --release --package remote_server --target "$triple" --target-dir "$target_dir"
+case "$triple" in
+  *-linux-*)
+    RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" \
+      cargo zigbuild --release --package remote_server --target "$triple" --target-dir "$target_dir"
+    ;;
+  *)
+    cargo build --release --package remote_server --target "$triple" --target-dir "$target_dir"
+    ;;
+esac
 
 strip=$(find "$(rustc --print sysroot)" -name llvm-strip -type f | head -n 1)
 binary="$target_dir/$triple/release/remote-server"
 "$strip" --strip-all "$binary" -o "$binary-stripped"
-gzip -9 -c "$binary-stripped" > "$output"
+case "$triple" in
+  # Stripping drops the linker's ad-hoc signature, and Apple Silicon refuses unsigned binaries.
+  *-apple-darwin) codesign --force --sign - "$binary-stripped" ;;
+esac
+mkdir -p "$(dirname -- "$output")"
+# -n leaves the timestamp out, so the remote copy gets the time it was unpacked; pazedo deletes
+# servers that have not been uploaded for a week by that time.
+gzip -n -9 -c "$binary-stripped" > "$output"
 ls -lh "$output"

@@ -12,7 +12,7 @@ use futures::{
 };
 use gpui::{AppContext as _, AsyncApp, Task};
 use rpc::proto::Envelope;
-use util::command::Child;
+use util::{ResultExt as _, command::Child};
 
 pub mod docker;
 #[cfg(any(test, feature = "test-support"))]
@@ -255,6 +255,46 @@ fn handle_rpc_messages_over_child_process_stdio(
             Ok(_) => Ok(status),
             Err(error) => Err(error),
         }
+    })
+}
+
+/// pazedo: a remote server that script/pazedo/bundle put inside Pazedo.app, in
+/// `Contents/Resources/remote_server/<os>-<arch>.gz` next to a `version` file. The app is on
+/// the dev channel, which has no servers to download, and a server must come from the same
+/// source as the app.
+pub(crate) struct BundledRemoteServer {
+    pub path: std::path::PathBuf,
+    pub version: String,
+}
+
+pub(crate) fn bundled_remote_server(platform: &RemotePlatform) -> Option<BundledRemoteServer> {
+    let executable = std::env::current_exe().ok()?;
+    let directory = executable
+        .parent()?
+        .parent()?
+        .join("Resources")
+        .join("remote_server");
+    let path = directory.join(format!(
+        "{}-{}.gz",
+        platform.os.as_str(),
+        platform.arch.as_str()
+    ));
+    if !path.is_file() {
+        return None;
+    }
+    let version = std::fs::read_to_string(directory.join("version"))
+        .context("reading the bundled remote server's version")
+        .log_err()?;
+    let version = version.trim();
+    // The version becomes part of a file name on the remote host.
+    let is_safe = |character: char| character.is_ascii_alphanumeric() || "-_.".contains(character);
+    if version.is_empty() || !version.chars().all(is_safe) {
+        log::error!("invalid bundled remote server version {version:?}");
+        return None;
+    }
+    Some(BundledRemoteServer {
+        path,
+        version: version.to_string(),
     })
 }
 
