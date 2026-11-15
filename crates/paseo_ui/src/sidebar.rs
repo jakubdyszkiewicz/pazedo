@@ -1,5 +1,5 @@
 use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WIDTH};
-use collections::HashSet;
+use collections::{HashMap, HashSet};
 use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
@@ -17,8 +17,8 @@ use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, ContextMenu, IconPosition, Indicator, PopoverMenu, Tab, ThreadItem,
-    ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*, right_click_menu,
+    AgentThreadStatus, ContextMenu, IconPosition, Indicator, PopoverMenu, PopoverMenuHandle, Tab,
+    ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*, right_click_menu,
     utils::platform_title_bar_height,
 };
 use util::ResultExt as _;
@@ -48,6 +48,15 @@ pub enum Grouping {
 }
 
 const GROUPING_KEY: &str = "pazedo_sidebar_grouping";
+
+gpui::actions!(
+    paseo_sidebar,
+    [
+        /// Starts a new workspace in the project of the selected row (or of the open workspace),
+        /// like the project's + button.
+        NewWorkspace
+    ]
+);
 
 enum RenameTarget {
     Workspace(Entity<PaseoStore>, String),
@@ -194,6 +203,8 @@ pub struct PaseoSidebar {
     shows_selection: bool,
     /// The rows the keyboard can select, in order, as last rendered.
     selectable_rows: Vec<SelectableRow>,
+    /// The machine menus of projects on several daemons, so the keyboard can open them too.
+    new_workspace_menus: std::cell::RefCell<HashMap<DaemonItemKey, PopoverMenuHandle<ContextMenu>>>,
     rename_editor: Entity<Editor>,
     /// What is being renamed in place.
     renaming: Option<RenameTarget>,
@@ -248,6 +259,7 @@ impl PaseoSidebar {
             selected_entry: None,
             shows_selection: false,
             selectable_rows: Vec::new(),
+            new_workspace_menus: Default::default(),
             rename_editor,
             renaming: None,
             scroll_handle: ScrollHandle::new(),
@@ -433,6 +445,77 @@ impl PaseoSidebar {
         {
             self.select_position(position + 1, cx);
         }
+    }
+
+    /// The project's + button, from the keyboard: for the selected workspace's project, the
+    /// selected project, or else the open workspace's project.
+    fn new_workspace_for_selection(
+        &mut self,
+        _: &NewWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stores = self.stores(cx);
+        let workspace_key = match self.selected_entry.clone() {
+            Some(SidebarEntry::Workspace(key)) => Some(key),
+            Some(SidebarEntry::Project(project_key)) => {
+                let placements = stores
+                    .iter()
+                    .flat_map(|store| {
+                        store
+                            .read(cx)
+                            .project_groups()
+                            .into_iter()
+                            .map(move |group| (store.clone(), group))
+                    })
+                    .collect();
+                let Some(project) = merge_projects(placements).into_iter().find(|project| {
+                    project.placements.first().is_some_and(|(store, group)| {
+                        DaemonItemKey::new(store, &group.project_id) == project_key
+                    })
+                }) else {
+                    return;
+                };
+                if let [(store, group)] = project.placements.as_slice() {
+                    self.new_workspace(
+                        store.clone(),
+                        group.project_id.clone(),
+                        project.name.clone(),
+                        group.root_path.to_string(),
+                        window,
+                        cx,
+                    );
+                } else if let Some(menu) = self.new_workspace_menus.borrow().get(&project_key) {
+                    let menu = menu.clone();
+                    // The menu reads the sidebar, which is being updated here.
+                    window.defer(cx, move |window, cx| menu.toggle(window, cx));
+                }
+                return;
+            }
+            Some(SidebarEntry::StatusSection(_)) | None => self
+                .highlighted_workspace(cx)
+                .map(|(store, id)| DaemonItemKey::new(&store, &id)),
+        };
+        let Some(key) = workspace_key else {
+            return;
+        };
+        let Some(store) = stores
+            .into_iter()
+            .find(|store| store.entity_id() == key.daemon)
+        else {
+            return;
+        };
+        let Some(workspace) = store.read(cx).workspace(&key.id).cloned() else {
+            return;
+        };
+        self.new_workspace(
+            store,
+            workspace.project_id,
+            workspace.project_display_name.into(),
+            workspace.project_root_path,
+            window,
+            cx,
+        );
     }
 
     /// Hands focus back to where it was before the sidebar took it.
@@ -869,8 +952,23 @@ impl PaseoSidebar {
         let create = store.update(cx, |store, cx| store.create_workspace(source, cx));
         cx.spawn_in(window, async move |this, cx| {
             let workspace = create.await?;
+            let activate = this.update_in(cx, |this, window, cx| {
+                this.activate_workspace(&store, &workspace.id, window, cx)
+            })?;
+            if let Some(activate) = activate {
+                let zed_workspace = activate.await?;
+                PaseoPanel::reveal_when_ready(&zed_workspace, cx)
+                    .await
+                    .log_err();
+            }
+            // The daemon names a new workspace after its worktree; offer to name it right away.
+            // Only now: opening the workspace moves the focus, which would end the rename.
             this.update_in(cx, |this, window, cx| {
-                this.open_workspace(&store, &workspace.id, window, cx);
+                this.selected_entry = Some(SidebarEntry::Workspace(DaemonItemKey::new(
+                    &store,
+                    &workspace.id,
+                )));
+                this.start_rename(&store, &workspace.id, window, cx);
             })
         })
         .detach_and_prompt_err(
@@ -1593,6 +1691,13 @@ impl PaseoSidebar {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 PopoverMenu::new(project_key.element_id("paseo-new-workspace-menu"))
+                    .with_handle(
+                        self.new_workspace_menus
+                            .borrow_mut()
+                            .entry(project_key.clone())
+                            .or_default()
+                            .clone(),
+                    )
                     .trigger_with_tooltip(
                         IconButton::new(button_id, IconName::Plus).icon_size(IconSize::Small),
                         Tooltip::text("New Workspace…"),
@@ -2228,6 +2333,7 @@ impl Render for PaseoSidebar {
             .on_action(cx.listener(Self::select_parent))
             .on_action(cx.listener(Self::select_child))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::new_workspace_for_selection))
             .font(ui_font)
             .map(|this| match window.window_decorations() {
                 Decorations::Server => this.h_full().w(self.width),

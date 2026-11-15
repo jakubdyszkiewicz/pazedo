@@ -231,7 +231,13 @@ The sidebar has the key contexts `PaseoSidebar` and `menu`, so Zed's list keys w
 it has focus: up and down move the selection (outlined), home and end jump to the ends, enter
 opens the selected workspace or collapses the selected project or status section, left
 collapses a section or moves from a workspace to its section, right expands one or moves into
-it, and escape hands focus back. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
+it, escape hands focus back, and cmd-n starts a new workspace in the project of the selected row (a
+workspace or a project; the open workspace's project otherwise), like the project's + button,
+including its machine menu for a project on several daemons (`paseo_sidebar::NewWorkspace`,
+bound in Zed's default macOS keymap). A workspace created from the sidebar opens and then starts
+renaming, with the daemon's name (its worktree's) selected, so typing names it and escape keeps
+it. Verified 2026-11-15 in a dev build: cmd-n on a workspace row opened its project's picker,
+a local checkout was created and renamed by typing. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
 (cmd-alt-; by default) selects the open workspace's row. The Paseo panel has the key context
 `PaseoPanel`. Focusing it (`paseo_panel::ToggleFocus`, or switching to an agent tab) puts the
 cursor in the agent's message box, as activating a thread does in Zed's agent panel. Cmd-n

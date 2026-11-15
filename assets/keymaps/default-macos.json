@@ -1822,6 +1822,14 @@
       "escape": "tabular_data::ClearSelection",
     },
   },
+  // pazedo: cmd-n in the Paseo sidebar starts a new workspace in the selected row's project.
+  {
+    "context": "PaseoSidebar",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-n": "paseo_sidebar::NewWorkspace",
+    },
+  },
   // pazedo: cmd-n in the Paseo panel opens its New Agent or Terminal menu. Agent tabs
   // (`AcpThread`) and terminal tabs (`Terminal`) bind cmd-n themselves; the last two entries
   // match as deep and come later, so they win inside the panel. Separate entries, because `>`

@@ -388,6 +388,8 @@ async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppCont
 #[gpui::test]
 async fn test_keyboard_navigation_in_the_sidebar(cx: &mut TestAppContext) {
     init_test(cx);
+    // The New Workspace picker needs an editor for its query.
+    cx.update(editor::init);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
         .await;
@@ -462,6 +464,21 @@ async fn test_keyboard_navigation_in_the_sidebar(cx: &mut TestAppContext) {
         Some("project prj_sandbox"),
         "enter on a project collapses it"
     );
+
+    press(&menu::SelectChild, cx);
+    press(&menu::SelectChild, cx);
+    press(&crate::sidebar::NewWorkspace, cx);
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        let workspace = multi_workspace.workspace().read(cx);
+        assert!(
+            workspace
+                .active_modal::<picker::Picker<crate::new_workspace::NewWorkspaceDelegate>>(cx)
+                .is_some(),
+            "cmd-n on a workspace row opens its project's New Workspace picker"
+        );
+    });
+    press(&menu::Cancel, cx);
+    press(&workspace::FocusWorkspaceSidebar, cx);
 
     press(&menu::Cancel, cx);
     sidebar.update_in(cx, |sidebar, window, cx| {
