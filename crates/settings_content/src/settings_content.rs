@@ -1218,6 +1218,13 @@ pub struct PaseoSettingsContent {
     ///
     /// Default: null
     pub endpoint: Option<String>,
+    /// The SSH host the daemon's folders are on, for a daemon on another machine, e.g.
+    /// `user@devbox` or `ssh -p 2222 user@devbox`. Its workspaces then open as remote projects
+    /// over SSH, with the options of a matching `ssh_connections` entry. Leave it unset for a
+    /// daemon on this machine. With `PAZEDO_PASEO_ENDPOINT` set, `PAZEDO_PASEO_SSH` replaces it.
+    ///
+    /// Default: null
+    pub ssh: Option<String>,
 }
 
 /// Settings specific to journaling

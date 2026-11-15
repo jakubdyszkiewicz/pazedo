@@ -109,6 +109,39 @@ Zed, unless the variables are already set. It also forwards `PAZEDO_AGENT_HISTOR
 `RUST_LOG` when set (`open` passes no other environment). With `PAZEDO_AGENT_PROVIDER` set, the
 sidebar's + menu lists that provider first.
 
+### Daemon on another machine
+
+For a daemon on another machine, `ssh` names the SSH host its folders are on:
+
+```json
+"paseo": {
+  "endpoint": "100.64.0.2:6767",
+  "ssh": "root@dev-box"
+}
+```
+
+`ssh` takes what Zed's "Connect to SSH server" takes (`user@host`, `ssh -p 2222 user@host`); a
+matching `ssh_connections` entry adds its nickname, arguments and port forwards. Workspaces
+then open as Zed remote projects through `MultiWorkspace::find_or_create_workspace`, behind
+Zed's connection dialog, and all workspaces of the daemon share one SSH connection. The panel
+and the sidebar match a window to a Paseo workspace only when its project is on the daemon's
+host (`store::is_on_daemon_host`), so a local folder never shows a remote workspace of the same
+path. Add Project picks a folder from the daemon's `directory_suggestions_request` instead of
+the native dialog. The remote needs pazedo's remote server (see "Remote server for SSH
+projects" above). With `PAZEDO_PASEO_ENDPOINT` set, `PAZEDO_PASEO_SSH` replaces the setting;
+`run-dev` forwards it, and `ZED_BUILD_REMOTE_SERVER=false` keeps a debug build from building
+its own remote server:
+
+```sh
+PAZEDO_PASEO_ENDPOINT=100.64.0.2:6767 PAZEDO_PASEO_SSH=root@dev-box \
+  ZED_BUILD_REMOTE_SERVER=false script/pazedo/run-dev
+```
+
+Verified 2026-11-15 against the dev box (Ubuntu 24.04, x86_64, root's shell is fish):
+workspaces of a checkout and of a Paseo worktree opened over SSH with their remote files and
+agents; gopls ran on the box (hover worked in a trusted project); the folder picker listed
+`/root/dev`.
+
 The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorkspace` hides the
 sidebar when `disable_ai` is set or the agent is disabled).
 

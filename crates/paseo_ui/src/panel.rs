@@ -199,6 +199,9 @@ impl PaseoPanel {
     /// The single folder of this Zed workspace, which names its Paseo workspace.
     fn directory(&self, cx: &App) -> Option<PathBuf> {
         let workspace = self.workspace.upgrade()?;
+        if !crate::store::is_on_daemon_host(workspace.read(cx).project().read(cx), cx) {
+            return None;
+        }
         match workspace.read(cx).root_paths(cx).as_slice() {
             [path] => Some(path.to_path_buf()),
             _ => None,

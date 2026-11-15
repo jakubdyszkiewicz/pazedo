@@ -717,6 +717,7 @@ fn test_the_endpoint_setting_connects_and_reconnects(cx: &mut TestAppContext) {
                 settings.update_user_settings(cx, |content| {
                     content.paseo = Some(settings::PaseoSettingsContent {
                         endpoint: endpoint.map(str::to_string),
+                        ssh: None,
                     });
                 });
             });
@@ -791,4 +792,68 @@ fn test_finished_and_failed_agents_are_unseen_until_cleared(cx: &mut TestAppCont
         assert!(!store.has_unseen_attention("seen"));
         assert!(!store.has_unseen_attention("unknown"));
     });
+}
+
+#[gpui::test]
+async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppContext) {
+    if std::env::var(crate::ENDPOINT_ENV_VAR).is_ok() {
+        // The environment variables replace both settings.
+        return;
+    }
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let set_ssh = |ssh: Option<&str>, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |settings, cx| {
+                settings.update_user_settings(cx, |content| {
+                    content.paseo = Some(settings::PaseoSettingsContent {
+                        endpoint: None,
+                        ssh: ssh.map(str::to_string),
+                    });
+                    content.remote.ssh_connections = Some(vec![settings::SshConnection {
+                        host: "devbox".into(),
+                        username: Some("root".into()),
+                        args: vec!["-A".into()],
+                        nickname: Some("dev box".into()),
+                        ..Default::default()
+                    }]);
+                });
+            });
+        });
+    };
+
+    cx.update(|cx| {
+        assert_eq!(crate::store::daemon_host(cx).unwrap(), None);
+        assert!(
+            crate::store::is_on_daemon_host(project.read(cx), cx),
+            "a local folder belongs to a daemon on this machine"
+        );
+    });
+
+    set_ssh(Some("root@devbox"), cx);
+    cx.update(|cx| {
+        let Some(remote::RemoteConnectionOptions::Ssh(options)) =
+            crate::store::daemon_host(cx).unwrap()
+        else {
+            panic!("expected an SSH host");
+        };
+        assert_eq!(options.host.to_string(), "devbox");
+        assert_eq!(options.username.as_deref(), Some("root"));
+        assert_eq!(
+            options.nickname.as_deref(),
+            Some("dev box"),
+            "the matching ssh_connections entry fills in its options"
+        );
+        assert_eq!(options.args, Some(vec!["-A".to_string()]));
+        assert!(
+            !crate::store::is_on_daemon_host(project.read(cx), cx),
+            "a local folder must not show a remote daemon's workspace of the same path"
+        );
+    });
+
+    set_ssh(Some("ssh -p"), cx);
+    cx.update(|cx| assert!(crate::store::daemon_host(cx).is_err()));
 }

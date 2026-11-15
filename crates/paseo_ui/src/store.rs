@@ -10,13 +10,16 @@ use paseo_client::{
     protocol::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
         AgentUpdate, AttentionReason, BranchSuggestions, ClearAgentAttention, CloseItems,
-        CreateTerminal, CreateWorkspace, FetchAgents, FetchWorkspaces, GetProvidersSnapshot,
-        ListProjects, Page, ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, ServerInfo,
-        ServerMessage, SetSessionEventSubscription, SetWorkspaceTitle, Subscribe,
-        SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged, Workspace,
-        WorkspaceSource, WorkspaceUpdate,
+        CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents, FetchWorkspaces,
+        GetProvidersSnapshot, ListProjects, Page, ProjectSummary, ProjectUpdate, ProviderEntry,
+        RefreshAgent, ServerInfo, ServerMessage, SetSessionEventSubscription, SetWorkspaceTitle,
+        Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged,
+        Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
+use project::Project;
+use recent_projects::RemoteSettings;
+use remote::{RemoteConnectionOptions, SshConnectionOptions};
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
 use std::{
     cmp::Reverse,
@@ -27,31 +30,73 @@ use std::{
 /// Overrides the `paseo.endpoint` setting, e.g. so that `script/pazedo/run-dev` points a
 /// development build at the test daemon whatever the shared Zed settings say.
 pub const ENDPOINT_ENV_VAR: &str = "PAZEDO_PASEO_ENDPOINT";
+/// Replaces the `paseo.ssh` setting while [`ENDPOINT_ENV_VAR`] is set, since the setting
+/// describes the configured daemon, not the one from the environment.
+pub const SSH_ENV_VAR: &str = "PAZEDO_PASEO_SSH";
 
 /// The `paseo` section of the settings.
 #[derive(Clone, Debug, Default, PartialEq, RegisterSetting)]
 pub struct PaseoSettings {
     pub endpoint: Option<String>,
+    pub ssh: Option<String>,
 }
 
 impl Settings for PaseoSettings {
     fn from_settings(content: &SettingsContent) -> Self {
+        let non_empty =
+            |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
         Self {
             endpoint: content
                 .paseo
                 .as_ref()
-                .and_then(|paseo| paseo.endpoint.clone())
-                .filter(|endpoint| !endpoint.trim().is_empty()),
+                .and_then(|paseo| non_empty(&paseo.endpoint)),
+            ssh: content
+                .paseo
+                .as_ref()
+                .and_then(|paseo| non_empty(&paseo.ssh)),
         }
     }
 }
 
+fn non_empty_env_var(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 /// The daemon to connect to: the environment variable if set, else the setting.
 fn configured_endpoint(cx: &App) -> Option<String> {
-    std::env::var(ENDPOINT_ENV_VAR)
-        .ok()
-        .filter(|endpoint| !endpoint.trim().is_empty())
-        .or_else(|| PaseoSettings::get_global(cx).endpoint.clone())
+    non_empty_env_var(ENDPOINT_ENV_VAR).or_else(|| PaseoSettings::get_global(cx).endpoint.clone())
+}
+
+/// The SSH host the daemon's folders are on, or `None` for a daemon on this machine.
+pub fn daemon_host(cx: &App) -> Result<Option<RemoteConnectionOptions>> {
+    let ssh = if non_empty_env_var(ENDPOINT_ENV_VAR).is_some() {
+        non_empty_env_var(SSH_ENV_VAR)
+    } else {
+        PaseoSettings::get_global(cx).ssh.clone()
+    };
+    let Some(ssh) = ssh else {
+        return Ok(None);
+    };
+    let mut options = SshConnectionOptions::parse_command_line(&ssh)
+        .with_context(|| format!("invalid paseo.ssh setting {ssh:?}"))?;
+    RemoteSettings::get_global(cx).fill_connection_options_from_settings(&mut options);
+    Ok(Some(RemoteConnectionOptions::Ssh(options)))
+}
+
+/// Whether the project is on the machine of the daemon's folders: remote on the same SSH host
+/// for a remote daemon, local otherwise. A local folder must not show the agents of a remote
+/// workspace that happens to have the same path, and the other way round.
+pub fn is_on_daemon_host(project: &Project, cx: &App) -> bool {
+    let project_host = project.remote_connection_options(cx);
+    match daemon_host(cx) {
+        Ok(daemon_host) => {
+            project_host.map(RemoteConnectionOptions::host_key)
+                == daemon_host.as_ref().map(RemoteConnectionOptions::host_key)
+        }
+        Err(_) => false,
+    }
 }
 
 const CLIENT_ID: &str = "pazedo";
@@ -195,6 +240,9 @@ impl PaseoStore {
                 let endpoint = configured_endpoint(cx);
                 if endpoint != this.endpoint {
                     this.connect(endpoint, cx);
+                } else {
+                    // `paseo.ssh` may have changed, which changes the folders that match.
+                    cx.notify();
                 }
             }));
             this
@@ -476,6 +524,29 @@ impl PaseoStore {
                 anyhow::bail!("could not list branches: {error}");
             }
             Ok(response.branches)
+        })
+    }
+
+    /// Folders on the daemon's machine matching a typed path or name, for picking a project on
+    /// a remote daemon.
+    pub fn directory_suggestions(&self, query: String, cx: &App) -> Task<Result<Vec<String>>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.background_spawn(async move {
+            let response = client
+                .request(&DirectorySuggestions {
+                    query,
+                    include_directories: true,
+                    include_files: false,
+                    limit: Some(50),
+                })
+                .await?;
+            if let Some(error) = response.error {
+                anyhow::bail!("could not list folders: {error}");
+            }
+            Ok(response.directories)
         })
     }
 

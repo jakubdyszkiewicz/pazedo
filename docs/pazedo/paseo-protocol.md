@@ -220,6 +220,11 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   `agent` / `firstAgentContext` starts an agent too (Paseo's app does; pazedo does not yet).
 - `branch_suggestions_request {cwd, query?, limit?}` lists branches, most recently committed
   first: `{branches, branchDetails?, error}`.
+- `directory_suggestions_request {query, cwd?, includeFiles?, includeDirectories?, matchMode?:
+  fuzzy|suffix, limit? (1-100)}` lists paths on the daemon's machine: `{directories, entries:
+  [{path, kind}], error}`. An absolute prefix (`/root/dev/`, `~` expanded) lists what is under
+  it; a bare name matches fuzzily under the home directory; an empty query returns nothing
+  (verified 2026-11-15, dev box). pazedo's Add Project uses it for a daemon on another machine.
 - `workspace.title.set.request {workspaceId, title}` renames a workspace; `null` or `""`
   reverts to the derived name: `workspace.title.set.response {requestId, workspaceId,
   accepted, title, error}`. Afterwards the workspace's `name` is the title and `title` mirrors

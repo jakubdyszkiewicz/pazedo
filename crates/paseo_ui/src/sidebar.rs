@@ -24,9 +24,13 @@ use workspace::{
 };
 
 use crate::{
+    add_project::open_add_project_picker,
     new_workspace::{NewWorkspaceChoice, open_new_workspace_picker},
     panel::PaseoPanel,
-    store::{ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry},
+    store::{
+        ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry, daemon_host,
+        is_on_daemon_host,
+    },
 };
 
 /// Lists the workspaces of a Paseo daemon, grouped by project, in place of Zed's threads
@@ -128,15 +132,26 @@ impl PaseoSidebar {
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<Entity<workspace::Workspace>>>> {
         let directory = PathBuf::from(self.store.read(cx).workspace(workspace_id)?.directory());
+        let host = match daemon_host(cx) {
+            Ok(host) => host,
+            Err(error) => return Some(Task::ready(Err(error))),
+        };
         self.selected_workspace = Some(workspace_id.to_string());
         self.store
             .update(cx, |store, cx| store.select_workspace(workspace_id, cx));
         cx.notify();
         let multi_workspace = self.multi_workspace.upgrade()?;
+        let modal_workspace = multi_workspace.read(cx).workspace().clone();
+        // For a daemon on another machine the folder is there, so it opens over SSH like
+        // Zed's remote projects, behind Zed's connection dialog.
         Some(multi_workspace.update(cx, |multi_workspace, cx| {
-            multi_workspace.find_or_create_local_workspace(
+            multi_workspace.find_or_create_workspace(
                 PathList::new(&[directory]),
+                host,
                 None,
+                move |options, window, cx| {
+                    remote_connection::connect_with_modal(&modal_workspace, options, window, cx)
+                },
                 None,
                 OpenMode::Activate,
                 None,
@@ -146,10 +161,15 @@ impl PaseoSidebar {
         }))
     }
 
-    /// The single root directory of the window's active Zed workspace.
+    /// The single root directory of the window's active Zed workspace, if it is on the
+    /// daemon's machine.
     fn active_directory(&self, cx: &App) -> Option<PathBuf> {
         let multi_workspace = self.multi_workspace.upgrade()?;
-        let root_paths = multi_workspace.read(cx).workspace().read(cx).root_paths(cx);
+        let workspace = multi_workspace.read(cx).workspace().read(cx);
+        if !is_on_daemon_host(workspace.project().read(cx), cx) {
+            return None;
+        }
+        let root_paths = workspace.root_paths(cx);
         match root_paths.as_slice() {
             [path] => Some(path.to_path_buf()),
             _ => None,
@@ -408,8 +428,47 @@ impl PaseoSidebar {
             .into_any_element()
     }
 
-    /// Asks for a folder and adds it to Paseo as a project.
+    /// Asks for a folder and adds it to Paseo as a project: with the native folder dialog for a
+    /// daemon on this machine, or with folders the daemon suggests for one on another machine.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = match daemon_host(cx) {
+            Ok(host) => host,
+            Err(error) => {
+                Task::<anyhow::Result<()>>::ready(Err(error)).detach_and_prompt_err(
+                    "Could not add the project",
+                    window,
+                    cx,
+                    |error, _, _| Some(format!("{error:#}")),
+                );
+                return;
+            }
+        };
+        if let Some(host) = host {
+            let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+                return;
+            };
+            let workspace = multi_workspace.read(cx).workspace().clone();
+            let store = self.store.clone();
+            workspace.update(cx, |workspace, cx| {
+                open_add_project_picker(
+                    workspace,
+                    host.display_name().into(),
+                    move |path, window, cx| {
+                        store
+                            .update(cx, |store, cx| store.add_project(PathBuf::from(path), cx))
+                            .detach_and_prompt_err(
+                                "Could not add the project",
+                                window,
+                                cx,
+                                |error, _, _| Some(format!("{error:#}")),
+                            );
+                    },
+                    window,
+                    cx,
+                );
+            });
+            return;
+        }
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,

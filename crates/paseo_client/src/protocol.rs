@@ -1696,6 +1696,32 @@ impl Request for BranchSuggestions {
     type Response = BranchSuggestionsResponse;
 }
 
+/// Paths on the daemon's machine for a typed query: the entries under an absolute prefix such
+/// as `/root/dev/` (with `~` expanded), or a fuzzy match of a name under the home directory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectorySuggestions {
+    pub query: String,
+    pub include_directories: bool,
+    pub include_files: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectorySuggestionsResponse {
+    #[serde(default)]
+    pub directories: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl Request for DirectorySuggestions {
+    const TYPE: &'static str = "directory_suggestions_request";
+    const RESPONSE_TYPE: &'static str = "directory_suggestions_response";
+    type Response = DirectorySuggestionsResponse;
+}
+
 /// Adds a directory as a project, without creating a workspace in it.
 #[derive(Debug, Clone, Serialize)]
 pub struct AddProject {

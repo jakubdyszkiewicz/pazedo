@@ -48,8 +48,11 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # `open` passes no environment of its own; forward the optional overrides that are set.
+# PAZEDO_PASEO_SSH puts the daemon's folders on an SSH host. A debug build then builds Zed's
+# remote server from source unless ZED_BUILD_REMOTE_SERVER=false, which uses the one already
+# installed there (see script/pazedo/remote-server).
 extra_env=""
-for name in PAZEDO_AGENT_HISTORY_LIMIT RUST_LOG; do
+for name in PAZEDO_AGENT_HISTORY_LIMIT PAZEDO_PASEO_SSH ZED_BUILD_REMOTE_SERVER RUST_LOG; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then
     extra_env="$extra_env --env $name=$value"

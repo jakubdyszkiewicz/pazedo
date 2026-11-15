@@ -2,6 +2,7 @@
 //! sidebar, Paseo agent sessions shown with Zed's thread UI, and Paseo terminals shown with
 //! Zed's terminal view.
 
+mod add_project;
 mod agent_item;
 mod agent_session;
 mod new_workspace;
@@ -20,6 +21,7 @@ pub use agent_session::{
 pub use panel::{PaseoPanel, REPLACES_ZED_AGENT_PANEL, ToggleFocus};
 pub use sidebar::PaseoSidebar;
 pub use store::{
-    ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, PaseoStoreEvent, ProjectGroup, WorkspaceEntry,
+    ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, PaseoStoreEvent, ProjectGroup, SSH_ENV_VAR,
+    WorkspaceEntry,
 };
 pub use terminal_item::PaseoTerminalItem;
