@@ -74,6 +74,11 @@ impl PaseoPanel {
             workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
                 workspace.toggle_panel_focus::<PaseoPanel>(window, cx);
             });
+            workspace.register_action(
+                |workspace, _: &crate::daemon_settings::ManageDaemons, window, cx| {
+                    crate::daemon_settings::open_daemons_dialog(workspace, window, cx);
+                },
+            );
             let weak_workspace = workspace.weak_handle();
             let project = workspace.project().clone();
             cx.new(|cx| Self::new(weak_workspace, project, window, cx))

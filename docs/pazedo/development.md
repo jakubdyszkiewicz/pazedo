@@ -288,6 +288,15 @@ shorthand for one more daemon, listed first:
 }
 ```
 
+The Paseo Daemons dialog (the gear in the sidebar header, `paseo: manage daemons` in the
+command palette, or Add Daemon… when none is configured) lists the daemons of settings.json with
+their connection status, and adds, edits (endpoint, name, SSH host) and removes them, writing
+settings.json where each one is: the top-level shorthand or its `daemons` entry. It checks the
+endpoint and SSH host before saving and refuses an endpoint another daemon has. Removing a
+daemon also deletes its saved password. With `PAZEDO_PASEO_ENDPOINT` set it says that the
+variable wins. Verified 2026-11-15 in a dev build: a duplicate endpoint was refused, a daemon was
+added, edited and removed, and settings.json ended as it started.
+
 `name` defaults to the daemon's host name. The pencil on a daemon's row (or its right-click
 menu) renames it in place and writes `name` to settings.json; an empty name removes it. The
 top-level shorthand takes a `name` too. Each daemon has its own `PaseoStore` and

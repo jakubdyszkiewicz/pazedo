@@ -100,6 +100,18 @@ pub(crate) fn save_password(url: String, password: String, cx: &mut App) -> Task
     })
 }
 
+/// Deletes the saved password of a daemon that was removed.
+pub(crate) fn forget_password(url: String, cx: &mut App) -> Task<()> {
+    let provider = credentials_provider(cx);
+    cx.spawn(async move |cx| {
+        provider
+            .delete_credentials(&url, cx)
+            .await
+            .with_context(|| format!("failed to delete the password for {url}"))
+            .log_err();
+    })
+}
+
 /// The token a daemon on this machine writes for local clients (`$PASEO_HOME/local-credential`,
 /// readable only by its user). It admits like the password, so local daemons need no password.
 fn local_credential(endpoint: &Endpoint) -> Option<String> {

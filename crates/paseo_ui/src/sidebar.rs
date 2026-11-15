@@ -752,6 +752,14 @@ impl PaseoSidebar {
             })
             .child(div().flex_1())
             .child(self.render_grouping_menu(cx))
+            .child(
+                IconButton::new("paseo-manage-daemons", IconName::Settings)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Paseo Daemons…"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_daemons_dialog(window, cx)),
+                    ),
+            )
             .when_some(single_daemon, |this, store| {
                 this.children(self.render_add_project_button(&store, cx))
             })
@@ -1473,14 +1481,33 @@ impl PaseoSidebar {
         }
     }
 
-    fn render_not_configured(&self, cx: &App) -> AnyElement {
-        render_notice(
-            IconName::Info,
-            "Not connected to Paseo. Set the daemon's address in settings.json, for example \
-             \"paseo\": { \"endpoint\": \"127.0.0.1:6767\" }."
-                .into(),
-            cx,
-        )
+    fn render_not_configured(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .child(render_notice(
+                IconName::Info,
+                "Not connected to Paseo. Add a daemon to see its workspaces.".into(),
+                cx,
+            ))
+            .child(
+                h_flex().px_2().py_1p5().child(
+                    Button::new("paseo-add-first-daemon", "Add Daemon…")
+                        .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_daemons_dialog(window, cx)),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn open_daemons_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| {
+            crate::daemon_settings::open_daemons_dialog(workspace, window, cx);
+        });
     }
 
     fn render_project(

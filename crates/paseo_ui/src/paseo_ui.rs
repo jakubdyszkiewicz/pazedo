@@ -6,6 +6,7 @@ mod add_project;
 mod agent_item;
 mod agent_session;
 mod daemon_auth;
+mod daemon_settings;
 mod new_workspace;
 mod panel;
 mod sidebar;
@@ -19,6 +20,7 @@ pub use agent_item::PaseoAgentItem;
 pub use agent_session::{
     MODEL_ENV_VAR, NewAgent, PROVIDER_ENV_VAR, PaseoAgentServer, PaseoConnection,
 };
+pub use daemon_settings::ManageDaemons;
 pub use panel::{PaseoPanel, REPLACES_ZED_AGENT_PANEL, ToggleFocus};
 pub use sidebar::{Grouping, PaseoSidebar};
 pub use store::{

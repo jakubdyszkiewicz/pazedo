@@ -403,6 +403,11 @@ impl PaseoStore {
         }
     }
 
+    /// The endpoint as configured in settings.json.
+    pub fn endpoint_setting(&self) -> Option<&str> {
+        self.config.endpoint.as_deref()
+    }
+
     /// The name shown for this daemon: the configured one, else the daemon's host name, else
     /// its endpoint.
     pub fn display_name(&self) -> SharedString {
