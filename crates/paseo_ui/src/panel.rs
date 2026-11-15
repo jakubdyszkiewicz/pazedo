@@ -27,7 +27,9 @@ actions!(
     paseo_panel,
     [
         /// Toggles focus on the Paseo panel, which holds Paseo agent and terminal tabs.
-        ToggleFocus
+        ToggleFocus,
+        /// Opens the Paseo panel's menu for a new agent or terminal.
+        NewAgentOrTerminal
     ]
 );
 
@@ -55,6 +57,8 @@ pub struct PaseoPanel {
     known_items: HashSet<String>,
     /// Set while the panel adds and removes tabs itself, which must not close the dock.
     syncing: bool,
+    /// The tab bar's New Agent or Terminal menu.
+    new_menu: PopoverMenuHandle<ContextMenu>,
     _store_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -164,6 +168,7 @@ impl PaseoPanel {
             paseo_workspace_id: None,
             known_items: HashSet::default(),
             syncing: false,
+            new_menu,
             _store_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
@@ -850,6 +855,11 @@ impl Render for PaseoPanel {
         let is_empty = self.pane.read(cx).items_len() == 0;
         container
             .key_context("PaseoPanel")
+            .on_action(cx.listener(|this, _: &NewAgentOrTerminal, window, cx| {
+                // The menu reads the panel, which is being updated here.
+                let menu = this.new_menu.clone();
+                window.defer(cx, move |window, cx| menu.toggle(window, cx));
+            }))
             .size_full()
             .relative()
             .child(self.pane.clone())

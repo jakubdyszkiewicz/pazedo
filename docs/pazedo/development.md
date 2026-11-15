@@ -234,7 +234,11 @@ collapses a section or moves from a workspace to its section, right expands one 
 it, and escape hands focus back. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
 (cmd-alt-; by default) selects the open workspace's row. The Paseo panel has the key context
 `PaseoPanel`. Focusing it (`paseo_panel::ToggleFocus`, or switching to an agent tab) puts the
-cursor in the agent's message box, as activating a thread does in Zed's agent panel. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
+cursor in the agent's message box, as activating a thread does in Zed's agent panel. Cmd-n
+anywhere in the panel, including an agent's message box and a terminal, opens its New Agent or
+Terminal menu (`paseo_panel::NewAgentOrTerminal`, bound in Zed's default macOS keymap); outside
+the panel cmd-n still makes a new file. Verified 2026-11-15 in a dev build: cmd-n from an agent's
+message box opened the menu, and escape returned to the message box. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
 down, enter, escape) and in the `menu` context (left, right).
 
 That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
