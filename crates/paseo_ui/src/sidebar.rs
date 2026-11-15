@@ -874,16 +874,37 @@ impl PaseoSidebar {
             let is_collapsed = self.collapsed_buckets.contains(&bucket);
             let (icon, color, label) = bucket_heading(bucket);
             let hover = cx.theme().colors().ghost_element_hover;
+            // Headings are larger than the rows' details, with a ringed icon, so that a
+            // section reads as a section, as in Paseo's app.
+            let heading_icon = if matches!(icon, IconName::Check) {
+                let ring = color.color(cx);
+                div()
+                    .size_4()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(ring)
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+                    .into_any_element()
+            } else {
+                Icon::new(icon)
+                    .size(IconSize::Small)
+                    .color(color)
+                    .into_any_element()
+            };
             let header = h_flex()
                 .id(SharedString::from(format!("paseo-status-{bucket:?}")))
-                .h(Tab::content_height(cx))
+                .h(Tab::container_height(cx))
                 .w_full()
                 .px_2()
-                .gap_1p5()
+                .gap_2()
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover))
-                .child(Icon::new(icon).size(IconSize::Small).color(color))
-                .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+                .child(heading_icon)
+                .child(Label::new(label).color(Color::Muted))
                 .when(is_collapsed, |this| {
                     this.child(
                         Label::new(bucket_rows.len().to_string())
@@ -915,10 +936,12 @@ impl PaseoSidebar {
                     })
                     .collect()
             };
+            let is_first = sections.is_empty();
             sections.push(
                 v_flex()
                     .w_full()
-                    .pt_1()
+                    .map(|this| if is_first { this.pt_2() } else { this.pt_5() })
+                    .gap_0p5()
                     .child(header)
                     .children(workspaces)
                     .into_any_element(),
@@ -1342,17 +1365,17 @@ fn render_row_details(
             .color(Color::Disabled)
             .into_any_element()
     };
-    // The branch gives way first; the project and daemon are capped, the pull request stays.
+    // Each detail gives way down to a few characters; the project and daemon are also capped,
+    // and the pull request keeps its width.
     let detail = |icon: IconName, text: SharedString, capped: bool| {
+        // A minimum wider than a short value would leave a gap after it.
+        let short = text.chars().count() <= 6;
         h_flex()
-            .min_w_0()
             .gap_0p5()
-            .map(|this| {
-                if capped {
-                    this.flex_shrink_0().max_w(rems(6.))
-                } else {
-                    this.min_w(rems(3.5))
-                }
+            .map(|this| match (short, capped) {
+                (true, _) => this.flex_none(),
+                (false, true) => this.min_w(rems(3.)).max_w(rems(6.)),
+                (false, false) => this.min_w(rems(3.5)),
             })
             .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
             .child(
