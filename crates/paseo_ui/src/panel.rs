@@ -702,27 +702,28 @@ pub(crate) struct NewAgentChoice {
 /// One entry per selectable model, grouped by provider, default model first. The provider set
 /// with `PAZEDO_AGENT_PROVIDER` comes first, and is offered even if the daemon does not list it,
 /// since setting it is a deliberate override.
+/// One entry per usable provider. The agent starts on the provider's default model (or
+/// `PAZEDO_AGENT_MODEL` for `PAZEDO_AGENT_PROVIDER`); the thread's model picker changes it, so
+/// the menu stays short however many models the providers offer.
 pub(crate) fn new_agent_choices(providers: &[ProviderEntry]) -> Vec<NewAgentChoice> {
+    let header: SharedString = "New Agent".into();
     let mut choices = Vec::new();
     let from_env = NewAgent::from_env();
-    if std::env::var(PROVIDER_ENV_VAR).is_ok()
+    let provider_from_env = std::env::var(PROVIDER_ENV_VAR).is_ok();
+    if provider_from_env
         && !providers
             .iter()
             .any(|provider| provider.provider == from_env.provider)
     {
         choices.push(NewAgentChoice {
-            header: format!("{} (from {PROVIDER_ENV_VAR})", from_env.provider).into(),
-            label: from_env
-                .model
-                .clone()
-                .unwrap_or_else(|| "Default model".into())
-                .into(),
+            header: header.clone(),
+            label: format!("{} (from {PROVIDER_ENV_VAR})", from_env.provider).into(),
             new_agent: from_env.clone(),
         });
     }
     // The provider chosen with the environment variable is listed first.
     let mut providers: Vec<&ProviderEntry> = providers.iter().collect();
-    if std::env::var(PROVIDER_ENV_VAR).is_ok() {
+    if provider_from_env {
         providers.sort_by_key(|provider| provider.provider != from_env.provider);
     }
     for provider in providers {
@@ -734,42 +735,24 @@ pub(crate) fn new_agent_choices(providers: &[ProviderEntry]) -> Vec<NewAgentChoi
         {
             continue;
         }
-        let header: SharedString = if provider.status == ProviderStatus::Loading {
+        let label: SharedString = if provider.status == ProviderStatus::Loading {
             format!("{} (loading)", provider.label()).into()
         } else {
             provider.label().to_string().into()
         };
-        let mut models: Vec<_> = provider
-            .models
-            .iter()
-            .filter(|model| model.is_selectable != Some(false))
-            .collect();
-        models.sort_by_key(|model| !model.is_default);
-        if models.is_empty() {
-            choices.push(NewAgentChoice {
-                header,
-                label: "Default model".into(),
-                new_agent: NewAgent {
-                    provider: provider.provider.clone(),
-                    model: None,
-                },
-            });
-            continue;
-        }
-        for model in models {
-            choices.push(NewAgentChoice {
-                header: header.clone(),
-                label: if model.is_default {
-                    format!("{} (default)", model.label).into()
-                } else {
-                    model.label.clone().into()
-                },
-                new_agent: NewAgent {
-                    provider: provider.provider.clone(),
-                    model: Some(model.id.clone()),
-                },
-            });
-        }
+        let model = if provider_from_env && provider.provider == from_env.provider {
+            from_env.model.clone()
+        } else {
+            None
+        };
+        choices.push(NewAgentChoice {
+            header: header.clone(),
+            label,
+            new_agent: NewAgent {
+                provider: provider.provider.clone(),
+                model,
+            },
+        });
     }
     choices
 }

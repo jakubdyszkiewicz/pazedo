@@ -6,7 +6,8 @@ only workspaces). Each tab is rendered by Zed's own thread UI (`agent_ui::Conver
 streaming markdown, reasoning, tool call cards (edits as real diffs), plans, permission prompts,
 the message editor, queueing and the stop button. The composer's dropdowns change the agent's
 model, thinking level and mode. The panel's **+** menu (and the New Agent button of an empty
-panel) lists the daemon's providers and models and starts a new agent with the one picked.
+panel) lists the daemon's providers (one entry each) and starts a new agent on the provider's
+default model; the composer's model picker switches it.
 Paseo owns the agents; Zed only observes and steers them, so agents started from the phone,
 the CLI or other agents get a tab the same way. Closing a tab archives the agent, as closing
 it in Paseo's apps does.
