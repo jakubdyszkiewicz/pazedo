@@ -5,15 +5,10 @@ done; record decisions where the code or docs that implement them live.
 
 ## Next
 
-- **Connection settings.** The daemon endpoint comes only from the `PAZEDO_PASEO_ENDPOINT`
-  environment variable (`script/pazedo/run-dev` sets it, `script/pazedo/bundle` writes it into
-  `Pazedo.app`'s Info.plist).
-  - A pazedo section in Zed's settings (endpoint, later several daemons); connect, reconnect
-    and switch daemons when the setting changes, without a restart. Then drop the endpoint from
-    `script/pazedo/bundle`.
-  - Authentication for daemons with a password: send `hello.auth`, reading the local
-    credential from the Paseo home or a password from the keychain, never from settings.json.
-    The owner's daemon has no password and needs none (verified 2026-11-14).
+- **Authentication** for daemons with a password: send `hello.auth`, reading the local
+  credential from the Paseo home or a password from the keychain, never from settings.json.
+  The owner's daemon has no password and needs none (verified 2026-11-14). The endpoint is a
+  setting now (`"paseo": {"endpoint": ...}`); several daemons in one sidebar would extend it.
 - **Daemon on a remote dev box, source over SSH.** Not tested. The sidebar, agents and
   terminals should work against a remote daemon (they only stream over Paseo), but opening a
   workspace calls `find_or_create_local_workspace` with the daemon's path, which exists only on

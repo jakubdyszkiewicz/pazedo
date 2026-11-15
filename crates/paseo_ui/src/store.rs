@@ -2,7 +2,9 @@ use anyhow::{Context as _, Result};
 use collections::HashSet;
 use collections::{BTreeMap, HashMap};
 use futures::{FutureExt as _, StreamExt as _};
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Task};
+use gpui::{
+    App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
+};
 use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
@@ -14,16 +16,42 @@ use paseo_client::{
         Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
+use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
 use std::{
     cmp::Reverse,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-/// The daemon to connect to, as `host:port`, `ws://...` or a socket path. Until pazedo has
-/// settings of its own, nothing connects unless this is set, so a development build never
-/// talks to the user's real daemon by accident.
+/// Overrides the `paseo.endpoint` setting, e.g. so that `script/pazedo/run-dev` points a
+/// development build at the test daemon whatever the shared Zed settings say.
 pub const ENDPOINT_ENV_VAR: &str = "PAZEDO_PASEO_ENDPOINT";
+
+/// The `paseo` section of the settings.
+#[derive(Clone, Debug, Default, PartialEq, RegisterSetting)]
+pub struct PaseoSettings {
+    pub endpoint: Option<String>,
+}
+
+impl Settings for PaseoSettings {
+    fn from_settings(content: &SettingsContent) -> Self {
+        Self {
+            endpoint: content
+                .paseo
+                .as_ref()
+                .and_then(|paseo| paseo.endpoint.clone())
+                .filter(|endpoint| !endpoint.trim().is_empty()),
+        }
+    }
+}
+
+/// The daemon to connect to: the environment variable if set, else the setting.
+fn configured_endpoint(cx: &App) -> Option<String> {
+    std::env::var(ENDPOINT_ENV_VAR)
+        .ok()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .or_else(|| PaseoSettings::get_global(cx).endpoint.clone())
+}
 
 const CLIENT_ID: &str = "pazedo";
 const PAGE_SIZE: u32 = 200;
@@ -60,6 +88,8 @@ impl Global for GlobalPaseoStore {}
 /// The live directory of one Paseo daemon: projects, workspaces and agents, kept current through
 /// subscriptions that are re-established after every reconnect.
 pub struct PaseoStore {
+    /// As configured, before parsing.
+    endpoint: Option<String>,
     client: Option<Client>,
     status: ConnectionStatus,
     sync_error: Option<SharedString>,
@@ -85,6 +115,7 @@ pub struct PaseoStore {
     /// Agents and terminals closed from pazedo, until the daemon's update removes them; their
     /// tabs must not come back in the meantime.
     closing: HashSet<String>,
+    _settings_subscription: Option<Subscription>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -148,18 +179,29 @@ impl WorkspaceEntry {
 }
 
 impl PaseoStore {
+    /// The app's store, connected to the daemon from the `paseo.endpoint` setting (or the
+    /// `PAZEDO_PASEO_ENDPOINT` environment variable), and reconnected when that changes.
     pub fn global(cx: &mut App) -> Entity<Self> {
         if let Some(store) = cx.try_global::<GlobalPaseoStore>() {
             return store.0.clone();
         }
-        let endpoint = std::env::var(ENDPOINT_ENV_VAR).ok();
-        let store = cx.new(|cx| Self::new(endpoint, cx));
+        let store = cx.new(|cx| {
+            let mut this = Self::new(configured_endpoint(cx), cx);
+            this._settings_subscription = Some(cx.observe_global::<SettingsStore>(|this, cx| {
+                let endpoint = configured_endpoint(cx);
+                if endpoint != this.endpoint {
+                    this.connect(endpoint, cx);
+                }
+            }));
+            this
+        });
         cx.set_global(GlobalPaseoStore(store.clone()));
         store
     }
 
     pub fn new(endpoint: Option<String>, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
+            endpoint: None,
             client: None,
             status: ConnectionStatus::NotConfigured,
             sync_error: None,
@@ -176,16 +218,49 @@ impl PaseoStore {
             terminal_tasks: HashMap::default(),
             selected_workspaces: HashMap::default(),
             closing: HashSet::default(),
+            _settings_subscription: None,
             _tasks: Vec::new(),
         };
-        let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.trim().is_empty()) else {
-            return this;
+        this.connect(endpoint, cx);
+        this
+    }
+
+    /// Connects to `endpoint`, dropping the connection to any other daemon and everything known
+    /// about it.
+    fn connect(&mut self, endpoint: Option<String>, cx: &mut Context<Self>) {
+        let endpoint = endpoint.filter(|endpoint| !endpoint.trim().is_empty());
+        if self.client.take().is_some() {
+            // Open agent sessions and terminals treat this like a lost connection.
+            cx.emit(PaseoStoreEvent::Disconnected);
+        }
+        // Dropping the driver task closes the old connection.
+        self._tasks.clear();
+        self.endpoint = endpoint.clone();
+        self.status = ConnectionStatus::NotConfigured;
+        self.sync_error = None;
+        self.projects.clear();
+        self.workspaces.clear();
+        self.agents.clear();
+        self.providers.clear();
+        self.providers_task = None;
+        self.subscriptions = DirectorySubscriptions::default();
+        self.queued_messages = None;
+        self.sync_task = None;
+        self.terminal_subscriptions.clear();
+        self.terminals.clear();
+        self.terminal_tasks.clear();
+        self.selected_workspaces.clear();
+        self.closing.clear();
+        cx.notify();
+
+        let Some(endpoint) = endpoint else {
+            return;
         };
         let endpoint = match Endpoint::parse(&endpoint) {
             Ok(endpoint) => endpoint,
             Err(error) => {
-                this.status = ConnectionStatus::InvalidEndpoint(format!("{error:#}").into());
-                return this;
+                self.status = ConnectionStatus::InvalidEndpoint(format!("{error:#}").into());
+                return;
             }
         };
 
@@ -194,8 +269,8 @@ impl PaseoStore {
         let mut options = ConnectOptions::new(endpoint.clone(), CLIENT_ID, sleep);
         options.app_version = Some(format!("pazedo {}", env!("CARGO_PKG_VERSION")));
         let (client, mut events, driver) = Client::new(options);
-        this._tasks.push(cx.background_spawn(driver));
-        this._tasks.push(cx.spawn(async move |this, cx| {
+        self._tasks.push(cx.background_spawn(driver));
+        self._tasks.push(cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
                     .update(cx, |this, cx| this.handle_event(event, cx))
@@ -205,9 +280,8 @@ impl PaseoStore {
                 }
             }
         }));
-        this.client = Some(client);
-        this.status = ConnectionStatus::Connecting(endpoint);
-        this
+        self.client = Some(client);
+        self.status = ConnectionStatus::Connecting(endpoint);
     }
 
     /// The client, once the store has been configured with an endpoint. Requests fail while

@@ -12,19 +12,20 @@
 #
 # The app keeps its own data under ~/Library/Application Support/Pazedo (PAZEDO_USER_DATA_DIR,
 # read by crates/zed/src/main.rs like --user-data-dir), so it shares no settings, databases or
-# running instance with a dev build or an installed Zed. Both variables are set with
-# LSEnvironment in Info.plist: a launcher script that execs zed instead hides the app's windows
-# from System Events and other accessibility clients.
+# running instance with a dev build or an installed Zed. The variable is set with LSEnvironment
+# in Info.plist: a launcher script that execs zed instead hides the app's windows from System
+# Events and other accessibility clients.
+#
+# The daemon to connect to is a setting, in the app's own settings.json
+# (~/Library/Application Support/Pazedo/config/settings.json):
+#   "paseo": { "endpoint": "100.64.0.1:6767" }
 #
 # The app stays on the "dev" release channel, which never auto-updates; an update from Zed's
 # servers would replace the fork with upstream Zed.
-#
-# Until pazedo has a setting for it, the daemon endpoint is fixed when bundling:
-# PAZEDO_PASEO_ENDPOINT (default: the test daemon, 127.0.0.1:6868).
+
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-endpoint="${PAZEDO_PASEO_ENDPOINT:-127.0.0.1:6868}"
 build=true
 install=false
 for argument in "$@"; do
@@ -84,7 +85,6 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)
   <key>NSHighResolutionCapable</key><true/>
   <key>LSEnvironment</key>
   <dict>
-    <key>PAZEDO_PASEO_ENDPOINT</key><string>$endpoint</string>
     <key>PAZEDO_USER_DATA_DIR</key><string>$HOME/Library/Application Support/Pazedo</string>
   </dict>
 PLIST
@@ -99,7 +99,7 @@ PLIST
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 
 codesign --force --deep --sign - "$app"
-echo "bundled $app (Paseo endpoint $endpoint)"
+echo "bundled $app"
 
 if $install; then
   destination="$HOME/Applications/Pazedo.app"

@@ -703,3 +703,44 @@ async fn test_panel_tabs_follow_the_open_paseo_workspace(cx: &mut TestAppContext
     cx.run_until_parked();
     assert_eq!(panel_tabs(&panel, cx), vec!["elsewhere", "from-phone"]);
 }
+
+#[gpui::test]
+fn test_the_endpoint_setting_connects_and_reconnects(cx: &mut TestAppContext) {
+    if std::env::var(crate::ENDPOINT_ENV_VAR).is_ok() {
+        // The environment variable overrides the setting.
+        return;
+    }
+    init_test(cx);
+    let set_endpoint = |endpoint: Option<&str>, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |settings, cx| {
+                settings.update_user_settings(cx, |content| {
+                    content.paseo = Some(settings::PaseoSettingsContent {
+                        endpoint: endpoint.map(str::to_string),
+                    });
+                });
+            });
+        });
+    };
+    let status = |store: &Entity<PaseoStore>, cx: &mut TestAppContext| {
+        store.read_with(cx, |store, _| format!("{:?}", store.status()))
+    };
+
+    let store = cx.update(PaseoStore::global);
+    assert_eq!(status(&store, cx), "NotConfigured");
+
+    set_endpoint(Some("127.0.0.1:1"), cx);
+    assert!(
+        status(&store, cx).contains("Connecting(Tcp"),
+        "{}",
+        status(&store, cx)
+    );
+    assert!(store.read_with(cx, |store, _| store.client().is_some()));
+
+    set_endpoint(Some("ws://"), cx);
+    assert!(status(&store, cx).starts_with("InvalidEndpoint"));
+    assert!(store.read_with(cx, |store, _| store.client().is_none()));
+
+    set_endpoint(None, cx);
+    assert_eq!(status(&store, cx), "NotConfigured");
+}

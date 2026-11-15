@@ -189,6 +189,8 @@ impl PaseoTerminalItem {
     /// the alternate screen, which is cut rather than reflowed.
     fn attach(&mut self, cx: &mut Context<Self>) {
         self.slot = None;
+        // The store replaces its client when the configured daemon changes.
+        self.client = self.store.read(cx).client();
         if self.size.is_none() {
             return;
         }

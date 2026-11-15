@@ -348,7 +348,7 @@ impl PaseoSidebar {
                 format!("{reason}. Reconnecting automatically.").into()
             }
             ConnectionStatus::NotConfigured => {
-                format!("Set {ENDPOINT_ENV_VAR} to connect to a Paseo daemon").into()
+                format!("Set paseo.endpoint in settings.json (or {ENDPOINT_ENV_VAR}) to connect to a Paseo daemon").into()
             }
             ConnectionStatus::InvalidEndpoint(error) => error.clone(),
         }
@@ -359,11 +359,9 @@ impl PaseoSidebar {
         let (icon, message): (IconName, SharedString) = match store.status() {
             ConnectionStatus::NotConfigured => (
                 IconName::Info,
-                format!(
-                    "Not connected to Paseo. Set {ENDPOINT_ENV_VAR} to a daemon address \
-                     (for example 127.0.0.1:6767) and restart."
-                )
-                .into(),
+                "Not connected to Paseo. Set the daemon's address in settings.json, for example \
+                 \"paseo\": { \"endpoint\": \"127.0.0.1:6767\" }."
+                    .into(),
             ),
             ConnectionStatus::InvalidEndpoint(error) => (IconName::Warning, error.clone()),
             ConnectionStatus::Disconnected(reason) => {

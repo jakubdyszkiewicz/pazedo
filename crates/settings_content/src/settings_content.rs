@@ -262,6 +262,9 @@ pub struct SettingsContent {
 
     pub journal: Option<JournalSettingsContent>,
 
+    /// pazedo: the Paseo daemon to connect to.
+    pub paseo: Option<PaseoSettingsContent>,
+
     /// A map of log scopes to the desired log level.
     /// Useful for filtering out noisy logs or enabling more verbose logging.
     ///
@@ -413,7 +416,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
-        instrumentation,
+        instrumentation, paseo,
     },
     defaults: {},
 });
@@ -1203,6 +1206,18 @@ pub struct CursorShapeSettings {
     ///
     /// The default value follows the primary cursor_shape.
     pub insert: Option<VimInsertModeCursorShape>,
+}
+
+/// pazedo: the Paseo daemon whose workspaces, agents and terminals pazedo shows.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct PaseoSettingsContent {
+    /// Where the daemon listens: `host:port`, `ws://host:port/ws`, or a Unix socket path.
+    /// Without it pazedo does not connect. The `PAZEDO_PASEO_ENDPOINT` environment variable
+    /// overrides it.
+    ///
+    /// Default: null
+    pub endpoint: Option<String>,
 }
 
 /// Settings specific to journaling

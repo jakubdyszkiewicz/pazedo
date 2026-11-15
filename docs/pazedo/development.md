@@ -48,14 +48,15 @@ at the external disk too.
 
 ```sh
 script/pazedo/bundle --install      # release build, target/release/Pazedo.app, ~/Applications
-script/pazedo/bundle --skip-build --install   # re-bundle only, e.g. for another endpoint
+script/pazedo/bundle --skip-build --install   # re-bundle only
 ```
 
 Measured 2026-11-14 (first release build, `target` on the external disk): 20 min 41 s wall,
 2 h 9 min user CPU, peak RSS 8.2 GB (the thin-LTO link), `target/release` 18 GB, binary 374 MB,
 app 357 MB. The app is ad-hoc signed, on the dev channel (no auto-update), and keeps its data
-in `~/Library/Application Support/Pazedo`, so it can run next to a dev build. The endpoint is
-written into `Info.plist` when bundling (`PAZEDO_PASEO_ENDPOINT`, default the test daemon).
+in `~/Library/Application Support/Pazedo`, so it can run next to a dev build. The daemon is a
+setting in the app's own settings file, `~/Library/Application Support/Pazedo/config/settings.json`
+(see "Connecting to a daemon" below).
 First launch asks whether to trust the opened project (Zed's restricted mode), because the
 data directory is new.
 
@@ -73,12 +74,25 @@ outside the repository: debug builds find their assets by walking up from the ex
 the directory with `.git`. A debug build that panics still reads debug info from `target/`
 for the backtrace, which triggers that prompt.
 
+## Connecting to a daemon
+
+pazedo connects to the daemon named in settings.json, and reconnects when the setting changes:
+
+```json
+"paseo": { "endpoint": "100.64.0.1:6767" }
+```
+
+The endpoint is `host:port`, `ws://host:port/ws`, or a Unix socket path. Without it pazedo does
+not connect and the sidebar says so. The `PAZEDO_PASEO_ENDPOINT` environment variable overrides
+the setting; `run-dev` uses that so a dev build, which shares `~/.config/zed` with any other dev
+build, always talks to the test daemon. The setting lives in Zed's `SettingsContent`
+(`crates/settings_content`, an upstream touch point); `paseo_ui::PaseoSettings` reads it.
+
 `run-dev` starts the build with `PAZEDO_PASEO_ENDPOINT=127.0.0.1:6868`, the test daemon, and
 `PAZEDO_AGENT_PROVIDER=mock` / `PAZEDO_AGENT_MODEL=one-minute-stream` for agents created from
 Zed, unless the variables are already set. It also forwards `PAZEDO_AGENT_HISTORY_LIMIT` and
 `RUST_LOG` when set (`open` passes no other environment). With `PAZEDO_AGENT_PROVIDER` set, the
-sidebar's + menu lists that provider first. pazedo connects to Paseo only when that variable is set, so a
-plain `target/debug/zed` shows "Not connected" in the sidebar and never reaches the real daemon.
+sidebar's + menu lists that provider first.
 
 The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorkspace` hides the
 sidebar when `disable_ai` is set or the agent is disabled).
