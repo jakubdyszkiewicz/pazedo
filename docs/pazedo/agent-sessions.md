@@ -71,7 +71,11 @@ same features.
 - Permission prompts map Paseo actions to ACP options; the chosen option goes back as
   `agent_permission_response`. A permission answered elsewhere withdraws the prompt.
 - Losing the daemon connection or a replaced timeline puts the view into Zed's "connection
-  lost" state; its reconnect button loads the agent again.
+  lost" state. The tab reloads the agent by itself once the daemon is connected again and the
+  tab is shown (e.g. after the laptop slept); Zed's Retry button does the same by hand. A tab
+  that started an agent keeps the agent's id for this. Verified 2026-11-15 by pausing the test
+  daemon until the client gave up (30 s without a message), then resuming it: the tab came back
+  with its history and the live stream.
 
 ## Things that were not obvious
 

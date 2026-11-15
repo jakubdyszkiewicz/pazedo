@@ -11,9 +11,10 @@ use util::path_list::PathList;
 use workspace::{Item, Workspace};
 
 use crate::{
-    PaseoStore,
+    PaseoStore, PaseoStoreEvent,
     agent_session::{NewAgent, PASEO_AGENT_ID, PaseoAgentServer, PaseoConnection},
     panel::PaseoPanel,
+    store::ConnectionStatus,
 };
 use paseo_client::protocol::AgentStatus;
 
@@ -37,8 +38,12 @@ pub struct PaseoAgentItem {
     detached: Cell<bool>,
     /// While a closed agent is being reloaded.
     reloading: Option<Task<()>>,
+    /// Set when the session lost its daemon connection (or the daemon replaced the agent's
+    /// history). The view reloads once the daemon is connected again and the tab is shown,
+    /// instead of waiting for the user to press Retry, e.g. after the laptop slept.
+    reload_when_connected: bool,
     _conversation_subscription: Option<Subscription>,
-    _store_subscription: Subscription,
+    _store_subscriptions: [Subscription; 2],
 }
 
 impl PaseoAgentItem {
@@ -100,6 +105,21 @@ impl PaseoAgentItem {
                 cx.notify();
             }
         });
+        let events_subscription = cx.subscribe(&store, |this, _, event, cx| match event {
+            PaseoStoreEvent::Disconnected => {
+                if this.conversation_view.is_some() {
+                    this.reload_when_connected = true;
+                }
+            }
+            PaseoStoreEvent::AgentTimelineReplacement(replacement)
+                if this.agent_id(cx).as_deref() == Some(replacement.agent_id.as_str()) =>
+            {
+                this.reload_when_connected = true;
+                cx.notify();
+            }
+            PaseoStoreEvent::Connected if this.reload_when_connected => cx.notify(),
+            _ => {}
+        });
         Self {
             store,
             agent_id,
@@ -112,8 +132,9 @@ impl PaseoAgentItem {
             focus_handle: cx.focus_handle(),
             detached: Cell::new(false),
             reloading: None,
+            reload_when_connected: false,
             _conversation_subscription: None,
-            _store_subscription: store_subscription,
+            _store_subscriptions: [store_subscription, events_subscription],
         }
     }
 
@@ -137,6 +158,32 @@ impl PaseoAgentItem {
     /// removing it does not archive the agent.
     pub(crate) fn detach(&self) {
         self.detached.set(true);
+    }
+
+    /// Reopens a session that lost its connection once the daemon is back.
+    fn reload_if_reconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.reload_when_connected
+            || !matches!(self.store.read(cx).status(), ConnectionStatus::Connected(_))
+        {
+            return;
+        }
+        // A tab that started an agent whose id never became known has nothing to reopen; it
+        // keeps Zed's Retry, which starts the agent again.
+        let Some(agent_id) = self.agent_id.clone() else {
+            return;
+        };
+        self.reload_when_connected = false;
+        let conversation_view = build_conversation_view(
+            self.store.clone(),
+            Some(agent_id),
+            self.title.clone(),
+            self.workspace.clone(),
+            self.project.clone(),
+            self.work_dirs.clone(),
+            window,
+            cx,
+        );
+        self.set_conversation_view(conversation_view, window, cx);
     }
 
     fn ensure_conversation_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -376,6 +423,12 @@ impl Render for PaseoAgentItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_conversation_view(window, cx);
         let agent_id = self.agent_id(cx);
+        // A tab that started an agent keeps its id, which the view forgets when its session
+        // is lost and which reopening the agent needs.
+        if self.agent_id.is_none() && agent_id.is_some() {
+            self.agent_id = agent_id.clone();
+        }
+        self.reload_if_reconnected(window, cx);
         // Only the active tab of a shown panel renders, so this is the user seeing the agent.
         if window.is_window_active()
             && let Some(agent_id) = agent_id.clone()
