@@ -1,4 +1,4 @@
-use gpui::{App, Context, DismissEvent, SharedString, Task, Window};
+use gpui::{App, Context, DismissEvent, Entity, SharedString, Task, Window};
 use picker::{Picker, PickerDelegate};
 use std::{rc::Rc, sync::Arc, time::Duration};
 use ui::{ListItem, ListItemSpacing, prelude::*};
@@ -12,6 +12,7 @@ type OnConfirm = Rc<dyn Fn(String, &mut Window, &mut App)>;
 /// machine, where the native folder dialog cannot look. Suggestions come from the daemon as the
 /// path or name is typed.
 pub(crate) struct AddProjectDelegate {
+    store: Entity<PaseoStore>,
     host_name: SharedString,
     matches: Vec<String>,
     selected_index: usize,
@@ -22,6 +23,7 @@ pub(crate) struct AddProjectDelegate {
 /// Opens the picker in `workspace`; `on_confirm` adds the picked folder.
 pub(crate) fn open_add_project_picker(
     workspace: &mut Workspace,
+    store: Entity<PaseoStore>,
     host_name: SharedString,
     on_confirm: impl Fn(String, &mut Window, &mut App) + 'static,
     window: &mut Window,
@@ -29,6 +31,7 @@ pub(crate) fn open_add_project_picker(
 ) {
     workspace.toggle_modal(window, cx, move |window, cx| {
         let delegate = AddProjectDelegate {
+            store,
             host_name,
             matches: Vec::new(),
             selected_index: 0,
@@ -92,13 +95,15 @@ impl PickerDelegate for AddProjectDelegate {
                 .timer(Duration::from_millis(120))
                 .await;
             let suggestions = picker
-                .update(cx, |_, cx| {
+                .update(cx, |picker, cx| {
                     let query = if query.is_empty() {
                         "~/".to_string()
                     } else {
                         query.clone()
                     };
-                    PaseoStore::global(cx)
+                    picker
+                        .delegate
+                        .store
                         .read(cx)
                         .directory_suggestions(query, cx)
                 })

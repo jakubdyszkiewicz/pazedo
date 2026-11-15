@@ -17,8 +17,8 @@ use agent_servers::{AgentServer, AgentServerDelegate};
 use anyhow::{Context as _, Result, anyhow, bail};
 use collections::{HashMap, HashSet};
 use gpui::{
-    App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task, TaskExt as _,
-    WeakEntity,
+    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription, Task,
+    TaskExt as _, WeakEntity,
 };
 use paseo_client::{
     Client,
@@ -66,9 +66,11 @@ fn history_limit() -> u32 {
         .unwrap_or(HISTORY_LIMIT)
 }
 
-/// An in-process "agent server" for `ConversationView`: connecting returns the shared
-/// [`PaseoConnection`].
-pub struct PaseoAgentServer;
+/// An in-process "agent server" for `ConversationView`: connecting returns the
+/// [`PaseoConnection`] of the agent's daemon.
+pub struct PaseoAgentServer {
+    pub store: Entity<PaseoStore>,
+}
 
 impl AgentServer for PaseoAgentServer {
     fn logo(&self) -> ui::IconName {
@@ -85,7 +87,9 @@ impl AgentServer for PaseoAgentServer {
         _project: Entity<Project>,
         cx: &mut App,
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
-        Task::ready(Ok(PaseoConnection::global(cx) as Rc<dyn AgentConnection>))
+        Task::ready(Ok(
+            PaseoConnection::for_store(&self.store, cx) as Rc<dyn AgentConnection>
+        ))
     }
 
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
@@ -93,9 +97,11 @@ impl AgentServer for PaseoAgentServer {
     }
 }
 
-struct GlobalPaseoConnection(Rc<PaseoConnection>);
+/// One connection per daemon, by its store's entity id.
+#[derive(Default)]
+struct GlobalPaseoConnections(HashMap<EntityId, Rc<PaseoConnection>>);
 
-impl Global for GlobalPaseoConnection {}
+impl Global for GlobalPaseoConnections {}
 
 type Sessions = Rc<RefCell<HashMap<String, Session>>>;
 
@@ -148,11 +154,15 @@ struct Session {
 }
 
 impl PaseoConnection {
-    pub fn global(cx: &mut App) -> Rc<Self> {
-        if let Some(connection) = cx.try_global::<GlobalPaseoConnection>() {
-            return connection.0.clone();
+    /// The connection of `store`'s daemon, shared by all of its agents' threads.
+    pub fn for_store(store: &Entity<PaseoStore>, cx: &mut App) -> Rc<Self> {
+        if let Some(connection) = cx
+            .try_global::<GlobalPaseoConnections>()
+            .and_then(|connections| connections.0.get(&store.entity_id()))
+        {
+            return connection.clone();
         }
-        let store = PaseoStore::global(cx);
+        let store = store.clone();
         let sessions = Sessions::default();
         let store_subscription = cx.subscribe(&store, {
             let sessions = sessions.clone();
@@ -170,7 +180,9 @@ impl PaseoConnection {
             next_new_agent: RefCell::default(),
             _store_subscription: store_subscription,
         });
-        cx.set_global(GlobalPaseoConnection(connection.clone()));
+        cx.default_global::<GlobalPaseoConnections>()
+            .0
+            .insert(connection.store.entity_id(), connection.clone());
         connection
     }
 

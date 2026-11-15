@@ -29,8 +29,8 @@ same features.
 
 - `paseo_ui::PaseoAgentItem` wraps a `ConversationView` in a workspace `Item`. It is built with
   public constructors only: its own `AgentConnectionStore`, `Agent::Custom { id: "paseo" }`, and
-  `PaseoAgentServer`, an in-process `AgentServer` whose `connect` returns the shared
-  `PaseoConnection`.
+  `PaseoAgentServer`, an in-process `AgentServer` holding the agent's daemon store, whose
+  `connect` returns that daemon's `PaseoConnection` (one per daemon, shared by its agents).
 - `PaseoConnection` implements `acp_thread::AgentConnection`:
   - `load_session` (agent id = ACP session id) subscribes to the agent's timeline, fetches the
     last 200 projected entries, replays them into a new `AcpThread`, sets running/idle from the

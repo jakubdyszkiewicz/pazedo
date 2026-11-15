@@ -9,12 +9,14 @@ done; record decisions where the code or docs that implement them live.
   credential from the Paseo home or a password from the keychain, never from settings.json.
   The owner's daemon has no password and needs none (verified 2026-11-14). The endpoint is a
   setting now (`"paseo": {"endpoint": ...}`); several daemons in one sidebar would extend it.
-- **Remote dev box, follow-ups.** One daemon on another machine works (2026-11-15, see
-  development.md "Daemon on another machine"). Still open: several daemons in one sidebar
-  (local and dev box side by side, grouped by host; the store holds one daemon today);
-  reaching a daemon that listens only on localhost through an SSH tunnel; shipping the remote
-  server inside Pazedo.app and uploading it, instead of copying it to the box by hand; and
-  checking that file links in agent output and diffs open in the remote project.
+- **Remote dev box, follow-ups.** Daemons on other machines work, several side by side
+  (2026-11-15, see development.md "Daemon on another machine" and "Several daemons"). Still
+  open: a macOS remote server, so that Pazedo on the MacBook can open the Mac mini's folders
+  over SSH (build `remote_server` natively for aarch64-apple-darwin and install it as
+  `~/.zed_server/zed-remote-server-dev-build` on the mini); reaching a daemon that listens only
+  on localhost through an SSH tunnel; shipping the remote servers inside Pazedo.app and
+  uploading them instead of copying them by hand; checking that file links in agent output and
+  diffs open in the remote project.
 - **Practice upstream merge** while the fork is only days behind, to test the touch-point list
   and the merge procedure in README.md.
 

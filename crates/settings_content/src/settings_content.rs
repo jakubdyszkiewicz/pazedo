@@ -1225,6 +1225,24 @@ pub struct PaseoSettingsContent {
     ///
     /// Default: null
     pub ssh: Option<String>,
+    /// Several daemons, listed side by side in the sidebar, each with the `endpoint`, `ssh`
+    /// and optional `name` described above. `endpoint` and `ssh` at the top level add one
+    /// more daemon before these.
+    ///
+    /// Default: null
+    pub daemons: Option<Vec<PaseoDaemonContent>>,
+}
+
+/// pazedo: one Paseo daemon in `paseo.daemons`.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct PaseoDaemonContent {
+    /// The name shown in the sidebar. Defaults to the daemon's host name.
+    pub name: Option<String>,
+    /// Where the daemon listens, like `paseo.endpoint`.
+    pub endpoint: Option<String>,
+    /// The SSH host the daemon's folders are on, like `paseo.ssh`.
+    pub ssh: Option<String>,
 }
 
 /// Settings specific to journaling

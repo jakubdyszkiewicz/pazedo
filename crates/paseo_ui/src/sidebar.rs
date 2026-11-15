@@ -3,8 +3,9 @@ use chrono::{DateTime, Utc};
 use collections::HashSet;
 use editor::Editor;
 use gpui::{
-    App, Context, Decorations, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
-    Pixels, Render, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, px,
+    App, Context, Decorations, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Subscription, Task, WeakEntity,
+    Window, px,
 };
 use paseo_client::protocol::{
     Workspace, WorkspaceKind, WorkspaceSource, WorkspaceStatus, WorktreeAction,
@@ -28,27 +29,50 @@ use crate::{
     new_workspace::{NewWorkspaceChoice, open_new_workspace_picker},
     panel::PaseoPanel,
     store::{
-        ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, ProjectGroup, WorkspaceEntry, daemon_host,
-        is_on_daemon_host,
+        ConnectionStatus, ENDPOINT_ENV_VAR, PaseoDaemons, PaseoStore, ProjectGroup, WorkspaceEntry,
     },
 };
 
-/// Lists the workspaces of a Paseo daemon, grouped by project, in place of Zed's threads
-/// sidebar. Selecting a workspace opens its directory as the window's active Zed workspace.
+/// A workspace or project of one daemon. Ids are only unique per daemon: two machines with
+/// the same folder can have the same project id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DaemonItemKey {
+    daemon: EntityId,
+    id: String,
+}
+
+impl DaemonItemKey {
+    fn new(store: &Entity<PaseoStore>, id: &str) -> Self {
+        Self {
+            daemon: store.entity_id(),
+            id: id.to_string(),
+        }
+    }
+
+    fn element_id(&self, prefix: &str) -> SharedString {
+        format!("{prefix}-{}-{}", self.daemon, self.id).into()
+    }
+}
+
+/// Lists the workspaces of the configured Paseo daemons, grouped by daemon and project, in place
+/// of Zed's threads sidebar. Selecting a workspace opens its directory, on the daemon's
+/// machine, as the window's active Zed workspace.
 pub struct PaseoSidebar {
     multi_workspace: WeakEntity<MultiWorkspace>,
-    store: Entity<PaseoStore>,
+    daemons: Entity<PaseoDaemons>,
     focus_handle: FocusHandle,
     width: Pixels,
-    collapsed_projects: HashSet<String>,
-    hovered_workspace: Option<String>,
+    collapsed_daemons: HashSet<EntityId>,
+    collapsed_projects: HashSet<DaemonItemKey>,
+    hovered_workspace: Option<DaemonItemKey>,
     /// Several Paseo workspaces can share a directory; this remembers which one was clicked so
     /// only it is highlighted.
-    selected_workspace: Option<String>,
+    selected_workspace: Option<DaemonItemKey>,
     rename_editor: Entity<Editor>,
     /// The workspace whose name is being edited in place.
-    renaming_workspace: Option<String>,
+    renaming_workspace: Option<(Entity<PaseoStore>, String)>,
     scroll_handle: ScrollHandle,
+    _store_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -58,7 +82,7 @@ impl PaseoSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store = PaseoStore::global(cx);
+        let daemons = PaseoDaemons::global(cx);
         let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(
@@ -70,52 +94,88 @@ impl PaseoSidebar {
                     }
                 },
             ),
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&daemons, |this, _, cx| {
+                this.observe_stores(cx);
+                cx.notify();
+            }),
             cx.subscribe(&multi_workspace, |_, _, event: &MultiWorkspaceEvent, cx| {
                 if let MultiWorkspaceEvent::ActiveWorkspaceChanged { .. } = event {
                     cx.notify();
                 }
             }),
         ];
-        Self {
+        let mut this = Self {
             multi_workspace: multi_workspace.downgrade(),
-            store,
+            daemons,
             focus_handle: cx.focus_handle(),
             width: AgentSettings::get_global(cx).threads_sidebar.default_width,
+            collapsed_daemons: HashSet::default(),
             collapsed_projects: HashSet::default(),
             hovered_workspace: None,
             selected_workspace: None,
             rename_editor,
             renaming_workspace: None,
             scroll_handle: ScrollHandle::new(),
+            _store_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
-        }
+        };
+        this.observe_stores(cx);
+        this
+    }
+
+    fn observe_stores(&mut self, cx: &mut Context<Self>) {
+        self._store_subscriptions = self
+            .stores(cx)
+            .iter()
+            .map(|store| cx.observe(store, |_, _, cx| cx.notify()))
+            .collect();
+    }
+
+    fn stores(&self, cx: &App) -> Vec<Entity<PaseoStore>> {
+        self.daemons.read(cx).stores().to_vec()
+    }
+
+    /// The workspace row to highlight: among the daemons whose folders are on the machine of
+    /// the window's project, the row last clicked if it is still the open directory, otherwise
+    /// the first row showing the open directory.
+    fn highlighted_workspace(&self, cx: &App) -> Option<(Entity<PaseoStore>, String)> {
+        let multi_workspace = self.multi_workspace.upgrade()?;
+        let workspace = multi_workspace.read(cx).workspace().read(cx);
+        let directory = match workspace.root_paths(cx).as_slice() {
+            [path] => path.to_path_buf(),
+            _ => return None,
+        };
+        let project = workspace.project().read(cx);
+        self.stores(cx).into_iter().find_map(|store| {
+            let store_ref = store.read(cx);
+            if !store_ref.is_on_host(project, cx) {
+                return None;
+            }
+            let selected = self
+                .selected_workspace
+                .as_ref()
+                .filter(|selected| selected.daemon == store.entity_id())
+                .map(|selected| selected.id.as_str());
+            let id = active_workspace_id(&store_ref.project_groups(), &directory, selected)?;
+            Some((store.clone(), id))
+        })
     }
 
     #[cfg(test)]
-    pub(crate) fn store(&self) -> &Entity<PaseoStore> {
-        &self.store
-    }
-
-    /// The workspace row to highlight: the one last clicked if it is still the open directory,
-    /// otherwise the first row showing the open directory.
-    pub(crate) fn highlighted_workspace(&self, cx: &App) -> Option<String> {
-        active_workspace_id(
-            &self.store.read(cx).project_groups(),
-            self.active_directory(cx).as_deref(),
-            self.selected_workspace.as_deref(),
-        )
+    pub(crate) fn highlighted_workspace_id(&self, cx: &App) -> Option<String> {
+        self.highlighted_workspace(cx).map(|(_, id)| id)
     }
 
     /// Opens the workspace's folder as the window's Zed workspace and shows its agents and
     /// terminals in the Paseo panel.
     pub(crate) fn open_workspace(
         &mut self,
+        store: &Entity<PaseoStore>,
         workspace_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(activate) = self.activate_workspace(workspace_id, window, cx) else {
+        let Some(activate) = self.activate_workspace(store, workspace_id, window, cx) else {
             return;
         };
         cx.spawn_in(window, async move |_, cx| {
@@ -127,30 +187,33 @@ impl PaseoSidebar {
 
     fn activate_workspace(
         &mut self,
+        store: &Entity<PaseoStore>,
         workspace_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<Entity<workspace::Workspace>>>> {
-        let directory = PathBuf::from(self.store.read(cx).workspace(workspace_id)?.directory());
-        let host = match daemon_host(cx) {
+        let directory = PathBuf::from(store.read(cx).workspace(workspace_id)?.directory());
+        let host = match store.read(cx).host(cx) {
             Ok(host) => host,
             Err(error) => return Some(Task::ready(Err(error))),
         };
-        self.selected_workspace = Some(workspace_id.to_string());
-        self.store
-            .update(cx, |store, cx| store.select_workspace(workspace_id, cx));
+        self.selected_workspace = Some(DaemonItemKey::new(store, workspace_id));
+        store.update(cx, |store, cx| store.select_workspace(workspace_id, cx));
         cx.notify();
         let multi_workspace = self.multi_workspace.upgrade()?;
         let modal_workspace = multi_workspace.read(cx).workspace().clone();
         // For a daemon on another machine the folder is there, so it opens over SSH like
         // Zed's remote projects, behind Zed's connection dialog.
-        Some(multi_workspace.update(cx, |multi_workspace, cx| {
+        let open = multi_workspace.update(cx, |multi_workspace, cx| {
             multi_workspace.find_or_create_workspace(
                 PathList::new(&[directory]),
                 host,
                 None,
-                move |options, window, cx| {
-                    remote_connection::connect_with_modal(&modal_workspace, options, window, cx)
+                {
+                    let modal_workspace = modal_workspace.clone();
+                    move |options, window, cx| {
+                        remote_connection::connect_with_modal(&modal_workspace, options, window, cx)
+                    }
                 },
                 None,
                 OpenMode::Activate,
@@ -158,22 +221,14 @@ impl PaseoSidebar {
                 window,
                 cx,
             )
+        });
+        Some(cx.spawn_in(window, async move |_, cx| {
+            let workspace = open.await;
+            // The dialog was shown on the workspace that was active, which stays open behind
+            // the new remote one.
+            remote_connection::dismiss_connection_modal(&modal_workspace, cx);
+            workspace
         }))
-    }
-
-    /// The single root directory of the window's active Zed workspace, if it is on the
-    /// daemon's machine.
-    fn active_directory(&self, cx: &App) -> Option<PathBuf> {
-        let multi_workspace = self.multi_workspace.upgrade()?;
-        let workspace = multi_workspace.read(cx).workspace().read(cx);
-        if !is_on_daemon_host(workspace.project().read(cx), cx) {
-            return None;
-        }
-        let root_paths = workspace.root_paths(cx);
-        match root_paths.as_slice() {
-            [path] => Some(path.to_path_buf()),
-            _ => None,
-        }
     }
 
     fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -189,23 +244,13 @@ impl PaseoSidebar {
             Tab::container_height(cx)
         };
 
-        let is_connected = matches!(self.store.read(cx).status(), ConnectionStatus::Connected(_));
-        let (indicator_color, status_text): (Color, SharedString) =
-            match self.store.read(cx).status() {
-                ConnectionStatus::Connected(server_info) => (
-                    Color::Success,
-                    server_info
-                        .hostname
-                        .clone()
-                        .unwrap_or_else(|| server_info.server_id.clone())
-                        .into(),
-                ),
-                ConnectionStatus::Connecting(_) => (Color::Warning, "Connecting…".into()),
-                ConnectionStatus::Disconnected(_) => (Color::Error, "Disconnected".into()),
-                ConnectionStatus::NotConfigured | ConnectionStatus::InvalidEndpoint(_) => {
-                    (Color::Muted, "Not connected".into())
-                }
-            };
+        // With a single daemon its status and Add Project sit in the header, as before there
+        // could be several; with more, each daemon's section has its own.
+        let stores = self.stores(cx);
+        let single_daemon = match stores.as_slice() {
+            [store] => Some(store.clone()),
+            _ => None,
+        };
 
         h_flex()
             .h(header_height)
@@ -244,31 +289,12 @@ impl PaseoSidebar {
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .child(Label::new("Paseo").size(LabelSize::Small))
-            .child(
-                h_flex()
-                    .id("paseo-connection-status")
-                    .min_w_0()
-                    .gap_1()
-                    .child(Indicator::dot().color(indicator_color))
-                    .child(
-                        Label::new(status_text)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
-                    .tooltip({
-                        let tooltip = self.connection_tooltip(cx);
-                        move |_window, cx| Tooltip::simple(tooltip.clone(), cx)
-                    }),
-            )
+            .when_some(single_daemon.clone(), |this, store| {
+                this.child(self.render_daemon_status(&store, Color::Muted, cx))
+            })
             .child(div().flex_1())
-            .when(is_connected, |this| {
-                this.child(
-                    IconButton::new("paseo-add-project", IconName::Plus)
-                        .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text("Add Project…"))
-                        .on_click(cx.listener(|this, _, window, cx| this.add_project(window, cx))),
-                )
+            .when_some(single_daemon, |this, store| {
+                this.children(self.render_add_project_button(&store, cx))
             })
             .when(right_window_controls, |this| {
                 this.children(platform_title_bar::render_right_window_controls(
@@ -280,10 +306,78 @@ impl PaseoSidebar {
             .into_any_element()
     }
 
+    /// The daemon's connection dot and name, with the connection's details on hover.
+    fn render_daemon_status(
+        &self,
+        store: &Entity<PaseoStore>,
+        name_color: Color,
+        cx: &App,
+    ) -> AnyElement {
+        let store_ref = store.read(cx);
+        let (indicator_color, status_text): (Color, SharedString) = match store_ref.status() {
+            ConnectionStatus::Connected(_) => (Color::Success, store_ref.display_name()),
+            ConnectionStatus::Connecting(_) => (
+                Color::Warning,
+                format!("{} · Connecting…", store_ref.display_name()).into(),
+            ),
+            ConnectionStatus::Disconnected(_) => (
+                Color::Error,
+                format!("{} · Disconnected", store_ref.display_name()).into(),
+            ),
+            ConnectionStatus::NotConfigured | ConnectionStatus::InvalidEndpoint(_) => {
+                (Color::Muted, "Not connected".into())
+            }
+        };
+        let tooltip = connection_tooltip(store_ref);
+        h_flex()
+            .id(SharedString::from(format!(
+                "paseo-connection-status-{}",
+                store.entity_id()
+            )))
+            .min_w_0()
+            .gap_1()
+            .child(Indicator::dot().color(indicator_color))
+            .child(
+                Label::new(status_text)
+                    .size(LabelSize::Small)
+                    .color(name_color)
+                    .truncate(),
+            )
+            .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx))
+            .into_any_element()
+    }
+
+    fn render_add_project_button(
+        &self,
+        store: &Entity<PaseoStore>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !matches!(store.read(cx).status(), ConnectionStatus::Connected(_)) {
+            return None;
+        }
+        Some(
+            IconButton::new(
+                SharedString::from(format!("paseo-add-project-{}", store.entity_id())),
+                IconName::Plus,
+            )
+            .icon_size(IconSize::Small)
+            .tooltip(Tooltip::text("Add Project…"))
+            .on_click(cx.listener({
+                let store = store.clone();
+                move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.add_project(&store, window, cx)
+                }
+            }))
+            .into_any_element(),
+        )
+    }
+
     /// Asks where a new workspace of the project lives (its checkout, or a new worktree off a
     /// branch), creates it and opens it.
     fn new_workspace(
         &mut self,
+        store: Entity<PaseoStore>,
         project_id: String,
         project_name: SharedString,
         root_path: String,
@@ -298,6 +392,7 @@ impl PaseoSidebar {
         workspace.update(cx, |workspace, cx| {
             open_new_workspace_picker(
                 workspace,
+                &store.clone(),
                 project_name,
                 root_path.clone(),
                 move |choice, window, cx| {
@@ -316,7 +411,7 @@ impl PaseoSidebar {
                     };
                     sidebar
                         .update(cx, |sidebar, cx| {
-                            sidebar.create_workspace(source, window, cx)
+                            sidebar.create_workspace(store.clone(), source, window, cx)
                         })
                         .ok();
                 },
@@ -328,17 +423,16 @@ impl PaseoSidebar {
 
     fn create_workspace(
         &mut self,
+        store: Entity<PaseoStore>,
         source: WorkspaceSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let create = self
-            .store
-            .update(cx, |store, cx| store.create_workspace(source, cx));
+        let create = store.update(cx, |store, cx| store.create_workspace(source, cx));
         cx.spawn_in(window, async move |this, cx| {
             let workspace = create.await?;
             this.update_in(cx, |this, window, cx| {
-                this.open_workspace(&workspace.id, window, cx);
+                this.open_workspace(&store, &workspace.id, window, cx);
             })
         })
         .detach_and_prompt_err(
@@ -349,9 +443,14 @@ impl PaseoSidebar {
         );
     }
 
-    fn start_rename(&mut self, workspace_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self
-            .store
+    fn start_rename(
+        &mut self,
+        store: &Entity<PaseoStore>,
+        workspace_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = store
             .read(cx)
             .workspace(workspace_id)
             .map(|workspace| workspace.name.clone())
@@ -361,7 +460,7 @@ impl PaseoSidebar {
         if self.renaming_workspace.is_some() {
             self.finish_rename(true, window, cx);
         }
-        self.renaming_workspace = Some(workspace_id.to_string());
+        self.renaming_workspace = Some((store.clone(), workspace_id.to_string()));
         self.rename_editor.update(cx, |editor, cx| {
             editor.set_text(name, window, cx);
             editor.select_all(&editor::actions::SelectAll, window, cx);
@@ -373,7 +472,7 @@ impl PaseoSidebar {
     /// Ends renaming in place, saving the edited name unless `save` is false. Like Paseo, an
     /// empty or unchanged name leaves the workspace as it was.
     fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace_id) = self.renaming_workspace.take() else {
+        let Some((store, workspace_id)) = self.renaming_workspace.take() else {
             return;
         };
         cx.notify();
@@ -384,15 +483,14 @@ impl PaseoSidebar {
             return;
         }
         let title = self.rename_editor.read(cx).text(cx).trim().to_string();
-        let unchanged = self
-            .store
+        let unchanged = store
             .read(cx)
             .workspace(&workspace_id)
             .is_none_or(|workspace| workspace.name == title);
         if title.is_empty() || unchanged {
             return;
         }
-        self.store
+        store
             .update(cx, |store, cx| {
                 store.set_workspace_title(workspace_id, Some(title), cx)
             })
@@ -430,8 +528,13 @@ impl PaseoSidebar {
 
     /// Asks for a folder and adds it to Paseo as a project: with the native folder dialog for a
     /// daemon on this machine, or with folders the daemon suggests for one on another machine.
-    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let host = match daemon_host(cx) {
+    fn add_project(
+        &mut self,
+        store: &Entity<PaseoStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = match store.read(cx).host(cx) {
             Ok(host) => host,
             Err(error) => {
                 Task::<anyhow::Result<()>>::ready(Err(error)).detach_and_prompt_err(
@@ -448,10 +551,11 @@ impl PaseoSidebar {
                 return;
             };
             let workspace = multi_workspace.read(cx).workspace().clone();
-            let store = self.store.clone();
+            let store = store.clone();
             workspace.update(cx, |workspace, cx| {
                 open_add_project_picker(
                     workspace,
+                    store.clone(),
                     host.display_name().into(),
                     move |path, window, cx| {
                         store
@@ -475,7 +579,7 @@ impl PaseoSidebar {
             multiple: false,
             prompt: Some("Add Project".into()),
         });
-        let store = self.store.clone();
+        let store = store.clone();
         cx.spawn_in(window, async move |_, cx| {
             let Some(path) = paths.await??.and_then(|paths| paths.into_iter().next()) else {
                 return Ok(());
@@ -489,27 +593,7 @@ impl PaseoSidebar {
         });
     }
 
-    fn connection_tooltip(&self, cx: &App) -> SharedString {
-        match self.store.read(cx).status() {
-            ConnectionStatus::Connected(server_info) => format!(
-                "Connected to {} (Paseo {})",
-                server_info.server_id,
-                server_info.version.as_deref().unwrap_or("unknown version")
-            )
-            .into(),
-            ConnectionStatus::Connecting(endpoint) => format!("Connecting to {endpoint}").into(),
-            ConnectionStatus::Disconnected(reason) => {
-                format!("{reason}. Reconnecting automatically.").into()
-            }
-            ConnectionStatus::NotConfigured => {
-                format!("Set paseo.endpoint in settings.json (or {ENDPOINT_ENV_VAR}) to connect to a Paseo daemon").into()
-            }
-            ConnectionStatus::InvalidEndpoint(error) => error.clone(),
-        }
-    }
-
-    fn render_message(&self, cx: &App) -> Option<AnyElement> {
-        let store = self.store.read(cx);
+    fn render_message(&self, store: &PaseoStore, cx: &App) -> Option<AnyElement> {
         let (icon, message): (IconName, SharedString) = match store.status() {
             ConnectionStatus::NotConfigured => (
                 IconName::Info,
@@ -529,48 +613,117 @@ impl PaseoSidebar {
                 )
             }
         };
-        Some(
+        Some(render_notice(icon, message, cx))
+    }
+
+    /// One daemon's projects. With several daemons they sit under a collapsible row with the
+    /// daemon's status and Add Project.
+    fn render_daemon(
+        &self,
+        store: &Entity<PaseoStore>,
+        active_workspace: Option<&str>,
+        with_header: bool,
+        is_first: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let daemon = store.entity_id();
+        let is_collapsed = with_header && self.collapsed_daemons.contains(&daemon);
+        let store_ref = store.read(cx);
+        let is_connected = matches!(store_ref.status(), ConnectionStatus::Connected(_));
+        let groups = store_ref.project_groups();
+        let message = self.render_message(store_ref, cx);
+        let colors = cx.theme().colors();
+        let (panel_background, hover, border) = (
+            colors.panel_background,
+            colors.ghost_element_hover,
+            colors.border,
+        );
+        let add_project = self.render_add_project_button(store, cx);
+        let header = with_header.then(|| {
             h_flex()
-                .flex_none()
-                .items_start()
-                .gap_1p5()
+                .id(SharedString::from(format!("paseo-daemon-{daemon}")))
+                .h(Tab::container_height(cx))
+                .w_full()
                 .px_2()
-                .py_1p5()
+                .gap_1()
+                .cursor_pointer()
+                .bg(panel_background)
+                .hover(move |style| style.bg(hover))
+                .when(!is_first, |this| this.border_t_1())
                 .border_b_1()
-                .border_color(cx.theme().colors().border_variant)
-                .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                .border_color(border)
                 .child(
-                    div().flex_1().min_w_0().child(
-                        Label::new(message)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
+                    Icon::new(if is_collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
                 )
-                .into_any_element(),
+                .child(self.render_daemon_status(store, Color::Default, cx))
+                .child(div().flex_1())
+                .children(add_project)
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if !this.collapsed_daemons.remove(&daemon) {
+                        this.collapsed_daemons.insert(daemon);
+                    }
+                    cx.notify();
+                }))
+        });
+        let projects: Vec<AnyElement> = if is_collapsed {
+            Vec::new()
+        } else {
+            groups
+                .into_iter()
+                .enumerate()
+                .map(|(index, group)| {
+                    self.render_project(store, group, active_workspace, index == 0, cx)
+                })
+                .collect()
+        };
+        v_flex()
+            .w_full()
+            .children(header)
+            .when(!is_collapsed, |this| this.children(message))
+            .child(
+                v_flex()
+                    .w_full()
+                    .when(!is_connected, |this| this.opacity(0.6))
+                    .children(projects),
+            )
+            .into_any_element()
+    }
+
+    fn render_not_configured(&self, cx: &App) -> AnyElement {
+        render_notice(
+            IconName::Info,
+            "Not connected to Paseo. Set the daemon's address in settings.json, for example \
+             \"paseo\": { \"endpoint\": \"127.0.0.1:6767\" }."
+                .into(),
+            cx,
         )
     }
 
     fn render_project(
         &self,
+        store: &Entity<PaseoStore>,
         group: ProjectGroup,
         active_workspace: Option<&str>,
         is_first: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_collapsed = self.collapsed_projects.contains(&group.project_id);
+        let project_key = DaemonItemKey::new(store, &group.project_id);
+        let is_collapsed = self.collapsed_projects.contains(&project_key);
         let attention_count = group
             .workspaces
             .iter()
             .filter(|entry| entry.workspace.status != WorkspaceStatus::Done)
             .count();
-        let project_id = group.project_id.clone();
         let color = cx.theme().colors();
 
         let header = h_flex()
-            .id(SharedString::from(format!(
-                "paseo-project-{}",
-                group.project_id
-            )))
+            .id(project_key.element_id("paseo-project"))
             .h(Tab::content_height(cx))
             .w_full()
             .px_2()
@@ -599,18 +752,20 @@ impl PaseoSidebar {
             .child(div().flex_1())
             .child(
                 IconButton::new(
-                    SharedString::from(format!("paseo-new-workspace-{}", group.project_id)),
+                    project_key.element_id("paseo-new-workspace"),
                     IconName::Plus,
                 )
                 .icon_size(IconSize::Small)
                 .tooltip(Tooltip::text("New Workspace…"))
                 .on_click(cx.listener({
+                    let store = store.clone();
                     let project_id = group.project_id.clone();
                     let name = group.name.clone();
                     let root_path = group.root_path.clone();
                     move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.new_workspace(
+                            store.clone(),
                             project_id.clone(),
                             name.clone(),
                             root_path.to_string(),
@@ -622,8 +777,8 @@ impl PaseoSidebar {
             )
             .tooltip(Tooltip::text(group.root_path.clone()))
             .on_click(cx.listener(move |this, _, _window, cx| {
-                if !this.collapsed_projects.remove(&project_id) {
-                    this.collapsed_projects.insert(project_id.clone());
+                if !this.collapsed_projects.remove(&project_key) {
+                    this.collapsed_projects.insert(project_key.clone());
                 }
                 cx.notify();
             }));
@@ -647,7 +802,7 @@ impl PaseoSidebar {
                     } else {
                         this.children(group.workspaces.into_iter().map(|entry| {
                             let is_active = active_workspace == Some(entry.workspace.id.as_str());
-                            self.render_workspace(entry, is_active, cx)
+                            self.render_workspace(store, entry, is_active, cx)
                         }))
                     }
                 })
@@ -657,14 +812,19 @@ impl PaseoSidebar {
 
     fn render_workspace(
         &self,
+        store: &Entity<PaseoStore>,
         entry: WorkspaceEntry,
         is_active: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace = &entry.workspace;
         let workspace_id = workspace.id.clone();
-        let is_hovered = self.hovered_workspace.as_deref() == Some(workspace.id.as_str());
-        let is_renaming = self.renaming_workspace.as_deref() == Some(workspace.id.as_str());
+        let key = DaemonItemKey::new(store, &workspace.id);
+        let is_hovered = self.hovered_workspace.as_ref() == Some(&key);
+        let is_renaming = self
+            .renaming_workspace
+            .as_ref()
+            .is_some_and(|(renaming_store, id)| renaming_store == store && *id == workspace.id);
 
         let (status, notified) = match workspace.status {
             WorkspaceStatus::Running => (AgentThreadStatus::Running, false),
@@ -714,49 +874,47 @@ impl PaseoSidebar {
                 Some(format!("PR #{number}{state}"))
             });
 
-        let mut item = ThreadItem::new(
-            SharedString::from(format!("paseo-workspace-{}", workspace.id)),
-            workspace.name.clone(),
-        )
-        .base_bg(cx.theme().colors().panel_background)
-        // Shown when no status icon replaces it: a workspace whose agents' work was seen.
-        .icon(IconName::Circle)
-        .icon_color(Color::Disabled)
-        .status(status)
-        .notified(notified)
-        .worktrees(worktrees)
-        .timestamp(
-            workspace
-                .activity_at
-                .as_deref()
-                .or(workspace.created_at.as_deref())
-                .and_then(relative_time)
-                .unwrap_or_default(),
-        )
-        .selected(is_active)
-        .hovered(is_hovered)
-        .on_click(cx.listener({
-            let workspace_id = workspace_id.clone();
-            move |this, _, window, cx| {
-                this.open_workspace(&workspace_id, window, cx);
-            }
-        }));
+        let mut item = ThreadItem::new(key.element_id("paseo-workspace"), workspace.name.clone())
+            .base_bg(cx.theme().colors().panel_background)
+            // Shown when no status icon replaces it: a workspace whose agents' work was seen.
+            .icon(IconName::Circle)
+            .icon_color(Color::Disabled)
+            .status(status)
+            .notified(notified)
+            .worktrees(worktrees)
+            .timestamp(
+                workspace
+                    .activity_at
+                    .as_deref()
+                    .or(workspace.created_at.as_deref())
+                    .and_then(relative_time)
+                    .unwrap_or_default(),
+            )
+            .selected(is_active)
+            .hovered(is_hovered)
+            .on_click(cx.listener({
+                let store = store.clone();
+                let workspace_id = workspace_id.clone();
+                move |this, _, window, cx| {
+                    this.open_workspace(&store, &workspace_id, window, cx);
+                }
+            }));
         if is_renaming {
             item = item
                 .is_truncated(false)
                 .title_slot(self.render_rename_editor(cx));
         } else if is_hovered {
             item = item.action_slot(
-                IconButton::new(
-                    SharedString::from(format!("paseo-rename-workspace-{}", workspace.id)),
-                    IconName::Pencil,
-                )
-                .icon_size(IconSize::Small)
-                .tooltip(Tooltip::text("Rename Workspace"))
-                .on_click(cx.listener({
-                    let workspace_id = workspace_id.clone();
-                    move |this, _, window, cx| this.start_rename(&workspace_id, window, cx)
-                })),
+                IconButton::new(key.element_id("paseo-rename-workspace"), IconName::Pencil)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Rename Workspace"))
+                    .on_click(cx.listener({
+                        let store = store.clone();
+                        let workspace_id = workspace_id.clone();
+                        move |this, _, window, cx| {
+                            this.start_rename(&store, &workspace_id, window, cx)
+                        }
+                    })),
             );
         }
         if let Some(pull_request) = pull_request {
@@ -791,53 +949,87 @@ impl PaseoSidebar {
         )
         .into();
         let sidebar = cx.weak_entity();
-        let menu = right_click_menu(SharedString::from(format!(
-            "paseo-workspace-menu-{}",
-            workspace.id
-        )))
-        .trigger(move |_, _, _| item)
-        .menu(move |window, cx| {
-            let sidebar = sidebar.clone();
-            let workspace_id = workspace_id.clone();
-            ContextMenu::build(window, cx, move |menu, _, _| {
-                menu.entry("Rename Workspace", None, move |window, cx| {
-                    sidebar
-                        .update(cx, |sidebar, cx| {
-                            sidebar.start_rename(&workspace_id, window, cx)
+        let menu = right_click_menu(key.element_id("paseo-workspace-menu"))
+            .trigger(move |_, _, _| item)
+            .menu({
+                let store = store.clone();
+                move |window, cx| {
+                    let sidebar = sidebar.clone();
+                    let store = store.clone();
+                    let workspace_id = workspace_id.clone();
+                    ContextMenu::build(window, cx, move |menu, _, _| {
+                        menu.entry("Rename Workspace", None, move |window, cx| {
+                            sidebar
+                                .update(cx, |sidebar, cx| {
+                                    sidebar.start_rename(&store, &workspace_id, window, cx)
+                                })
+                                .ok();
                         })
-                        .ok();
-                })
-            })
-        });
+                    })
+                }
+            });
         div()
-            .id(SharedString::from(format!(
-                "paseo-workspace-row-{}",
-                workspace.id
-            )))
+            .id(key.element_id("paseo-workspace-row"))
             .w_full()
             .child(menu)
-            .on_hover(cx.listener({
-                let workspace_id = workspace.id.clone();
-                move |this, is_hovered: &bool, _window, cx| {
-                    if *is_hovered {
-                        this.hovered_workspace = Some(workspace_id.clone());
-                    } else if this.hovered_workspace.as_ref() == Some(&workspace_id) {
-                        this.hovered_workspace = None;
-                    }
-                    cx.notify();
+            .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
+                if *is_hovered {
+                    this.hovered_workspace = Some(key.clone());
+                } else if this.hovered_workspace.as_ref() == Some(&key) {
+                    this.hovered_workspace = None;
                 }
+                cx.notify();
             }))
             .tooltip(Tooltip::text(tooltip))
             .into_any_element()
     }
 }
 
+fn render_notice(icon: IconName, message: SharedString, cx: &App) -> AnyElement {
+    h_flex()
+        .flex_none()
+        .items_start()
+        .gap_1p5()
+        .px_2()
+        .py_1p5()
+        .border_b_1()
+        .border_color(cx.theme().colors().border_variant)
+        .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+        .child(
+            div().flex_1().min_w_0().child(
+                Label::new(message)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            ),
+        )
+        .into_any_element()
+}
+
+fn connection_tooltip(store: &PaseoStore) -> SharedString {
+    match store.status() {
+        ConnectionStatus::Connected(server_info) => format!(
+            "Connected to {} (Paseo {})",
+            server_info.server_id,
+            server_info.version.as_deref().unwrap_or("unknown version")
+        )
+        .into(),
+        ConnectionStatus::Connecting(endpoint) => format!("Connecting to {endpoint}").into(),
+        ConnectionStatus::Disconnected(reason) => {
+            format!("{reason}. Reconnecting automatically.").into()
+        }
+        ConnectionStatus::NotConfigured => format!(
+            "Set paseo.endpoint in settings.json (or {ENDPOINT_ENV_VAR}) to connect to a Paseo daemon"
+        )
+        .into(),
+        ConnectionStatus::InvalidEndpoint(error) => error.clone(),
+    }
+}
+
 fn active_workspace_id(
     groups: &[ProjectGroup],
-    active_directory: Option<&Path>,
+    active_directory: &Path,
     selected: Option<&str>,
 ) -> Option<String> {
-    let active_directory = active_directory?;
     let matching: Vec<&Workspace> = groups
         .iter()
         .flat_map(|group| &group.workspaces)
@@ -880,19 +1072,21 @@ impl Sidebar for PaseoSidebar {
     }
 
     fn has_notifications(&self, cx: &App) -> bool {
-        self.store
-            .read(cx)
-            .project_groups()
-            .iter()
-            .flat_map(|group| &group.workspaces)
-            .any(|entry| {
-                matches!(
-                    entry.workspace.status,
-                    WorkspaceStatus::Attention
-                        | WorkspaceStatus::NeedsInput
-                        | WorkspaceStatus::Failed
-                )
-            })
+        self.stores(cx).iter().any(|store| {
+            store
+                .read(cx)
+                .project_groups()
+                .iter()
+                .flat_map(|group| &group.workspaces)
+                .any(|entry| {
+                    matches!(
+                        entry.workspace.status,
+                        WorkspaceStatus::Attention
+                            | WorkspaceStatus::NeedsInput
+                            | WorkspaceStatus::Failed
+                    )
+                })
+        })
     }
 
     fn side(&self, cx: &App) -> SidebarSide {
@@ -917,25 +1111,31 @@ impl Render for PaseoSidebar {
         let on_left = self.side(cx) == SidebarSide::Left;
 
         let active_workspace = self.highlighted_workspace(cx);
-        if let Some(workspace_id) = active_workspace.clone()
-            && !self.store.read(cx).is_watching_terminals(&workspace_id)
+        if let Some((store, workspace_id)) = active_workspace.clone()
+            && !store.read(cx).is_watching_terminals(&workspace_id)
         {
-            let store = self.store.clone();
             cx.defer(move |cx| {
                 store.update(cx, |store, cx| store.watch_terminals(&workspace_id, cx));
             });
         }
-        let groups = self.store.read(cx).project_groups();
-        let is_connected = matches!(self.store.read(cx).status(), ConnectionStatus::Connected(_));
         let header = self.render_header(window, cx);
-        let message = self.render_message(cx);
-        let projects: Vec<AnyElement> = groups
-            .into_iter()
-            .enumerate()
-            .map(|(index, group)| {
-                self.render_project(group, active_workspace.as_deref(), index == 0, cx)
-            })
-            .collect();
+        let stores = self.stores(cx);
+        let several_daemons = stores.len() > 1;
+        let sections: Vec<AnyElement> = if stores.is_empty() {
+            vec![self.render_not_configured(cx)]
+        } else {
+            stores
+                .iter()
+                .enumerate()
+                .map(|(index, store)| {
+                    let active = active_workspace
+                        .as_ref()
+                        .filter(|(active_store, _)| active_store == store)
+                        .map(|(_, id)| id.as_str());
+                    self.render_daemon(store, active, several_daemons, index == 0, cx)
+                })
+                .collect()
+        };
 
         v_flex()
             .id("paseo-sidebar")
@@ -980,7 +1180,6 @@ impl Render for PaseoSidebar {
             .when(!on_left, |this| this.border_l_1())
             .border_color(border)
             .child(header)
-            .children(message)
             .child(
                 v_flex()
                     .id("paseo-sidebar-projects")
@@ -988,8 +1187,7 @@ impl Render for PaseoSidebar {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .when(!is_connected, |this| this.opacity(0.6))
-                    .children(projects),
+                    .children(sections),
             )
     }
 }

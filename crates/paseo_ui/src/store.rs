@@ -27,33 +27,59 @@ use std::{
     sync::Arc,
 };
 
-/// Overrides the `paseo.endpoint` setting, e.g. so that `script/pazedo/run-dev` points a
-/// development build at the test daemon whatever the shared Zed settings say.
+/// Overrides the daemons in the settings with a single one, e.g. so that
+/// `script/pazedo/run-dev` points a development build at the test daemon whatever the shared Zed
+/// settings say.
 pub const ENDPOINT_ENV_VAR: &str = "PAZEDO_PASEO_ENDPOINT";
-/// Replaces the `paseo.ssh` setting while [`ENDPOINT_ENV_VAR`] is set, since the setting
-/// describes the configured daemon, not the one from the environment.
+/// The `ssh` of the daemon from [`ENDPOINT_ENV_VAR`]; the settings describe other daemons.
 pub const SSH_ENV_VAR: &str = "PAZEDO_PASEO_SSH";
 
-/// The `paseo` section of the settings.
+/// One configured daemon.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DaemonConfig {
+    pub name: Option<String>,
+    pub endpoint: Option<String>,
+    /// The SSH host the daemon's folders are on, for a daemon on another machine.
+    pub ssh: Option<String>,
+}
+
+impl DaemonConfig {
+    pub fn local(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: Some(endpoint.into()),
+            ..Self::default()
+        }
+    }
+}
+
+/// The `paseo` section of the settings: its daemons, the top-level `endpoint` and `ssh` first.
 #[derive(Clone, Debug, Default, PartialEq, RegisterSetting)]
 pub struct PaseoSettings {
-    pub endpoint: Option<String>,
-    pub ssh: Option<String>,
+    pub daemons: Vec<DaemonConfig>,
 }
 
 impl Settings for PaseoSettings {
     fn from_settings(content: &SettingsContent) -> Self {
         let non_empty =
             |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
+        let Some(paseo) = content.paseo.as_ref() else {
+            return Self::default();
+        };
+        let top_level = DaemonConfig {
+            name: None,
+            endpoint: non_empty(&paseo.endpoint),
+            ssh: non_empty(&paseo.ssh),
+        };
+        let listed = paseo.daemons.iter().flatten().map(|daemon| DaemonConfig {
+            name: non_empty(&daemon.name),
+            endpoint: non_empty(&daemon.endpoint),
+            ssh: non_empty(&daemon.ssh),
+        });
         Self {
-            endpoint: content
-                .paseo
-                .as_ref()
-                .and_then(|paseo| non_empty(&paseo.endpoint)),
-            ssh: content
-                .paseo
-                .as_ref()
-                .and_then(|paseo| non_empty(&paseo.ssh)),
+            daemons: std::iter::once(top_level)
+                .chain(listed)
+                .filter(|daemon| daemon.endpoint.is_some())
+                .collect(),
         }
     }
 }
@@ -64,38 +90,100 @@ fn non_empty_env_var(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// The daemon to connect to: the environment variable if set, else the setting.
-fn configured_endpoint(cx: &App) -> Option<String> {
-    non_empty_env_var(ENDPOINT_ENV_VAR).or_else(|| PaseoSettings::get_global(cx).endpoint.clone())
+/// The daemons to connect to: the one from the environment variables if set, else the settings'.
+fn configured_daemons(cx: &App) -> Vec<DaemonConfig> {
+    match non_empty_env_var(ENDPOINT_ENV_VAR) {
+        Some(endpoint) => vec![DaemonConfig {
+            name: None,
+            endpoint: Some(endpoint),
+            ssh: non_empty_env_var(SSH_ENV_VAR),
+        }],
+        None => PaseoSettings::get_global(cx).daemons.clone(),
+    }
 }
 
-/// The SSH host the daemon's folders are on, or `None` for a daemon on this machine.
-pub fn daemon_host(cx: &App) -> Result<Option<RemoteConnectionOptions>> {
-    let ssh = if non_empty_env_var(ENDPOINT_ENV_VAR).is_some() {
-        non_empty_env_var(SSH_ENV_VAR)
-    } else {
-        PaseoSettings::get_global(cx).ssh.clone()
-    };
-    let Some(ssh) = ssh else {
-        return Ok(None);
-    };
-    let mut options = SshConnectionOptions::parse_command_line(&ssh)
-        .with_context(|| format!("invalid paseo.ssh setting {ssh:?}"))?;
-    RemoteSettings::get_global(cx).fill_connection_options_from_settings(&mut options);
-    Ok(Some(RemoteConnectionOptions::Ssh(options)))
+/// Every configured daemon's store, in settings order, kept in step with the settings: a
+/// daemon whose endpoint stays keeps its store and connection.
+pub struct PaseoDaemons {
+    stores: Vec<Entity<PaseoStore>>,
+    _settings_subscription: Option<Subscription>,
 }
 
-/// Whether the project is on the machine of the daemon's folders: remote on the same SSH host
-/// for a remote daemon, local otherwise. A local folder must not show the agents of a remote
-/// workspace that happens to have the same path, and the other way round.
-pub fn is_on_daemon_host(project: &Project, cx: &App) -> bool {
-    let project_host = project.remote_connection_options(cx);
-    match daemon_host(cx) {
-        Ok(daemon_host) => {
-            project_host.map(RemoteConnectionOptions::host_key)
-                == daemon_host.as_ref().map(RemoteConnectionOptions::host_key)
+struct GlobalPaseoDaemons(Entity<PaseoDaemons>);
+
+impl Global for GlobalPaseoDaemons {}
+
+impl PaseoDaemons {
+    pub fn global(cx: &mut App) -> Entity<Self> {
+        if let Some(daemons) = cx.try_global::<GlobalPaseoDaemons>() {
+            return daemons.0.clone();
         }
-        Err(_) => false,
+        let daemons = cx.new(|cx| {
+            let mut this = Self {
+                stores: Vec::new(),
+                _settings_subscription: None,
+            };
+            this.reconcile(configured_daemons(cx), cx);
+            this._settings_subscription = Some(cx.observe_global::<SettingsStore>(|this, cx| {
+                this.reconcile(configured_daemons(cx), cx)
+            }));
+            this
+        });
+        cx.set_global(GlobalPaseoDaemons(daemons.clone()));
+        daemons
+    }
+
+    pub fn stores(&self) -> &[Entity<PaseoStore>] {
+        &self.stores
+    }
+
+    fn reconcile(&mut self, configs: Vec<DaemonConfig>, cx: &mut Context<Self>) {
+        let mut previous = std::mem::take(&mut self.stores);
+        for config in configs {
+            let existing = previous
+                .iter()
+                .position(|store| store.read(cx).config.endpoint == config.endpoint);
+            match existing {
+                Some(index) => {
+                    let store = previous.remove(index);
+                    store.update(cx, |store, cx| store.set_config(config, cx));
+                    self.stores.push(store);
+                }
+                None => self.stores.push(cx.new(|cx| PaseoStore::new(config, cx))),
+            }
+        }
+        // Open tabs may keep a removed daemon's store alive; it must not stay connected.
+        for store in previous {
+            store.update(cx, |store, cx| store.connect(None, cx));
+        }
+        cx.notify();
+    }
+
+    /// The daemon and Paseo workspace for a Zed workspace's single folder: among the daemons
+    /// whose folders are on the project's machine, the first with a workspace there.
+    pub fn workspace_for_folder(
+        &self,
+        project: &Project,
+        directory: &Path,
+        cx: &App,
+    ) -> Option<(Entity<PaseoStore>, String)> {
+        self.stores.iter().find_map(|store| {
+            let store_ref = store.read(cx);
+            if !store_ref.is_on_host(project, cx) {
+                return None;
+            }
+            let workspace = store_ref.workspace_for_directory(directory)?;
+            Some((store.clone(), workspace.id.clone()))
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_global_for_test(stores: Vec<Entity<PaseoStore>>, cx: &mut App) {
+        let daemons = cx.new(|_| Self {
+            stores,
+            _settings_subscription: None,
+        });
+        cx.set_global(GlobalPaseoDaemons(daemons));
     }
 }
 
@@ -127,15 +215,10 @@ pub enum PaseoStoreEvent {
     TerminalStreamExit(TerminalStreamExit),
 }
 
-struct GlobalPaseoStore(Entity<PaseoStore>);
-
-impl Global for GlobalPaseoStore {}
-
 /// The live directory of one Paseo daemon: projects, workspaces and agents, kept current through
 /// subscriptions that are re-established after every reconnect.
 pub struct PaseoStore {
-    /// As configured, before parsing.
-    endpoint: Option<String>,
+    config: DaemonConfig,
     client: Option<Client>,
     status: ConnectionStatus,
     sync_error: Option<SharedString>,
@@ -164,7 +247,6 @@ pub struct PaseoStore {
     /// Agents whose attention pazedo cleared, with the attention timestamp it cleared, so that
     /// re-rendering a viewed agent before the daemon's update arrives does not clear it again.
     cleared_attention: HashMap<String, Option<String>>,
-    _settings_subscription: Option<Subscription>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -228,32 +310,10 @@ impl WorkspaceEntry {
 }
 
 impl PaseoStore {
-    /// The app's store, connected to the daemon from the `paseo.endpoint` setting (or the
-    /// `PAZEDO_PASEO_ENDPOINT` environment variable), and reconnected when that changes.
-    pub fn global(cx: &mut App) -> Entity<Self> {
-        if let Some(store) = cx.try_global::<GlobalPaseoStore>() {
-            return store.0.clone();
-        }
-        let store = cx.new(|cx| {
-            let mut this = Self::new(configured_endpoint(cx), cx);
-            this._settings_subscription = Some(cx.observe_global::<SettingsStore>(|this, cx| {
-                let endpoint = configured_endpoint(cx);
-                if endpoint != this.endpoint {
-                    this.connect(endpoint, cx);
-                } else {
-                    // `paseo.ssh` may have changed, which changes the folders that match.
-                    cx.notify();
-                }
-            }));
-            this
-        });
-        cx.set_global(GlobalPaseoStore(store.clone()));
-        store
-    }
-
-    pub fn new(endpoint: Option<String>, cx: &mut Context<Self>) -> Self {
+    pub fn new(config: DaemonConfig, cx: &mut Context<Self>) -> Self {
+        let endpoint = config.endpoint.clone();
         let mut this = Self {
-            endpoint: None,
+            config,
             client: None,
             status: ConnectionStatus::NotConfigured,
             sync_error: None,
@@ -271,11 +331,65 @@ impl PaseoStore {
             selected_workspaces: HashMap::default(),
             closing: HashSet::default(),
             cleared_attention: HashMap::default(),
-            _settings_subscription: None,
             _tasks: Vec::new(),
         };
         this.connect(endpoint, cx);
         this
+    }
+
+    fn set_config(&mut self, config: DaemonConfig, cx: &mut Context<Self>) {
+        if config == self.config {
+            return;
+        }
+        let reconnect = config.endpoint != self.config.endpoint;
+        self.config = config;
+        if reconnect {
+            self.connect(self.config.endpoint.clone(), cx);
+        } else {
+            // A new `ssh` changes which folders match this daemon's workspaces.
+            cx.notify();
+        }
+    }
+
+    /// The name shown for this daemon: the configured one, else the daemon's host name, else
+    /// its endpoint.
+    pub fn display_name(&self) -> SharedString {
+        if let Some(name) = &self.config.name {
+            return name.clone().into();
+        }
+        if let ConnectionStatus::Connected(server_info) = &self.status {
+            return server_info
+                .hostname
+                .clone()
+                .unwrap_or_else(|| server_info.server_id.clone())
+                .into();
+        }
+        self.config.endpoint.clone().unwrap_or_default().into()
+    }
+
+    /// The SSH host the daemon's folders are on, or `None` for a daemon on this machine.
+    pub fn host(&self, cx: &App) -> Result<Option<RemoteConnectionOptions>> {
+        let Some(ssh) = &self.config.ssh else {
+            return Ok(None);
+        };
+        let mut options = SshConnectionOptions::parse_command_line(ssh)
+            .with_context(|| format!("invalid paseo ssh setting {ssh:?}"))?;
+        RemoteSettings::get_global(cx).fill_connection_options_from_settings(&mut options);
+        Ok(Some(RemoteConnectionOptions::Ssh(options)))
+    }
+
+    /// Whether the project is on the machine of this daemon's folders: remote on the same SSH
+    /// host for a remote daemon, local otherwise. A local folder must not show the agents of a
+    /// remote workspace that happens to have the same path, and the other way round.
+    pub fn is_on_host(&self, project: &Project, cx: &App) -> bool {
+        let project_host = project.remote_connection_options(cx);
+        match self.host(cx) {
+            Ok(host) => {
+                project_host.map(RemoteConnectionOptions::host_key)
+                    == host.as_ref().map(RemoteConnectionOptions::host_key)
+            }
+            Err(_) => false,
+        }
     }
 
     /// Connects to `endpoint`, dropping the connection to any other daemon and everything known
@@ -288,7 +402,6 @@ impl PaseoStore {
         }
         // Dropping the driver task closes the old connection.
         self._tasks.clear();
-        self.endpoint = endpoint.clone();
         self.status = ConnectionStatus::NotConfigured;
         self.sync_error = None;
         self.projects.clear();
@@ -1060,10 +1173,6 @@ impl PaseoStore {
 /// Lets tests and the screenshot runner show a scripted directory without a daemon.
 #[cfg(any(test, feature = "test-support"))]
 impl PaseoStore {
-    pub fn set_global(store: Entity<Self>, cx: &mut App) {
-        cx.set_global(GlobalPaseoStore(store));
-    }
-
     pub fn load_fixture(
         &mut self,
         status: ConnectionStatus,

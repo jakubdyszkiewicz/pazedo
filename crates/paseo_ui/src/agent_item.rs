@@ -19,6 +19,8 @@ use paseo_client::protocol::AgentStatus;
 
 /// A Paseo agent session in a tab of the Paseo panel, rendered by Zed's thread UI.
 pub struct PaseoAgentItem {
+    /// The agent's daemon.
+    store: Entity<PaseoStore>,
     /// `None` for a tab that started a new agent; its id is then the thread's session id.
     agent_id: Option<String>,
     /// For a tab that starts a new agent: the provider and model to start it with.
@@ -44,6 +46,7 @@ impl PaseoAgentItem {
     /// open. With no agent id it starts a new agent with `new_agent`'s provider and model.
     pub fn open(
         workspace: &mut Workspace,
+        store: Entity<PaseoStore>,
         agent_id: Option<String>,
         new_agent: Option<NewAgent>,
         title: SharedString,
@@ -64,6 +67,7 @@ impl PaseoAgentItem {
         let work_dirs = PathList::new(&workspace.root_paths(cx));
         let item = cx.new(|cx| {
             Self::new(
+                store,
                 agent_id,
                 new_agent,
                 title,
@@ -77,6 +81,7 @@ impl PaseoAgentItem {
     }
 
     pub(crate) fn new(
+        store: Entity<PaseoStore>,
         agent_id: Option<String>,
         new_agent: Option<NewAgent>,
         title: SharedString,
@@ -87,7 +92,6 @@ impl PaseoAgentItem {
     ) -> Self {
         // Rendering marks the agent as seen; this re-renders a shown tab when its agent
         // finishes, so that it does not show up as unread while the user is looking at it.
-        let store = PaseoStore::global(cx);
         let store_subscription = cx.observe(&store, |this, store, cx| {
             if this
                 .agent_id(cx)
@@ -97,6 +101,7 @@ impl PaseoAgentItem {
             }
         });
         Self {
+            store,
             agent_id,
             new_agent,
             title,
@@ -139,10 +144,11 @@ impl PaseoAgentItem {
             return;
         }
         if let Some(new_agent) = self.new_agent.take() {
-            PaseoConnection::global(cx).set_next_new_agent(new_agent);
+            PaseoConnection::for_store(&self.store, cx).set_next_new_agent(new_agent);
         }
         self.set_conversation_view(
             build_conversation_view(
+                self.store.clone(),
                 self.agent_id.clone(),
                 self.title.clone(),
                 self.workspace.clone(),
@@ -178,9 +184,10 @@ impl PaseoAgentItem {
         let Some(agent_id) = self.agent_id(cx) else {
             return;
         };
-        PaseoConnection::global(cx).request_full_history(&agent_id);
+        PaseoConnection::for_store(&self.store, cx).request_full_history(&agent_id);
         self.agent_id = Some(agent_id.clone());
         let conversation_view = build_conversation_view(
+            self.store.clone(),
             Some(agent_id),
             self.title.clone(),
             self.workspace.clone(),
@@ -198,9 +205,7 @@ impl PaseoAgentItem {
         let Some(agent_id) = self.agent_id(cx) else {
             return;
         };
-        let refresh = PaseoStore::global(cx)
-            .read(cx)
-            .refresh_agent(agent_id.clone(), cx);
+        let refresh = self.store.read(cx).refresh_agent(agent_id.clone(), cx);
         self.reloading = Some(cx.spawn_in(window, async move |this, cx| {
             let result = refresh.await;
             this.update_in(cx, |this, window, cx| {
@@ -208,6 +213,7 @@ impl PaseoAgentItem {
                 match result {
                     Ok(()) => {
                         let conversation_view = build_conversation_view(
+                            this.store.clone(),
                             Some(agent_id),
                             this.title.clone(),
                             this.workspace.clone(),
@@ -269,6 +275,7 @@ impl PaseoAgentItem {
 }
 
 fn build_conversation_view(
+    store: Entity<PaseoStore>,
     agent_id: Option<String>,
     title: SharedString,
     workspace: WeakEntity<Workspace>,
@@ -280,7 +287,7 @@ fn build_conversation_view(
     let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
     cx.new(|cx| {
         ConversationView::new(
-            Rc::new(PaseoAgentServer),
+            Rc::new(PaseoAgentServer { store }),
             connection_store,
             Agent::Custom {
                 id: AgentId::new(PASEO_AGENT_ID),
@@ -331,6 +338,7 @@ impl Item for PaseoAgentItem {
             return;
         };
         let workspace = self.workspace.clone();
+        let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::ZERO)
@@ -343,7 +351,7 @@ impl Item for PaseoAgentItem {
                             PaseoPanel::is_open(workspace.read(cx), item.entity_id(), cx)
                         });
                 if !still_open {
-                    crate::PaseoStore::global(cx).update(cx, |store, cx| {
+                    store.update(cx, |store, cx| {
                         store.close_items(vec![agent_id], Vec::new(), cx);
                     });
                 }
@@ -371,20 +379,18 @@ impl Render for PaseoAgentItem {
         // Only the active tab of a shown panel renders, so this is the user seeing the agent.
         if window.is_window_active()
             && let Some(agent_id) = agent_id.clone()
-            && PaseoStore::global(cx)
-                .read(cx)
-                .has_unseen_attention(&agent_id)
+            && self.store.read(cx).has_unseen_attention(&agent_id)
         {
+            let store = self.store.clone();
             cx.defer(move |cx| {
-                PaseoStore::global(cx)
-                    .update(cx, |store, cx| store.clear_agent_attention(&agent_id, cx));
+                store.update(cx, |store, cx| store.clear_agent_attention(&agent_id, cx));
             });
         }
-        let truncated = agent_id
-            .as_ref()
-            .is_some_and(|agent_id| PaseoConnection::global(cx).history_truncated(agent_id));
+        let truncated = agent_id.as_ref().is_some_and(|agent_id| {
+            PaseoConnection::for_store(&self.store, cx).history_truncated(agent_id)
+        });
         let closed = agent_id.as_ref().is_some_and(|agent_id| {
-            PaseoStore::global(cx)
+            self.store
                 .read(cx)
                 .agent(agent_id)
                 .is_some_and(|agent| agent.status == AgentStatus::Closed)

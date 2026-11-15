@@ -1,5 +1,6 @@
 use crate::{
-    PaseoAgentItem, PaseoPanel, PaseoSidebar, PaseoStore, PaseoTerminalItem,
+    DaemonConfig, PaseoAgentItem, PaseoDaemons, PaseoPanel, PaseoSidebar, PaseoStore,
+    PaseoTerminalItem,
     store::{DirectorySnapshot, DirectorySubscriptions},
 };
 use fs::FakeFs;
@@ -108,7 +109,7 @@ fn snapshot(
 }
 
 fn new_store(cx: &mut TestAppContext) -> Entity<PaseoStore> {
-    cx.new(|cx| PaseoStore::new(None, cx))
+    cx.new(|cx| PaseoStore::new(DaemonConfig::default(), cx))
 }
 
 fn workspace_names(store: &Entity<PaseoStore>, cx: &TestAppContext) -> Vec<(String, Vec<String>)> {
@@ -345,9 +346,9 @@ async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppCont
     });
     cx.run_until_parked();
 
-    let sidebar = sidebar_with_directory(&multi_workspace, cx);
+    let (sidebar, store) = sidebar_with_directory(&multi_workspace, cx);
     sidebar.update_in(cx, |sidebar, window, cx| {
-        sidebar.open_workspace("wks_second", window, cx);
+        sidebar.open_workspace(&store, "wks_second", window, cx);
     });
     cx.run_until_parked();
 
@@ -356,7 +357,7 @@ async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppCont
     });
     sidebar.read_with(cx, |sidebar, cx| {
         assert_eq!(
-            sidebar.highlighted_workspace(cx).as_deref(),
+            sidebar.highlighted_workspace_id(cx).as_deref(),
             Some("wks_second"),
             "the clicked row is highlighted even though another workspace shares its directory"
         );
@@ -366,11 +367,16 @@ async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppCont
 fn sidebar_with_directory(
     multi_workspace: &Entity<MultiWorkspace>,
     cx: &mut VisualTestContext,
-) -> Entity<PaseoSidebar> {
+) -> (Entity<PaseoSidebar>, Entity<PaseoStore>) {
+    let store = cx.update(|_, cx| {
+        let store = cx.new(|cx| PaseoStore::new(DaemonConfig::default(), cx));
+        PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
+        store
+    });
     let sidebar =
         cx.update(|window, cx| cx.new(|cx| PaseoSidebar::new(multi_workspace.clone(), window, cx)));
     sidebar.update(cx, |sidebar, cx| {
-        sidebar.store().update(cx, |store, _| {
+        store.update(cx, |store, _| {
             store.begin_sync();
             store.finish_sync(Ok(snapshot(
                 vec![project("prj_sandbox", "sandbox", path!("/sandbox"))],
@@ -393,7 +399,7 @@ fn sidebar_with_directory(
         });
         assert!(!sidebar.has_notifications(cx));
     });
-    sidebar
+    (sidebar, store)
 }
 
 fn root_is(workspace: &Entity<workspace::Workspace>, path: &str, cx: &gpui::App) -> bool {
@@ -494,9 +500,10 @@ fn test_terminal_lists_follow_watched_workspaces(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_terminal_tab_shows_the_restored_screen_then_output(cx: &mut TestAppContext) {
     init_test(cx);
-    cx.update(|cx| {
-        let store = cx.new(|cx| PaseoStore::new(None, cx));
-        PaseoStore::set_global(store, cx);
+    let store = cx.update(|cx| {
+        let store = cx.new(|cx| PaseoStore::new(DaemonConfig::default(), cx));
+        PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
+        store
     });
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
@@ -507,8 +514,22 @@ async fn test_terminal_tab_shows_the_restored_screen_then_output(cx: &mut TestAp
     let workspace =
         multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
     workspace.update_in(cx, |workspace, window, cx| {
-        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
-        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
+        PaseoTerminalItem::open(
+            workspace,
+            store.clone(),
+            "term-1".into(),
+            "zsh".into(),
+            window,
+            cx,
+        );
+        PaseoTerminalItem::open(
+            workspace,
+            store.clone(),
+            "term-1".into(),
+            "zsh".into(),
+            window,
+            cx,
+        );
     });
     let items: Vec<Entity<PaseoTerminalItem>> = workspace.read_with(cx, |workspace, cx| {
         workspace.items_of_type::<PaseoTerminalItem>(cx).collect()
@@ -542,9 +563,10 @@ async fn test_terminal_tab_shows_the_restored_screen_then_output(cx: &mut TestAp
 #[gpui::test]
 async fn test_paseo_tabs_open_in_the_paseo_panel(cx: &mut TestAppContext) {
     init_test(cx);
-    cx.update(|cx| {
-        let store = cx.new(|cx| PaseoStore::new(None, cx));
-        PaseoStore::set_global(store, cx);
+    let store = cx.update(|cx| {
+        let store = cx.new(|cx| PaseoStore::new(DaemonConfig::default(), cx));
+        PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
+        store
     });
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
@@ -563,9 +585,30 @@ async fn test_paseo_tabs_open_in_the_paseo_panel(cx: &mut TestAppContext) {
     });
 
     workspace.update_in(cx, |workspace, window, cx| {
-        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
-        PaseoTerminalItem::open(workspace, "term-2".into(), "server".into(), window, cx);
-        PaseoTerminalItem::open(workspace, "term-1".into(), "zsh".into(), window, cx);
+        PaseoTerminalItem::open(
+            workspace,
+            store.clone(),
+            "term-1".into(),
+            "zsh".into(),
+            window,
+            cx,
+        );
+        PaseoTerminalItem::open(
+            workspace,
+            store.clone(),
+            "term-2".into(),
+            "server".into(),
+            window,
+            cx,
+        );
+        PaseoTerminalItem::open(
+            workspace,
+            store.clone(),
+            "term-1".into(),
+            "zsh".into(),
+            window,
+            cx,
+        );
     });
     cx.run_until_parked();
 
@@ -611,8 +654,8 @@ fn panel_tabs(panel: &Entity<PaseoPanel>, cx: &mut VisualTestContext) -> Vec<Str
 async fn test_panel_tabs_follow_the_open_paseo_workspace(cx: &mut TestAppContext) {
     init_test(cx);
     let store = cx.update(|cx| {
-        let store = cx.new(|cx| PaseoStore::new(None, cx));
-        PaseoStore::set_global(store.clone(), cx);
+        let store = cx.new(|cx| PaseoStore::new(DaemonConfig::default(), cx));
+        PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
         store
     });
     store.update(cx, |store, cx| {
@@ -705,45 +748,79 @@ async fn test_panel_tabs_follow_the_open_paseo_workspace(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn test_the_endpoint_setting_connects_and_reconnects(cx: &mut TestAppContext) {
+fn test_the_daemon_settings_connect_and_reconnect(cx: &mut TestAppContext) {
     if std::env::var(crate::ENDPOINT_ENV_VAR).is_ok() {
-        // The environment variable overrides the setting.
+        // The environment variable replaces the settings.
         return;
     }
     init_test(cx);
-    let set_endpoint = |endpoint: Option<&str>, cx: &mut TestAppContext| {
+    let set_paseo = |paseo: Option<settings::PaseoSettingsContent>, cx: &mut TestAppContext| {
         cx.update(|cx| {
             gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |settings, cx| {
-                settings.update_user_settings(cx, |content| {
-                    content.paseo = Some(settings::PaseoSettingsContent {
-                        endpoint: endpoint.map(str::to_string),
-                        ssh: None,
-                    });
-                });
+                settings.update_user_settings(cx, |content| content.paseo = paseo);
             });
         });
     };
-    let status = |store: &Entity<PaseoStore>, cx: &mut TestAppContext| {
-        store.read_with(cx, |store, _| format!("{:?}", store.status()))
+    let single = |endpoint: &str| settings::PaseoSettingsContent {
+        endpoint: Some(endpoint.to_string()),
+        ..Default::default()
     };
+    let daemons = cx.update(PaseoDaemons::global);
+    let statuses = |cx: &mut TestAppContext| {
+        daemons.read_with(cx, |daemons, cx| {
+            daemons
+                .stores()
+                .iter()
+                .map(|store| format!("{:?}", store.read(cx).status()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let stores =
+        |cx: &mut TestAppContext| daemons.read_with(cx, |daemons, _| daemons.stores().to_vec());
+    assert!(stores(cx).is_empty());
 
-    let store = cx.update(PaseoStore::global);
-    assert_eq!(status(&store, cx), "NotConfigured");
-
-    set_endpoint(Some("127.0.0.1:1"), cx);
+    set_paseo(Some(single("127.0.0.1:1")), cx);
     assert!(
-        status(&store, cx).contains("Connecting(Tcp"),
-        "{}",
-        status(&store, cx)
+        statuses(cx)[0].contains("Connecting(Tcp"),
+        "{:?}",
+        statuses(cx)
     );
-    assert!(store.read_with(cx, |store, _| store.client().is_some()));
+    let first = stores(cx)[0].clone();
+    assert!(first.read_with(cx, |store, _| store.client().is_some()));
 
-    set_endpoint(Some("ws://"), cx);
-    assert!(status(&store, cx).starts_with("InvalidEndpoint"));
-    assert!(store.read_with(cx, |store, _| store.client().is_none()));
+    set_paseo(
+        Some(settings::PaseoSettingsContent {
+            endpoint: Some("127.0.0.1:1".into()),
+            ssh: None,
+            daemons: Some(vec![settings::PaseoDaemonContent {
+                name: Some("dev box".into()),
+                endpoint: Some("127.0.0.1:2".into()),
+                ssh: Some("root@devbox".into()),
+            }]),
+        }),
+        cx,
+    );
+    let both = stores(cx);
+    assert_eq!(both.len(), 2);
+    assert_eq!(
+        both[0], first,
+        "a daemon whose endpoint stays keeps its store"
+    );
+    assert_eq!(
+        both[1].read_with(cx, |store, _| store.display_name()),
+        "dev box"
+    );
 
-    set_endpoint(None, cx);
-    assert_eq!(status(&store, cx), "NotConfigured");
+    set_paseo(Some(single("ws://")), cx);
+    assert_eq!(stores(cx).len(), 1);
+    assert!(statuses(cx)[0].starts_with("InvalidEndpoint"));
+    assert!(
+        first.read_with(cx, |store, _| store.client().is_none()),
+        "a removed daemon's store disconnects even if an open tab keeps it"
+    );
+
+    set_paseo(None, cx);
+    assert!(stores(cx).is_empty());
 }
 
 #[gpui::test]
@@ -797,7 +874,7 @@ fn test_finished_and_failed_agents_are_unseen_until_cleared(cx: &mut TestAppCont
 #[gpui::test]
 async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppContext) {
     if std::env::var(crate::ENDPOINT_ENV_VAR).is_ok() {
-        // The environment variables replace both settings.
+        // The environment variables replace the settings.
         return;
     }
     init_test(cx);
@@ -805,38 +882,79 @@ async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppC
     fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
         .await;
     let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
-    let set_ssh = |ssh: Option<&str>, cx: &mut TestAppContext| {
-        cx.update(|cx| {
-            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |settings, cx| {
-                settings.update_user_settings(cx, |content| {
-                    content.paseo = Some(settings::PaseoSettingsContent {
-                        endpoint: None,
-                        ssh: ssh.map(str::to_string),
-                    });
-                    content.remote.ssh_connections = Some(vec![settings::SshConnection {
-                        host: "devbox".into(),
-                        username: Some("root".into()),
-                        args: vec!["-A".into()],
-                        nickname: Some("dev box".into()),
-                        ..Default::default()
-                    }]);
+    cx.update(|cx| {
+        gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |settings, cx| {
+            settings.update_user_settings(cx, |content| {
+                content.paseo = Some(settings::PaseoSettingsContent {
+                    endpoint: Some("127.0.0.1:1".into()),
+                    ssh: None,
+                    daemons: Some(vec![
+                        settings::PaseoDaemonContent {
+                            name: None,
+                            endpoint: Some("127.0.0.1:2".into()),
+                            ssh: Some("root@devbox".into()),
+                        },
+                        settings::PaseoDaemonContent {
+                            name: None,
+                            endpoint: Some("127.0.0.1:3".into()),
+                            ssh: Some("ssh -p".into()),
+                        },
+                    ]),
                 });
+                content.remote.ssh_connections = Some(vec![settings::SshConnection {
+                    host: "devbox".into(),
+                    username: Some("root".into()),
+                    args: vec!["-A".into()],
+                    nickname: Some("dev box".into()),
+                    ..Default::default()
+                }]);
             });
         });
-    };
-
-    cx.update(|cx| {
-        assert_eq!(crate::store::daemon_host(cx).unwrap(), None);
-        assert!(
-            crate::store::is_on_daemon_host(project.read(cx), cx),
-            "a local folder belongs to a daemon on this machine"
+    });
+    // Stores from the parsed settings, but without endpoints: connecting is not part of this.
+    let stores = cx.update(|cx| {
+        let configs = <crate::store::PaseoSettings as settings::Settings>::get_global(cx)
+            .daemons
+            .clone();
+        assert_eq!(
+            configs
+                .iter()
+                .map(|config| config.endpoint.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("127.0.0.1:1"),
+                Some("127.0.0.1:2"),
+                Some("127.0.0.1:3")
+            ],
+            "the top-level daemon comes first"
         );
+        configs
+            .into_iter()
+            .map(|config| {
+                cx.new(|cx| {
+                    PaseoStore::new(
+                        DaemonConfig {
+                            endpoint: None,
+                            ..config
+                        },
+                        cx,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
     });
 
-    set_ssh(Some("root@devbox"), cx);
     cx.update(|cx| {
-        let Some(remote::RemoteConnectionOptions::Ssh(options)) =
-            crate::store::daemon_host(cx).unwrap()
+        let [local, remote, invalid] = stores.as_slice() else {
+            panic!("expected three daemons, got {}", stores.len());
+        };
+        assert_eq!(local.read(cx).host(cx).unwrap(), None);
+        assert!(
+            local.read(cx).is_on_host(project.read(cx), cx),
+            "a local folder belongs to a daemon on this machine"
+        );
+
+        let Some(remote::RemoteConnectionOptions::Ssh(options)) = remote.read(cx).host(cx).unwrap()
         else {
             panic!("expected an SSH host");
         };
@@ -849,11 +967,10 @@ async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppC
         );
         assert_eq!(options.args, Some(vec!["-A".to_string()]));
         assert!(
-            !crate::store::is_on_daemon_host(project.read(cx), cx),
+            !remote.read(cx).is_on_host(project.read(cx), cx),
             "a local folder must not show a remote daemon's workspace of the same path"
         );
-    });
 
-    set_ssh(Some("ssh -p"), cx);
-    cx.update(|cx| assert!(crate::store::daemon_host(cx).is_err()));
+        assert!(invalid.read(cx).host(cx).is_err());
+    });
 }

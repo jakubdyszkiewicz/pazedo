@@ -45,7 +45,10 @@ mod screenshots {
         WindowOptions, point, px, size,
     };
     use paseo_client::protocol::{Agent, ProjectSummary, ServerInfo, Workspace};
-    use paseo_ui::{ConnectionStatus, PaseoAgentItem, PaseoSidebar, PaseoStore, PaseoTerminalItem};
+    use paseo_ui::{
+        ConnectionStatus, DaemonConfig, PaseoAgentItem, PaseoDaemons, PaseoSidebar, PaseoStore,
+        PaseoTerminalItem,
+    };
     use project::Project;
     use serde_json::{Value, json};
     use std::{
@@ -130,8 +133,8 @@ mod screenshots {
         cx.run_until_parked();
 
         let store = cx.update(|cx| {
-            let store = cx.new(|cx| PaseoStore::new(None, cx));
-            PaseoStore::set_global(store.clone(), cx);
+            let store = cx.new(|cx| PaseoStore::new(DaemonConfig::default(), cx));
+            PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
             store
         });
 
@@ -155,6 +158,38 @@ mod screenshots {
             window.update(&mut cx, |_, window, _| window.remove_window())?;
             cx.run_until_parked();
         }
+
+        // Two daemons side by side: this machine's, and one on a dev box reached over SSH.
+        let remote_store = cx.update(|cx| {
+            let remote_store = cx.new(|cx| {
+                PaseoStore::new(
+                    DaemonConfig {
+                        name: Some("dev-box".into()),
+                        endpoint: None,
+                        ssh: Some("root@dev-box".into()),
+                    },
+                    cx,
+                )
+            });
+            PaseoDaemons::set_global_for_test(vec![store.clone(), remote_store.clone()], cx);
+            remote_store
+        });
+        store.update(&mut cx, |store, cx| {
+            let (projects, workspaces, agents) = fixture(&project_dir.to_string_lossy());
+            store.load_fixture(connected(), projects, workspaces, agents, cx);
+            store.set_sync_error(None, cx);
+        });
+        remote_store.update(&mut cx, |store, cx| {
+            let (projects, workspaces, agents) = fixture("/root/dev/webapp");
+            store.load_fixture(connected(), projects, workspaces, agents, cx);
+        });
+        let window = open_window(&project_dir, &app_state, &mut cx)?;
+        let screenshot = cx.capture_screenshot(window.into())?;
+        let path = output_dir.join("sidebar-two-daemons.png");
+        screenshot.save(&path)?;
+        println!("{}", path.display());
+        window.update(&mut cx, |_, window, _| window.remove_window())?;
+        cx.run_until_parked();
 
         if let (Ok(endpoint), Ok(agent_id)) = (
             std::env::var(paseo_ui::ENDPOINT_ENV_VAR),
@@ -181,8 +216,8 @@ mod screenshots {
         output_dir: &std::path::Path,
     ) -> Result<()> {
         let store = cx.update(|cx| {
-            let store = cx.new(|cx| PaseoStore::new(Some(endpoint.to_string()), cx));
-            PaseoStore::set_global(store.clone(), cx);
+            let store = cx.new(|cx| PaseoStore::new(DaemonConfig::local(endpoint), cx));
+            PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
             store
         });
         let directory = dirs_home().join("dev/pazedo-sandbox");
@@ -225,7 +260,14 @@ mod screenshots {
         let window = open_window(&directory, app_state, cx)?;
         window.update(cx, |multi_workspace, window, cx| {
             multi_workspace.workspace().update(cx, |workspace, cx| {
-                PaseoTerminalItem::open(workspace, terminal_id, name.into(), window, cx);
+                PaseoTerminalItem::open(
+                    workspace,
+                    store.clone(),
+                    terminal_id,
+                    name.into(),
+                    window,
+                    cx,
+                );
             });
         })?;
         wait(cx, Duration::from_secs(3))?;
@@ -296,8 +338,8 @@ mod screenshots {
         path: &std::path::Path,
     ) -> Result<()> {
         let store = cx.update(|cx| {
-            let store = cx.new(|cx| PaseoStore::new(Some(endpoint.to_string()), cx));
-            PaseoStore::set_global(store.clone(), cx);
+            let store = cx.new(|cx| PaseoStore::new(DaemonConfig::local(endpoint), cx));
+            PaseoDaemons::set_global_for_test(vec![store.clone()], cx);
             store
         });
         // `new` starts a new agent in the sandbox, as the sidebar's + button does.
@@ -332,6 +374,7 @@ mod screenshots {
             multi_workspace.workspace().update(cx, |workspace, cx| {
                 PaseoAgentItem::open(
                     workspace,
+                    store.clone(),
                     (!new_agent).then(|| agent_id.to_string()),
                     None,
                     title.into(),

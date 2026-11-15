@@ -52,6 +52,7 @@ impl PaseoTerminalItem {
     /// open.
     pub fn open(
         workspace: &mut Workspace,
+        store: Entity<PaseoStore>,
         terminal_id: String,
         name: SharedString,
         window: &mut Window,
@@ -66,6 +67,7 @@ impl PaseoTerminalItem {
         let project = workspace.project().downgrade();
         let item = cx.new(|cx| {
             Self::new(
+                store,
                 terminal_id,
                 name,
                 weak_workspace,
@@ -88,6 +90,7 @@ impl PaseoTerminalItem {
     }
 
     pub(crate) fn new(
+        store: Entity<PaseoStore>,
         terminal_id: String,
         name: SharedString,
         workspace: WeakEntity<Workspace>,
@@ -135,7 +138,6 @@ impl PaseoTerminalItem {
             }
         });
 
-        let store = PaseoStore::global(cx);
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, event, cx| match event {
                 PaseoStoreEvent::Connected => this.attach(cx),
@@ -405,6 +407,7 @@ impl Item for PaseoTerminalItem {
         }
         let terminal_id = self.terminal_id.clone();
         let workspace = self.workspace.clone();
+        let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::ZERO)
@@ -417,7 +420,7 @@ impl Item for PaseoTerminalItem {
                             PaseoPanel::is_open(workspace.read(cx), item.entity_id(), cx)
                         });
                 if !still_open {
-                    PaseoStore::global(cx).update(cx, |store, cx| {
+                    store.update(cx, |store, cx| {
                         store.close_items(Vec::new(), vec![terminal_id], cx);
                     });
                 }

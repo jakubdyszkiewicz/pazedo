@@ -142,6 +142,41 @@ workspaces of a checkout and of a Paseo worktree opened over SSH with their remo
 agents; gopls ran on the box (hover worked in a trusted project); the folder picker listed
 `/root/dev`.
 
+### Several daemons
+
+`daemons` lists several daemons, shown side by side in the sidebar, each under a collapsible
+row with its connection status, name and Add Project; with a single daemon the sidebar looks as
+before (status and Add Project in its header). `endpoint` and `ssh` at the top level are
+shorthand for one more daemon, listed first:
+
+```json
+"paseo": {
+  "daemons": [
+    { "endpoint": "100.64.0.1:6767" },
+    { "name": "dev box", "endpoint": "100.64.0.2:6767", "ssh": "root@dev-box" }
+  ]
+}
+```
+
+`name` defaults to the daemon's host name. Each daemon has its own `PaseoStore` and
+`PaseoConnection`; `PaseoDaemons` keeps the list in step with the settings, keeping a daemon's
+store (and connection) while its endpoint stays. Agent and terminal tabs hold their daemon's
+store. A Zed workspace's panel shows the first daemon whose folders are on the workspace's
+machine and that has a Paseo workspace for its folder. `PAZEDO_PASEO_ENDPOINT` replaces the whole
+list with one daemon.
+
+A daemon on the machine Pazedo runs on needs no `ssh`. Run on another Mac (e.g. the MacBook),
+the Mac mini's daemon is remote too: its folders are on the mini, so it needs
+`"ssh": "me@my-mac"` and a macOS remote server there (not built yet, see todo.md).
+
+To try several daemons with a dev build without touching `~/.config/zed`, give it its own data
+directory: write `<dir>/config/settings.json`, then start the bundle that `run-dev` made with
+`open -n -a "$PWD/.pazedo-dev/PazedoDev.app" --env PAZEDO_USER_DATA_DIR=<dir> --env
+ZED_BUILD_REMOTE_SERVER=false` (no `PAZEDO_PASEO_ENDPOINT`, which would replace the list).
+Verified 2026-11-15 with the test daemon and the dev box side by side: both listed, a dev box
+workspace opened over SSH and a local one in the same window, each panel showing its own
+daemon's agents, and a new mock agent started from the local panel ran on the test daemon.
+
 The Paseo sidebar only renders while Zed's AI features are enabled (`MultiWorkspace` hides the
 sidebar when `disable_ai` is set or the agent is disabled).
 

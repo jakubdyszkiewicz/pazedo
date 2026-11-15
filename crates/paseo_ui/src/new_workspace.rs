@@ -1,4 +1,4 @@
-use gpui::{App, Context, DismissEvent, SharedString, Task, Window};
+use gpui::{App, Context, DismissEvent, Entity, SharedString, Task, Window};
 use picker::{Picker, PickerDelegate};
 use std::{rc::Rc, sync::Arc};
 use ui::{ListItem, ListItemSpacing, prelude::*};
@@ -31,15 +31,14 @@ pub(crate) struct NewWorkspaceDelegate {
 /// Opens the picker in `workspace`; `on_confirm` creates the workspace.
 pub(crate) fn open_new_workspace_picker(
     workspace: &mut Workspace,
+    store: &Entity<PaseoStore>,
     project_name: SharedString,
     project_root: String,
     on_confirm: impl Fn(NewWorkspaceChoice, &mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let branches = PaseoStore::global(cx)
-        .read(cx)
-        .branch_suggestions(project_root, cx);
+    let branches = store.read(cx).branch_suggestions(project_root, cx);
     workspace.toggle_modal(window, cx, move |window, cx| {
         let delegate = NewWorkspaceDelegate {
             project_name,

@@ -21,7 +21,7 @@ pub use agent_session::{
 pub use panel::{PaseoPanel, REPLACES_ZED_AGENT_PANEL, ToggleFocus};
 pub use sidebar::PaseoSidebar;
 pub use store::{
-    ConnectionStatus, ENDPOINT_ENV_VAR, PaseoStore, PaseoStoreEvent, ProjectGroup, SSH_ENV_VAR,
-    WorkspaceEntry,
+    ConnectionStatus, DaemonConfig, ENDPOINT_ENV_VAR, PaseoDaemons, PaseoStore, PaseoStoreEvent,
+    ProjectGroup, SSH_ENV_VAR, WorkspaceEntry,
 };
 pub use terminal_item::PaseoTerminalItem;
