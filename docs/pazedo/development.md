@@ -202,8 +202,9 @@ never the password. The Keychain path of release builds was not exercised here.
 
 The sidebar header's group button (list-tree icon) switches between grouping by project (the
 default) and by status, as Paseo's app does: Needs input, Failed, Ready to review, Working,
-Done, most recent status change first, across all daemons. Status rows show their branch,
-project and (with several daemons) daemon. The choice is kept in Zed's key-value store
+Done, most recent status change first, across all daemons. Each status has the same
+collapsible header as a project. Status rows show their branch, project and (with several
+daemons) daemon. The choice is kept in Zed's key-value store
 (`pazedo_sidebar_grouping`), per data directory.
 
 Grouping by project lists the projects of all daemons together, by name. As in Paseo's app, a

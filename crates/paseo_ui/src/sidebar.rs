@@ -1405,61 +1405,47 @@ impl PaseoSidebar {
                     .then_with(|| a.workspace.name.cmp(&b.workspace.name))
             });
             let is_collapsed = self.collapsed_buckets.contains(&bucket);
-            let (icon, color, label) = bucket_heading(bucket);
-            let hover = cx.theme().colors().ghost_element_hover;
-            // Headings are larger than the rows' details, with a ringed icon, so that a
-            // section reads as a section, as in Paseo's app.
-            let heading_icon = if matches!(icon, IconName::Check) {
-                let ring = color.color(cx);
-                div()
-                    .size_4()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(ring)
-                    .child(Icon::new(icon).size(IconSize::XSmall).color(color))
-                    .into_any_element()
-            } else {
-                Icon::new(icon)
-                    .size(IconSize::Small)
-                    .color(color)
-                    .into_any_element()
-            };
+            let label = bucket_label(bucket);
             let section = SidebarEntry::StatusSection(bucket);
             let is_selected = self.is_selected(&section);
-            let focused_border = cx.theme().colors().panel_focused_border;
-            // Sections are spaced apart; the padding sits on the heading row so the list stays
-            // flat for keyboard scrolling.
+            let colors = cx.theme().colors();
+            // The same header as a project's when grouping by project.
             let header = div()
                 .w_full()
-                .map(|this| if is_first { this.pt_2() } else { this.pt_5() })
+                .when(!is_first, |this| {
+                    this.border_t_1().border_color(colors.border_variant)
+                })
                 .child(
                     h_flex()
                         .id(SharedString::from(format!("paseo-status-{bucket:?}")))
-                        .h(Tab::container_height(cx))
+                        .h(Tab::content_height(cx))
                         .w_full()
                         .px_2()
-                        .gap_2()
+                        .gap_1()
                         .border_1()
                         .border_color(if is_selected {
-                            focused_border
+                            colors.panel_focused_border
                         } else {
                             gpui::transparent_black()
                         })
                         .cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .child(heading_icon)
-                        .child(Label::new(label).color(Color::Muted))
-                        .when(is_collapsed, |this| {
-                            this.child(
-                                Label::new(bucket_rows.len().to_string())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Disabled),
-                            )
-                        })
+                        .hover(|style| style.bg(colors.ghost_element_hover))
+                        .active(|style| style.bg(colors.ghost_element_active))
+                        .child(
+                            Icon::new(if is_collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.selected_entry = Some(SidebarEntry::StatusSection(bucket));
                             this.toggle_status_section(bucket, cx);
@@ -2026,13 +2012,13 @@ fn status_bucket(status: WorkspaceStatus) -> WorkspaceStatus {
     }
 }
 
-fn bucket_heading(bucket: WorkspaceStatus) -> (IconName, Color, &'static str) {
+fn bucket_label(bucket: WorkspaceStatus) -> &'static str {
     match bucket {
-        WorkspaceStatus::NeedsInput => (IconName::Warning, Color::Warning, "Needs input"),
-        WorkspaceStatus::Failed => (IconName::XCircle, Color::Error, "Failed"),
-        WorkspaceStatus::Attention => (IconName::Check, Color::Success, "Ready to review"),
-        WorkspaceStatus::Running => (IconName::LoadCircle, Color::Accent, "Working"),
-        WorkspaceStatus::Done | WorkspaceStatus::Unknown => (IconName::Check, Color::Muted, "Done"),
+        WorkspaceStatus::NeedsInput => "Needs input",
+        WorkspaceStatus::Failed => "Failed",
+        WorkspaceStatus::Attention => "Ready to review",
+        WorkspaceStatus::Running => "Working",
+        WorkspaceStatus::Done | WorkspaceStatus::Unknown => "Done",
     }
 }
 
@@ -2460,7 +2446,7 @@ mod tests {
     #[test]
     fn status_groups_follow_paseos_order() {
         assert_eq!(
-            STATUS_BUCKETS.map(|bucket| bucket_heading(bucket).2),
+            STATUS_BUCKETS.map(bucket_label),
             [
                 "Needs input",
                 "Failed",
