@@ -410,11 +410,16 @@ impl Item for PaseoAgentItem {
 
 impl EventEmitter<()> for PaseoAgentItem {}
 
+/// Focusing the tab (the panel's toggle, switching tabs) lands in the message box, as activating
+/// a thread does in Zed's agent panel.
 impl Focusable for PaseoAgentItem {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.conversation_view {
-            Some(view) => view.read(cx).focus_handle(cx),
-            None => self.focus_handle.clone(),
+        let Some(view) = &self.conversation_view else {
+            return self.focus_handle.clone();
+        };
+        match view.read(cx).active_thread() {
+            Some(thread) => thread.read(cx).message_editor.focus_handle(cx),
+            None => view.read(cx).focus_handle(cx),
         }
     }
 }

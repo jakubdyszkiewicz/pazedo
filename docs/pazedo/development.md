@@ -233,7 +233,8 @@ opens the selected workspace or collapses the selected project or status section
 collapses a section or moves from a workspace to its section, right expands one or moves into
 it, and escape hands focus back. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
 (cmd-alt-; by default) selects the open workspace's row. The Paseo panel has the key context
-`PaseoPanel`. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
+`PaseoPanel`. Focusing it (`paseo_panel::ToggleFocus`, or switching to an agent tab) puts the
+cursor in the agent's message box, as activating a thread does in Zed's agent panel. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
 down, enter, escape) and in the `menu` context (left, right).
 
 That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
