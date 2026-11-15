@@ -29,7 +29,7 @@ with `/usr/bin/time -l`:
 | Cold build | 10 min 10 s wall, 38 min user CPU |
 | Peak memory of one process (the link) | 6.1 GB RSS |
 | `target/` after one debug build | 24 GB |
-| `target/debug/zed` binary | 1.16 GB |
+| `target/debug/zed` binary (now `target/debug/pazedo`) | 1.16 GB |
 | `~/.rustup` + `~/.cargo` | 2.3 GB + 1.5 GB |
 | Rebuild after enabling compile-time Metal shaders | 27 s (4 crates) |
 
@@ -53,10 +53,23 @@ script/pazedo/bundle --skip-build --install   # re-bundle only
 
 Measured 2026-11-14 (first release build, `target` on the external disk): 20 min 41 s wall,
 2 h 9 min user CPU, peak RSS 8.2 GB (the thin-LTO link), `target/release` 18 GB, binary 374 MB,
-app 357 MB. The app is ad-hoc signed, on the dev channel (no auto-update), and keeps its data
-in `~/Library/Application Support/Pazedo`, so it can run next to a dev build. The daemon is a
-setting in the app's own settings file, `~/Library/Application Support/Pazedo/config/settings.json`
-(see "Connecting to a daemon" below).
+app 357 MB. The app is ad-hoc signed and on the dev channel (no auto-update).
+
+`paths::APP_NAME` is "Pazedo" (and so the binary is `pazedo`, which a compile-time check in
+`crates/zed/src/main.rs` requires), so the app has Zed's folder layout under its own name and
+shares nothing with an installed Zed: settings, keymap and themes in `~/.config/pazedo`, data
+(databases, extensions, language servers) in `~/Library/Application Support/Pazedo`, logs in
+`~/Library/Logs/Pazedo/Pazedo.log`, cache in `~/Library/Caches/Pazedo`, state in
+`~/.local/state/Pazedo`. The daemon is a setting in `~/.config/pazedo/settings.json` (see
+"Connecting to a daemon" below). Until 2026-11-15 the app instead set `PAZEDO_USER_DATA_DIR`
+to `~/Library/Application Support/Pazedo` in its `Info.plist`, which put its settings in
+`…/Pazedo/config`; move them to `~/.config/pazedo` when updating from such a build:
+
+```sh
+mkdir -p ~/.config/pazedo
+mv ~/Library/Application\ Support/Pazedo/config/* ~/.config/pazedo/
+```
+
 First launch asks whether to trust the opened project (Zed's restricted mode), because the
 data directory is new.
 
@@ -94,7 +107,9 @@ script/pazedo/run-dev ~/dev/pazedo-sandbox     # stops a running dev build first
 ```
 
 `run-dev` copies the binary into `.pazedo-dev/PazedoDev.app` (git-excluded through
-`.git/info/exclude`) and starts that. Not `target/`: an app started from the external disk
+`.git/info/exclude`) and starts that, with the data directory `.pazedo-dev/data`
+(`PAZEDO_USER_DATA_DIR`, like `--user-data-dir`: settings in its `config`, logs in its `logs`),
+so it shares nothing with Pazedo.app or Zed. Not `target/`: an app started from the external disk
 blocks until someone answers macOS's "access files on a removable volume" prompt. And not
 outside the repository: debug builds find their assets by walking up from the executable to
 the directory with `.git`. A debug build that panics still reads debug info from `target/`
@@ -213,7 +228,7 @@ it, and escape hands focus back. Focusing the sidebar with `multi_workspace::Foc
 down, enter, escape) and in the `menu` context (left, right).
 
 That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
-In the user's `keymap.json` (Pazedo.app's is in `~/Library/Application Support/Pazedo/config`):
+In the user's `keymap.json` (Pazedo.app's is `~/.config/pazedo/keymap.json`):
 
 ```json
 [
@@ -279,8 +294,8 @@ sidebar when `disable_ai` is set or the agent is disabled).
 
 Open a project other than this repository: a dev build that opens the Zed repo itself runs
 rust-analyzer with `cargo run`'s environment and invalidates the build cache. Errors in the log
-(`~/Library/Logs/Zed/Zed.log`, or `logs/Zed.log` inside a custom data directory such as
-Pazedo.app's) about local model providers (LM Studio, Ollama, llama.cpp), a
+(`~/Library/Logs/Pazedo/Pazedo.log` for Pazedo.app, `logs/Pazedo.log` in a dev build's data
+directory) about local model providers (LM Studio, Ollama, llama.cpp), a
 missing Anthropic key or `canonicalizing "crates/grammars/src"` (the binary was not started
 from the repo root) are expected.
 

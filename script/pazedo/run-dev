@@ -15,9 +15,12 @@ set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 profile="${PAZEDO_PROFILE:-debug}"
-binary="$repo/target/$profile/zed"
+binary="$repo/target/$profile/pazedo"
 bundle="$repo/.pazedo-dev/PazedoDev.app"
 endpoint="${PAZEDO_PASEO_ENDPOINT:-127.0.0.1:6868}"
+# Pazedo.app uses the default folders (~/.config/pazedo, ~/Library/Application Support/Pazedo);
+# a dev build running next to it must not share its settings and databases.
+data_dir="${PAZEDO_USER_DATA_DIR:-$repo/.pazedo-dev/data}"
 # Agents created from Zed use the test daemon's mock provider unless told otherwise.
 provider="${PAZEDO_AGENT_PROVIDER:-mock}"
 model="${PAZEDO_AGENT_MODEL:-one-minute-stream}"
@@ -27,18 +30,18 @@ if [ ! -x "$binary" ]; then
   exit 1
 fi
 
-pkill -f "$bundle/Contents/MacOS/zed" 2>/dev/null && sleep 1 || true
+pkill -f "$bundle/Contents/MacOS/" 2>/dev/null && sleep 1 || true
 grep -qx '/.pazedo-dev/' "$repo/.git/info/exclude" 2>/dev/null ||
   echo '/.pazedo-dev/' >> "$repo/.git/info/exclude"
 rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS"
-cp "$binary" "$bundle/Contents/MacOS/zed"
+cp "$binary" "$bundle/Contents/MacOS/pazedo"
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>zed</string>
+  <key>CFBundleExecutable</key><string>pazedo</string>
   <key>CFBundleIdentifier</key><string>dev.pazedo.dev</string>
   <key>CFBundleName</key><string>Pazedo Dev</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -61,11 +64,11 @@ done
 
 if [ "$#" -gt 0 ]; then
   # shellcheck disable=SC2086
-  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" \
+  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" --env "PAZEDO_USER_DATA_DIR=$data_dir" \
     --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model" $extra_env --args "$@"
 else
   # shellcheck disable=SC2086
-  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" \
+  open -n -a "$bundle" --env "PAZEDO_PASEO_ENDPOINT=$endpoint" --env "PAZEDO_USER_DATA_DIR=$data_dir" \
     --env "PAZEDO_AGENT_PROVIDER=$provider" --env "PAZEDO_AGENT_MODEL=$model" $extra_env
 fi
-echo "started $bundle (Paseo endpoint $endpoint, new agents: $provider/$model)"
+echo "started $bundle (Paseo endpoint $endpoint, new agents: $provider/$model, data $data_dir)"

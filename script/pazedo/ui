@@ -12,9 +12,9 @@
 set -eu
 
 # PAZEDO_UI_PID picks another process, e.g. an installed Pazedo.app.
-pid=${PAZEDO_UI_PID:-$(pgrep -n -f '(target/[a-z]+|PazedoDev.app/Contents/MacOS)/zed( |$)' || true)}
+pid=${PAZEDO_UI_PID:-$(pgrep -n -f '(target/[a-z]+|PazedoDev.app/Contents/MacOS)/pazedo( |$)' || true)}
 if [ -z "$pid" ]; then
-  echo "no running target/*/zed process" >&2
+  echo "no running target/*/pazedo process" >&2
   exit 1
 fi
 process="(first process whose unix id is $pid)"

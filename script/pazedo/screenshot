@@ -1,7 +1,7 @@
 #!/bin/sh
 # Captures the main window of a running dev build of Zed (or any process) to a PNG.
 #
-#   script/pazedo/screenshot                     # newest target/*/zed process -> /tmp/pazedo-screenshot.png
+#   script/pazedo/screenshot                     # newest target/*/pazedo process -> /tmp/pazedo-screenshot.png
 #   script/pazedo/screenshot -p <pid> -o out.png
 #
 # Captures by window id rather than the whole display so that other windows don't end up in
@@ -22,9 +22,9 @@ while getopts "p:o:s:" option; do
 done
 
 if [ -z "$pid" ]; then
-  pid=$(pgrep -n -f '(target/[a-z]+|PazedoDev.app/Contents/MacOS)/zed( |$)' || true)
+  pid=$(pgrep -n -f '(target/[a-z]+|PazedoDev.app/Contents/MacOS)/pazedo( |$)' || true)
   if [ -z "$pid" ]; then
-    echo "no running target/*/zed process; pass -p <pid>" >&2
+    echo "no running target/*/pazedo process; pass -p <pid>" >&2
     exit 1
   fi
 fi

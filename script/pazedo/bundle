@@ -2,7 +2,7 @@
 # Builds pazedo in release mode and wraps it in target/release/Pazedo.app.
 #
 #   script/pazedo/bundle                 # build and bundle
-#   script/pazedo/bundle --skip-build    # bundle the existing target/release/zed
+#   script/pazedo/bundle --skip-build    # bundle the existing target/release/pazedo
 #   script/pazedo/bundle --install       # also copy it to ~/Applications/Pazedo.app
 #
 # Leaner than Zed's script/bundle-mac, which also builds the CLI, fetches cargo-bundle and git,
@@ -10,14 +10,13 @@
 # for this machine only. Install it rather than running it from target/: target/ lives on the
 # external disk, and Zed offers to "move it to Applications" whenever it runs from /Volumes.
 #
-# The app keeps its own data under ~/Library/Application Support/Pazedo (PAZEDO_USER_DATA_DIR,
-# read by crates/zed/src/main.rs like --user-data-dir), so it shares no settings, databases or
-# running instance with a dev build or an installed Zed. The variable is set with LSEnvironment
-# in Info.plist: a launcher script that execs zed instead hides the app's windows from System
-# Events and other accessibility clients.
+# The app keeps its own folders, Zed's layout under its own name (`paths::APP_NAME` is "Pazedo"):
+# settings and keymap in ~/.config/pazedo, data in ~/Library/Application Support/Pazedo, logs in
+# ~/Library/Logs/Pazedo. It shares nothing with an installed Zed. Development builds started with
+# script/pazedo/run-dev use a data directory of their own (PAZEDO_USER_DATA_DIR).
 #
 # The daemon to connect to is a setting, in the app's own settings.json
-# (~/Library/Application Support/Pazedo/config/settings.json):
+# (~/.config/pazedo/settings.json):
 #   "paseo": { "endpoint": "100.64.0.1:6767" }
 #
 # Zed's remote servers for the platforms in PAZEDO_REMOTE_SERVER_TARGETS (Linux x86_64 and Apple
@@ -61,7 +60,7 @@ if $build; then
   fi
 fi
 
-binary="$repo/target/release/zed"
+binary="$repo/target/release/pazedo"
 app="$repo/target/release/Pazedo.app"
 if [ ! -x "$binary" ]; then
   echo "$binary not found" >&2
@@ -70,7 +69,7 @@ fi
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$binary" "$app/Contents/MacOS/zed"
+cp "$binary" "$app/Contents/MacOS/pazedo"
 
 iconset=$(mktemp -d)/Pazedo.iconset
 mkdir -p "$iconset"
@@ -96,7 +95,7 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>zed</string>
+  <key>CFBundleExecutable</key><string>pazedo</string>
   <key>CFBundleIdentifier</key><string>dev.pazedo.Pazedo</string>
   <key>CFBundleName</key><string>Pazedo</string>
   <key>CFBundleDisplayName</key><string>Pazedo</string>
@@ -107,10 +106,6 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSEnvironment</key>
-  <dict>
-    <key>PAZEDO_USER_DATA_DIR</key><string>$HOME/Library/Application Support/Pazedo</string>
-  </dict>
 PLIST
   # Zed's own plist fragments: document types and the usage descriptions that programs run in
   # its terminal need for macOS permission prompts.
@@ -128,13 +123,13 @@ echo "bundled $app"
 if $install; then
   destination="$HOME/Applications/Pazedo.app"
   mkdir -p "$HOME/Applications"
-  if pgrep -f "$destination/Contents/MacOS/zed" >/dev/null; then
+  if pgrep -f "$destination/Contents/MacOS/" >/dev/null; then
     echo "quit the running $destination first" >&2
     exit 1
   fi
   rm -rf "$destination"
   ditto "$app" "$destination"
-  # LaunchServices caches Info.plist, including LSEnvironment.
+  # LaunchServices caches Info.plist.
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$destination"
   echo "installed $destination"
 fi

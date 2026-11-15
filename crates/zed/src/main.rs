@@ -228,9 +228,10 @@ fn main() {
         return;
     }
 
-    // pazedo: an app bundle cannot pass arguments, so Pazedo.app sets this in its Info.plist to
-    // keep its data apart from development builds. Set before the crash handler below, which
-    // inherits the variable and writes to the logs directory.
+    // pazedo: like --user-data-dir, for development builds started through an app bundle, which
+    // cannot pass arguments (script/pazedo/run-dev), so that they keep their data apart from
+    // Pazedo.app. Set before the crash handler below, which inherits the variable and writes to
+    // the logs directory.
     let user_data_dir = args
         .user_data_dir
         .clone()
