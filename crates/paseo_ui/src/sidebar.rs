@@ -1,5 +1,4 @@
 use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WIDTH};
-use chrono::{DateTime, Utc};
 use collections::HashSet;
 use editor::Editor;
 use gpui::{
@@ -8,7 +7,8 @@ use gpui::{
     Window, px,
 };
 use paseo_client::protocol::{
-    Workspace, WorkspaceKind, WorkspaceSource, WorkspaceStatus, WorktreeAction,
+    CheckStatus, ChecksStatus, Mergeable, PullRequest, ReviewDecision, Workspace, WorkspaceKind,
+    WorkspaceSource, WorkspaceStatus, WorktreeAction,
 };
 use platform_title_bar::{SidebarWindowControls, TitleBarSettings, apply_title_bar_insets};
 use settings::Settings as _;
@@ -502,6 +502,56 @@ impl PaseoSidebar {
             );
     }
 
+    /// Asks for confirmation, then archives the workspace. Archiving cannot be undone from
+    /// pazedo and deletes a Paseo worktree from disk, so the question says what goes.
+    fn archive_workspace(
+        &mut self,
+        store: &Entity<PaseoStore>,
+        workspace_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = store.read(cx).workspace(workspace_id).cloned() else {
+            return;
+        };
+        let deletes_worktree = workspace.workspace_kind == WorkspaceKind::Worktree
+            && workspace
+                .git_runtime
+                .as_ref()
+                .and_then(|git| git.is_paseo_owned_worktree)
+                .unwrap_or(false);
+        let mut detail = "Its agents are archived and its terminals are closed.".to_string();
+        if deletes_worktree {
+            detail.push_str(&format!(
+                " Its worktree at {} is deleted, with any changes not pushed.",
+                workspace.directory()
+            ));
+        }
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Archive “{}”?", workspace.name),
+            Some(&detail),
+            &["Archive", "Cancel"],
+            cx,
+        );
+        let store = store.clone();
+        let workspace_id = workspace_id.to_string();
+        cx.spawn_in(window, async move |_, cx| {
+            if answer.await? != 0 {
+                return Ok(());
+            }
+            store
+                .update(cx, |store, cx| store.archive_workspace(workspace_id, cx))
+                .await
+        })
+        .detach_and_prompt_err(
+            "Could not archive the workspace",
+            window,
+            cx,
+            |error, _, _| Some(format!("{error:#}")),
+        );
+    }
+
     fn render_rename_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .h_full()
@@ -859,20 +909,7 @@ impl PaseoSidebar {
         let pull_request = workspace
             .github_runtime
             .as_ref()
-            .and_then(|github| github.pull_request.as_ref())
-            .and_then(|pull_request| {
-                let number = pull_request.number?;
-                let state = if pull_request.is_merged {
-                    " merged"
-                } else if pull_request.is_draft == Some(true) {
-                    " draft"
-                } else if pull_request.state.eq_ignore_ascii_case("closed") {
-                    " closed"
-                } else {
-                    ""
-                };
-                Some(format!("PR #{number}{state}"))
-            });
+            .and_then(|github| github.pull_request.clone());
 
         let mut item = ThreadItem::new(key.element_id("paseo-workspace"), workspace.name.clone())
             .base_bg(cx.theme().colors().panel_background)
@@ -882,14 +919,6 @@ impl PaseoSidebar {
             .status(status)
             .notified(notified)
             .worktrees(worktrees)
-            .timestamp(
-                workspace
-                    .activity_at
-                    .as_deref()
-                    .or(workspace.created_at.as_deref())
-                    .and_then(relative_time)
-                    .unwrap_or_default(),
-            )
             .selected(is_active)
             .hovered(is_hovered)
             .on_click(cx.listener({
@@ -905,28 +934,39 @@ impl PaseoSidebar {
                 .title_slot(self.render_rename_editor(cx));
         } else if is_hovered {
             item = item.action_slot(
-                IconButton::new(key.element_id("paseo-rename-workspace"), IconName::Pencil)
-                    .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::text("Rename Workspace"))
-                    .on_click(cx.listener({
-                        let store = store.clone();
-                        let workspace_id = workspace_id.clone();
-                        move |this, _, window, cx| {
-                            this.start_rename(&store, &workspace_id, window, cx)
-                        }
-                    })),
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        IconButton::new(key.element_id("paseo-rename-workspace"), IconName::Pencil)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Rename Workspace"))
+                            .on_click(cx.listener({
+                                let store = store.clone();
+                                let workspace_id = workspace_id.clone();
+                                move |this, _, window, cx| {
+                                    this.start_rename(&store, &workspace_id, window, cx)
+                                }
+                            })),
+                    )
+                    .child(
+                        IconButton::new(
+                            key.element_id("paseo-archive-workspace"),
+                            IconName::Archive,
+                        )
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Archive Workspace…"))
+                        .on_click(cx.listener({
+                            let store = store.clone();
+                            let workspace_id = workspace_id.clone();
+                            move |this, _, window, cx| {
+                                this.archive_workspace(&store, &workspace_id, window, cx)
+                            }
+                        })),
+                    ),
             );
         }
-        if let Some(pull_request) = pull_request {
-            item = item.project_name(pull_request);
-        }
-        if let Some(diff_stat) = &workspace.diff_stat {
-            if diff_stat.additions > 0 {
-                item = item.added(diff_stat.additions as usize);
-            }
-            if diff_stat.deletions > 0 {
-                item = item.removed(diff_stat.deletions as usize);
-            }
+        if let Some(pull_request) = &pull_request {
+            item = item.trailing_metadata(render_pull_request(&key, pull_request));
         }
 
         let agent_count = entry.agents.len();
@@ -957,14 +997,37 @@ impl PaseoSidebar {
                     let sidebar = sidebar.clone();
                     let store = store.clone();
                     let workspace_id = workspace_id.clone();
+                    let pull_request_url = pull_request
+                        .as_ref()
+                        .map(|pull_request| pull_request.url.clone());
                     ContextMenu::build(window, cx, move |menu, _, _| {
-                        menu.entry("Rename Workspace", None, move |window, cx| {
-                            sidebar
-                                .update(cx, |sidebar, cx| {
-                                    sidebar.start_rename(&store, &workspace_id, window, cx)
-                                })
-                                .ok();
+                        menu.entry("Rename Workspace", None, {
+                            let sidebar = sidebar.clone();
+                            let store = store.clone();
+                            let workspace_id = workspace_id.clone();
+                            move |window, cx| {
+                                sidebar
+                                    .update(cx, |sidebar, cx| {
+                                        sidebar.start_rename(&store, &workspace_id, window, cx)
+                                    })
+                                    .ok();
+                            }
                         })
+                        .when_some(pull_request_url, |menu, url| {
+                            menu.entry("Open Pull Request", None, move |_, cx| cx.open_url(&url))
+                        })
+                        .separator()
+                        .entry(
+                            "Archive Workspace…",
+                            None,
+                            move |window, cx| {
+                                sidebar
+                                    .update(cx, |sidebar, cx| {
+                                        sidebar.archive_workspace(&store, &workspace_id, window, cx)
+                                    })
+                                    .ok();
+                            },
+                        )
                     })
                 }
             });
@@ -1043,20 +1106,97 @@ fn active_workspace_id(
         .map(|workspace| workspace.id.clone())
 }
 
-fn relative_time(timestamp: &str) -> Option<String> {
-    let time: DateTime<Utc> = DateTime::parse_from_rfc3339(timestamp).ok()?.into();
-    let elapsed = Utc::now().signed_duration_since(time);
-    Some(if elapsed.num_minutes() < 1 {
-        "now".to_string()
-    } else if elapsed.num_hours() < 1 {
-        format!("{}m", elapsed.num_minutes())
-    } else if elapsed.num_days() < 1 {
-        format!("{}h", elapsed.num_hours())
-    } else if elapsed.num_weeks() < 1 {
-        format!("{}d", elapsed.num_days())
+/// The pull request's number and its CI's state, e.g. "<PR icon> 5 · CI ✓", with the details
+/// (title, state, review, each check) on hover.
+fn render_pull_request(key: &DaemonItemKey, pull_request: &PullRequest) -> AnyElement {
+    let ci = match pull_request.checks_status {
+        Some(ChecksStatus::Success) => Some((IconName::Check, Color::Success)),
+        Some(ChecksStatus::Failure) => Some((IconName::XCircle, Color::Error)),
+        // Not a spinner, which would look like a running agent.
+        Some(ChecksStatus::Pending) => Some((IconName::Clock, Color::Warning)),
+        Some(ChecksStatus::None | ChecksStatus::Unknown) | None => None,
+    };
+    let state_color = if pull_request.is_merged {
+        Color::Accent
+    } else if pull_request.state.eq_ignore_ascii_case("closed") {
+        Color::Disabled
     } else {
-        format!("{}w", elapsed.num_weeks())
-    })
+        Color::Muted
+    };
+    let tooltip = pull_request_tooltip(pull_request);
+    h_flex()
+        .id(key.element_id("paseo-pull-request"))
+        .flex_none()
+        .gap_1()
+        .child(
+            h_flex()
+                .gap_0p5()
+                .child(
+                    Icon::new(IconName::PullRequest)
+                        .size(IconSize::XSmall)
+                        .color(state_color),
+                )
+                .children(pull_request.number.map(|number| {
+                    Label::new(number.to_string())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                })),
+        )
+        .when_some(ci, |this, (icon, color)| {
+            this.child(
+                Label::new("•")
+                    .size(LabelSize::Small)
+                    .color(Color::Disabled),
+            )
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(Label::new("CI").size(LabelSize::Small).color(Color::Muted))
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(color)),
+            )
+        })
+        .tooltip(Tooltip::text(tooltip))
+        .into_any_element()
+}
+
+fn pull_request_tooltip(pull_request: &PullRequest) -> SharedString {
+    let mut lines = vec![match pull_request.number {
+        Some(number) => format!("#{number} {}", pull_request.title),
+        None => pull_request.title.clone(),
+    }];
+    let mut state = vec![if pull_request.is_merged {
+        "Merged"
+    } else if pull_request.state.eq_ignore_ascii_case("closed") {
+        "Closed"
+    } else if pull_request.is_draft == Some(true) {
+        "Draft"
+    } else {
+        "Open"
+    }];
+    match pull_request.review_decision {
+        Some(ReviewDecision::Approved) => state.push("approved"),
+        Some(ReviewDecision::ChangesRequested) => state.push("changes requested"),
+        Some(ReviewDecision::Pending) => state.push("review pending"),
+        Some(ReviewDecision::Unknown) | None => {}
+    }
+    if pull_request.mergeable == Some(Mergeable::Conflicting) {
+        state.push("has conflicts");
+    }
+    lines.push(state.join(", "));
+    for check in &pull_request.checks {
+        let status = match check.status {
+            CheckStatus::Success => "✓",
+            CheckStatus::Failure => "✗",
+            CheckStatus::Pending => "…",
+            CheckStatus::Skipped | CheckStatus::Cancelled | CheckStatus::Unknown => "–",
+        };
+        let mut line = format!("{status} {}", check.name);
+        if let Some(duration) = &check.duration {
+            line.push_str(&format!(" ({duration})"));
+        }
+        lines.push(line);
+    }
+    lines.join("\n").into()
 }
 
 impl Sidebar for PaseoSidebar {
@@ -1197,25 +1337,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_relative_times() {
-        let now = Utc::now();
-        let ago = |duration: chrono::Duration| (now - duration).to_rfc3339();
+    fn describes_a_pull_request_and_its_checks() {
+        let pull_request: PullRequest = serde_json::from_value(serde_json::json!({
+            "number": 5,
+            "url": "https://github.com/example/webapp/pull/5",
+            "title": "Switch web client to a dark theme",
+            "state": "open",
+            "isMerged": false,
+            "isDraft": true,
+            "mergeable": "CONFLICTING",
+            "reviewDecision": "changes_requested",
+            "checksStatus": "failure",
+            "checks": [
+                {"name": "test", "status": "success", "url": null, "duration": "1m 17s"},
+                {"name": "lint", "status": "failure", "url": null},
+                {"name": "deploy", "status": "some_new_status", "url": null},
+            ],
+        }))
+        .unwrap();
         assert_eq!(
-            relative_time(&ago(chrono::Duration::seconds(5))).as_deref(),
-            Some("now")
+            pull_request_tooltip(&pull_request),
+            "#5 Switch web client to a dark theme\n\
+             Draft, changes requested, has conflicts\n\
+             ✓ test (1m 17s)\n\
+             ✗ lint\n\
+             – deploy"
         );
-        assert_eq!(
-            relative_time(&ago(chrono::Duration::minutes(7))).as_deref(),
-            Some("7m")
-        );
-        assert_eq!(
-            relative_time(&ago(chrono::Duration::hours(3))).as_deref(),
-            Some("3h")
-        );
-        assert_eq!(
-            relative_time(&ago(chrono::Duration::days(2))).as_deref(),
-            Some("2d")
-        );
-        assert_eq!(relative_time("not a time"), None);
     }
 }

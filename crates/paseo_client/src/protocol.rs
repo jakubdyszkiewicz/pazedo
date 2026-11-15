@@ -228,6 +228,64 @@ pub struct PullRequest {
     #[serde(default)]
     pub is_merged: bool,
     pub is_draft: Option<bool>,
+    /// The overall state of the pull request's CI checks.
+    pub checks_status: Option<ChecksStatus>,
+    #[serde(default)]
+    pub checks: Vec<PullRequestCheck>,
+    pub review_decision: Option<ReviewDecision>,
+    pub mergeable: Option<Mergeable>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksStatus {
+    None,
+    Pending,
+    Success,
+    Failure,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    pub url: Option<String>,
+    pub workflow: Option<String>,
+    pub duration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Success,
+    Failure,
+    Pending,
+    Skipped,
+    Cancelled,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    Pending,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Mergeable {
+    Mergeable,
+    Conflicting,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A project as listed by `project.list.request`, or a project with no active workspaces.
@@ -1591,6 +1649,30 @@ impl Request for ClearAgentAttention {
     const TYPE: &'static str = "clear_agent_attention";
     const RESPONSE_TYPE: &'static str = "clear_agent_attention_response";
     type Response = ClearAgentAttentionResponse;
+}
+
+/// Archives a workspace as Paseo's apps do: its agents are archived, its terminals killed, and a
+/// Paseo worktree no other workspace uses is deleted from disk.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveWorkspace {
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveWorkspaceResponse {
+    pub archived_at: Option<String>,
+    pub error: Option<String>,
+    /// An undo from another client stopped the archive.
+    #[serde(default)]
+    pub canceled: bool,
+}
+
+impl Request for ArchiveWorkspace {
+    const TYPE: &'static str = "archive_workspace_request";
+    const RESPONSE_TYPE: &'static str = "archive_workspace_response";
+    type Response = ArchiveWorkspaceResponse;
 }
 
 /// Sets a workspace's title; `None` reverts its name to the one derived from its branch or

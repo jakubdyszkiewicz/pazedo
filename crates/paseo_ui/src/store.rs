@@ -9,12 +9,12 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
-        AgentUpdate, AttentionReason, BranchSuggestions, ClearAgentAttention, CloseItems,
-        CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents, FetchWorkspaces,
-        GetProvidersSnapshot, ListProjects, Page, ProjectSummary, ProjectUpdate, ProviderEntry,
-        RefreshAgent, ServerInfo, ServerMessage, SetSessionEventSubscription, SetWorkspaceTitle,
-        Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged,
-        Workspace, WorkspaceSource, WorkspaceUpdate,
+        AgentUpdate, ArchiveWorkspace, AttentionReason, BranchSuggestions, ClearAgentAttention,
+        CloseItems, CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents,
+        FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page, ProjectSummary, ProjectUpdate,
+        ProviderEntry, RefreshAgent, ServerInfo, ServerMessage, SetSessionEventSubscription,
+        SetWorkspaceTitle, Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit,
+        TerminalsChanged, Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
 use project::Project;
@@ -764,6 +764,42 @@ impl PaseoStore {
         })
     }
 
+    /// Archives a workspace: its agents, its terminals, and a Paseo worktree that only it uses,
+    /// which the daemon deletes from disk. The row is hidden until the daemon answers.
+    pub fn archive_workspace(
+        &mut self,
+        workspace_id: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        self.closing.insert(workspace_id.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = client
+                .request(&ArchiveWorkspace {
+                    workspace_id: workspace_id.clone(),
+                })
+                .await
+                .and_then(|response| {
+                    if let Some(error) = response.error {
+                        anyhow::bail!("{error}");
+                    }
+                    Ok(response)
+                });
+            let archived = matches!(&result, Ok(response) if !response.canceled);
+            if !archived {
+                this.update(cx, |this, cx| {
+                    this.closing.remove(&workspace_id);
+                    cx.notify();
+                })?;
+            }
+            result.map(|_| ())
+        })
+    }
+
     /// Archives agents and kills terminals, as closing their tabs in Paseo's apps does.
     pub fn close_items(
         &mut self,
@@ -929,7 +965,11 @@ impl PaseoStore {
             })
             .collect();
 
-        for workspace in self.workspaces.values() {
+        // A workspace being archived disappears at once, as in Paseo's apps.
+        let listed = self.workspaces.values().filter(|workspace| {
+            workspace.archiving_at.is_none() && !self.closing.contains(&workspace.id)
+        });
+        for workspace in listed {
             let mut agents: Vec<Agent> = agents_by_workspace
                 .get(workspace.id.as_str())
                 .map(|agents| agents.iter().map(|agent| (*agent).clone()).collect())

@@ -752,6 +752,11 @@ mod screenshots {
                         "number": 42, "url": "https://github.com/example/pazedo/pull/42",
                         "title": "Paseo terminals", "state": "OPEN", "baseRefName": "main",
                         "headRefName": "pazedo/terminals", "isMerged": false, "isDraft": false,
+                        "checksStatus": "success", "reviewDecision": "approved",
+                        "checks": [
+                            {"name": "test", "status": "success", "url": null, "duration": "1m 17s"},
+                            {"name": "clippy", "status": "success", "url": null, "duration": "3m 2s"},
+                        ],
                     }},
                     "createdAt": ago(90),
                     "activityAt": ago(1),

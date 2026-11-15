@@ -59,6 +59,7 @@ pub struct ThreadItem {
     project_paths: Option<Arc<[PathBuf]>>,
     project_name: Option<SharedString>,
     worktrees: Vec<ThreadItemWorktreeInfo>,
+    trailing_metadata: Option<AnyElement>,
     is_remote: bool,
     archived: bool,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
@@ -94,6 +95,7 @@ impl ThreadItem {
             project_paths: None,
             project_name: None,
             worktrees: Vec::new(),
+            trailing_metadata: None,
             is_remote: false,
             archived: false,
             on_click: None,
@@ -235,6 +237,12 @@ impl ThreadItem {
 
     pub fn on_hover(mut self, on_hover: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_hover = Box::new(on_hover);
+        self
+    }
+
+    /// Shown in the metadata row after the project and worktree details.
+    pub fn trailing_metadata(mut self, element: impl IntoElement) -> Self {
+        self.trailing_metadata = Some(element.into_any_element());
         self
     }
 
@@ -421,9 +429,11 @@ impl RenderOnce for ThreadItem {
 
         let has_worktree = !linked_worktrees.is_empty();
 
+        let has_trailing_metadata = self.trailing_metadata.is_some();
         let has_metadata = has_project_name
             || has_project_paths
             || has_worktree
+            || has_trailing_metadata
             || has_diff_stats
             || has_timestamp;
 
@@ -594,8 +604,18 @@ impl RenderOnce for ThreadItem {
                                 )
                             },
                         )
+                        .when_some(self.trailing_metadata, |this, element| {
+                            this.when(
+                                has_project_name || has_project_paths || has_worktree,
+                                |this| this.child(dot_separator()),
+                            )
+                            .child(element)
+                        })
                         .when(
-                            (has_project_name || has_project_paths || has_worktree)
+                            (has_project_name
+                                || has_project_paths
+                                || has_worktree
+                                || has_trailing_metadata)
                                 && (has_diff_stats || has_timestamp),
                             |this| this.child(dot_separator()),
                         )

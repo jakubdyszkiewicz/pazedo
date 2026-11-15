@@ -218,6 +218,19 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   directory (`<paseo home>/worktrees/<hash>/<name>`) and its branch, off `refName`. Answered by
   `workspace.create.response {workspace, setupTerminalId, error, creation, ...}`. An optional
   `agent` / `firstAgentContext` starts an agent too (Paseo's app does; pazedo does not yet).
+- `archive_workspace_request {workspaceId}` → `archive_workspace_response {workspaceId,
+  archivedAt, error}` (the client also reads `canceled`, set when an undo from another client
+  stopped it). Archives the workspace's agents, kills its terminals and, for a Paseo worktree no
+  other workspace uses, deletes the worktree directory. The daemon sets `archivingAt` on the
+  workspace while it runs, then removes it from the list. pazedo asks for confirmation (naming
+  the worktree it deletes) and hides the row at once (verified 2026-11-15, test daemon).
+- A workspace's `githubRuntime.pullRequest` carries, besides number, title, URL, state, merged
+  and draft: `checksStatus` (none|pending|success|failure), `checks` [{name, status:
+  success|failure|pending|skipped|cancelled, url, workflow, duration}], `reviewDecision`
+  (approved|changes_requested|pending|null), `mergeable` (MERGEABLE|CONFLICTING|UNKNOWN),
+  `baseRefName`/`headRefName`, `repoOwner`/`repoName`, and `forgeSpecific` (merge state, allowed
+  merge methods, auto-merge and merge queue). pazedo shows the number and CI state in the row
+  and the rest on hover.
 - `branch_suggestions_request {cwd, query?, limit?}` lists branches, most recently committed
   first: `{branches, branchDetails?, error}`.
 - `directory_suggestions_request {query, cwd?, includeFiles?, includeDirectories?, matchMode?:
