@@ -169,6 +169,11 @@ pub fn data_dir() -> &'static PathBuf {
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
+        // pazedo: keep a custom data directory's state, cache and logs inside it, so an app
+        // started with one does not share them with Zed or a development build.
+        if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
+            return custom_dir.join("state");
+        }
         if cfg!(target_os = "macos") {
             return home_dir().join(".local").join("state").join(APP_NAME);
         }
@@ -193,6 +198,9 @@ pub fn state_dir() -> &'static PathBuf {
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
+        if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
+            return custom_dir.join("cache");
+        }
         if cfg!(target_os = "macos") {
             return dirs::cache_dir()
                 .expect("failed to determine cachesDirectory directory")
@@ -228,7 +236,9 @@ pub fn hang_traces_dir() -> &'static PathBuf {
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
+        if CUSTOM_DATA_DIR.get().is_some() {
+            data_dir().join("logs")
+        } else if cfg!(target_os = "macos") {
             home_dir().join("Library/Logs").join(APP_NAME)
         } else {
             data_dir().join("logs")

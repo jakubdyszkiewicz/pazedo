@@ -228,6 +228,23 @@ fn main() {
         return;
     }
 
+    // pazedo: an app bundle cannot pass arguments, so Pazedo.app sets this in its Info.plist to
+    // keep its data apart from development builds. Set before the crash handler below, which
+    // inherits the variable and writes to the logs directory.
+    let user_data_dir = args
+        .user_data_dir
+        .clone()
+        .or_else(|| env::var("PAZEDO_USER_DATA_DIR").ok());
+    let restart_arguments = if let Some(directory) = user_data_dir.as_deref() {
+        let directory = paths::set_custom_data_dir(directory);
+        vec![
+            std::ffi::OsString::from("--user-data-dir"),
+            directory.as_os_str().to_owned(),
+        ]
+    } else {
+        Vec::new()
+    };
+
     // `zed --crash-handler` Makes zed operate in minidump crash handler mode
     if let Some(socket) = &args.crash_handler {
         crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
@@ -267,22 +284,6 @@ fn main() {
         dump_all_gpui_actions();
         return;
     }
-
-    // pazedo: an app bundle cannot pass arguments, so Pazedo.app sets this in its Info.plist to
-    // keep its data apart from development builds.
-    let user_data_dir = args
-        .user_data_dir
-        .clone()
-        .or_else(|| env::var("PAZEDO_USER_DATA_DIR").ok());
-    let restart_arguments = if let Some(directory) = user_data_dir.as_deref() {
-        let directory = paths::set_custom_data_dir(directory);
-        vec![
-            std::ffi::OsString::from("--user-data-dir"),
-            directory.as_os_str().to_owned(),
-        ]
-    } else {
-        Vec::new()
-    };
 
     #[cfg(target_os = "windows")]
     match util::get_zed_cli_path() {
