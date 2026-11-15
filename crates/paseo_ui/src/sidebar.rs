@@ -24,8 +24,8 @@ use ui::{
 use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
-    CloseWindow, MultiWorkspace, MultiWorkspaceEvent, OpenMode, Sidebar, SidebarEvent, SidebarSide,
-    notifications::DetachAndPromptErr as _,
+    CloseWindow, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent, OpenMode, Sidebar,
+    SidebarEvent, SidebarSide, notifications::DetachAndPromptErr as _,
 };
 
 use crate::{
@@ -62,6 +62,51 @@ struct RowOrigin {
     host: Option<SharedString>,
 }
 
+/// A row the keyboard can select.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarEntry {
+    /// A project's header, keyed by its first daemon's project.
+    Project(DaemonItemKey),
+    StatusSection(WorkspaceStatus),
+    Workspace(DaemonItemKey),
+}
+
+struct SelectableRow {
+    entry: SidebarEntry,
+    /// The project or status section the row is listed under.
+    parent: Option<SidebarEntry>,
+    /// Its position among the scrolled list's children.
+    index: usize,
+}
+
+/// The sidebar's list as flat rows (headers and workspaces side by side rather than nested), so
+/// that `ScrollHandle::scroll_to_item` can bring the selected row into view.
+#[derive(Default)]
+struct SidebarRows {
+    elements: Vec<AnyElement>,
+    selectable: Vec<SelectableRow>,
+}
+
+impl SidebarRows {
+    fn push(&mut self, element: AnyElement) {
+        self.elements.push(element);
+    }
+
+    fn push_selectable(
+        &mut self,
+        entry: SidebarEntry,
+        parent: Option<SidebarEntry>,
+        element: AnyElement,
+    ) {
+        self.selectable.push(SelectableRow {
+            entry,
+            parent,
+            index: self.elements.len(),
+        });
+        self.elements.push(element);
+    }
+}
+
 /// A project as the sidebar lists it when grouping by project. A repository on several daemons
 /// is one project, as in Paseo's app: daemons give it the same `projectKey` (from its git
 /// remote). A daemon with two projects of one key keeps them apart, as Paseo's app does.
@@ -74,8 +119,7 @@ struct MergedProject<D> {
 fn merge_projects<D: Clone + Eq + std::hash::Hash>(
     placements: Vec<(D, ProjectGroup)>,
 ) -> Vec<MergedProject<D>> {
-    let mut key_counts: collections::HashMap<(D, String), usize> =
-        collections::HashMap::default();
+    let mut key_counts: collections::HashMap<(D, String), usize> = collections::HashMap::default();
     for (daemon, group) in &placements {
         if let Some(key) = &group.project_key {
             *key_counts.entry((daemon.clone(), key.clone())).or_default() += 1;
@@ -143,6 +187,12 @@ pub struct PaseoSidebar {
     /// Several Paseo workspaces can share a directory; this remembers which one was clicked so
     /// only it is highlighted.
     selected_workspace: Option<DaemonItemKey>,
+    /// The row chosen with the keyboard (or last clicked), outlined while the sidebar has focus.
+    selected_entry: Option<SidebarEntry>,
+    /// Whether the selection is shown: set while rendering, from the sidebar's focus.
+    shows_selection: bool,
+    /// The rows the keyboard can select, in order, as last rendered.
+    selectable_rows: Vec<SelectableRow>,
     rename_editor: Entity<Editor>,
     /// What is being renamed in place.
     renaming: Option<RenameTarget>,
@@ -194,6 +244,9 @@ impl PaseoSidebar {
             collapsed_buckets: HashSet::default(),
             hovered_workspace: None,
             selected_workspace: None,
+            selected_entry: None,
+            shows_selection: false,
+            selectable_rows: Vec::new(),
             rename_editor,
             renaming: None,
             scroll_handle: ScrollHandle::new(),
@@ -202,6 +255,188 @@ impl PaseoSidebar {
         };
         this.observe_stores(cx);
         this
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_row(&self) -> Option<String> {
+        Some(match self.selected_entry.as_ref()? {
+            SidebarEntry::Project(key) => format!("project {}", key.id),
+            SidebarEntry::StatusSection(bucket) => format!("section {bucket:?}"),
+            SidebarEntry::Workspace(key) => format!("workspace {}", key.id),
+        })
+    }
+
+    fn is_selected(&self, entry: &SidebarEntry) -> bool {
+        self.shows_selection && self.selected_entry.as_ref() == Some(entry)
+    }
+
+    fn toggle_project(&mut self, project_key: &DaemonItemKey, cx: &mut Context<Self>) {
+        if !self.collapsed_projects.remove(project_key) {
+            self.collapsed_projects.insert(project_key.clone());
+        }
+        cx.notify();
+    }
+
+    fn toggle_status_section(&mut self, bucket: WorkspaceStatus, cx: &mut Context<Self>) {
+        if !self.collapsed_buckets.remove(&bucket) {
+            self.collapsed_buckets.insert(bucket);
+        }
+        cx.notify();
+    }
+
+    fn is_collapsed(&self, entry: &SidebarEntry) -> bool {
+        match entry {
+            SidebarEntry::Project(key) => self.collapsed_projects.contains(key),
+            SidebarEntry::StatusSection(bucket) => self.collapsed_buckets.contains(bucket),
+            SidebarEntry::Workspace(_) => false,
+        }
+    }
+
+    fn selected_position(&self) -> Option<usize> {
+        let selected = self.selected_entry.as_ref()?;
+        self.selectable_rows
+            .iter()
+            .position(|row| &row.entry == selected)
+    }
+
+    fn select_position(&mut self, position: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.selectable_rows.get(position) else {
+            return;
+        };
+        self.selected_entry = Some(row.entry.clone());
+        self.scroll_handle.scroll_to_item(row.index);
+        cx.notify();
+    }
+
+    fn select_entry(&mut self, entry: &SidebarEntry, cx: &mut Context<Self>) {
+        if let Some(position) = self
+            .selectable_rows
+            .iter()
+            .position(|row| &row.entry == entry)
+        {
+            self.select_position(position, cx);
+        }
+    }
+
+    fn select_next(&mut self, _: &menu::SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+        let next = match self.selected_position() {
+            Some(position) => position + 1,
+            None => 0,
+        };
+        if next < self.selectable_rows.len() {
+            self.select_position(next, cx);
+        }
+    }
+
+    fn select_previous(
+        &mut self,
+        _: &menu::SelectPrevious,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = match self.selected_position() {
+            Some(position) => position.saturating_sub(1),
+            None => self.selectable_rows.len().saturating_sub(1),
+        };
+        self.select_position(previous, cx);
+    }
+
+    fn select_first(
+        &mut self,
+        _: &menu::SelectFirst,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_position(0, cx);
+    }
+
+    fn select_last(&mut self, _: &menu::SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
+        self.select_position(self.selectable_rows.len().saturating_sub(1), cx);
+    }
+
+    /// Opens the selected workspace, or collapses or expands the selected header.
+    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_entry.clone() {
+            Some(SidebarEntry::Workspace(key)) => {
+                let store = self
+                    .stores(cx)
+                    .into_iter()
+                    .find(|store| store.entity_id() == key.daemon);
+                if let Some(store) = store {
+                    self.open_workspace(&store, &key.id, window, cx);
+                }
+            }
+            Some(SidebarEntry::Project(key)) => self.toggle_project(&key, cx),
+            Some(SidebarEntry::StatusSection(bucket)) => self.toggle_status_section(bucket, cx),
+            None => {}
+        }
+    }
+
+    /// Collapses the selected header, or moves from a workspace to its header.
+    fn select_parent(
+        &mut self,
+        _: &menu::SelectParent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(position) = self.selected_position() else {
+            return;
+        };
+        let Some(row) = self.selectable_rows.get(position) else {
+            return;
+        };
+        match (row.entry.clone(), row.parent.clone()) {
+            (SidebarEntry::Workspace(_), Some(parent)) => self.select_entry(&parent, cx),
+            (SidebarEntry::Project(key), _) if !self.collapsed_projects.contains(&key) => {
+                self.toggle_project(&key, cx)
+            }
+            (SidebarEntry::StatusSection(bucket), _)
+                if !self.collapsed_buckets.contains(&bucket) =>
+            {
+                self.toggle_status_section(bucket, cx)
+            }
+            _ => {}
+        }
+    }
+
+    /// Expands the selected header, or moves into an expanded one.
+    fn select_child(
+        &mut self,
+        _: &menu::SelectChild,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(position) = self.selected_position() else {
+            return;
+        };
+        let Some(entry) = self
+            .selectable_rows
+            .get(position)
+            .map(|row| row.entry.clone())
+        else {
+            return;
+        };
+        if matches!(entry, SidebarEntry::Workspace(_)) {
+            return;
+        }
+        if self.is_collapsed(&entry) {
+            match entry {
+                SidebarEntry::Project(key) => self.toggle_project(&key, cx),
+                SidebarEntry::StatusSection(bucket) => self.toggle_status_section(bucket, cx),
+                SidebarEntry::Workspace(_) => {}
+            }
+        } else if self
+            .selectable_rows
+            .get(position + 1)
+            .is_some_and(|next| next.parent.as_ref() == Some(&entry))
+        {
+            self.select_position(position + 1, cx);
+        }
+    }
+
+    /// Hands focus back to where it was before the sidebar took it.
+    fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        window.dispatch_action(Box::new(FocusWorkspaceSidebar), cx);
     }
 
     pub fn set_grouping(&mut self, grouping: Grouping, cx: &mut Context<Self>) {
@@ -951,8 +1186,9 @@ impl PaseoSidebar {
         stores: &[Entity<PaseoStore>],
         active_workspace: Option<&(Entity<PaseoStore>, String)>,
         several_daemons: bool,
+        rows_out: &mut SidebarRows,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) {
         let mut rows: Vec<(Entity<PaseoStore>, SharedString, WorkspaceEntry)> = Vec::new();
         for store in stores {
             let store_ref = store.read(cx);
@@ -973,7 +1209,7 @@ impl PaseoSidebar {
                 .or_default()
                 .push(row);
         }
-        let mut sections = Vec::new();
+        let mut is_first = true;
         for bucket in STATUS_BUCKETS {
             let Some(mut bucket_rows) = by_bucket.remove(&bucket) else {
                 continue;
@@ -1010,59 +1246,63 @@ impl PaseoSidebar {
                     .color(color)
                     .into_any_element()
             };
-            let header = h_flex()
-                .id(SharedString::from(format!("paseo-status-{bucket:?}")))
-                .h(Tab::container_height(cx))
+            let section = SidebarEntry::StatusSection(bucket);
+            let is_selected = self.is_selected(&section);
+            let focused_border = cx.theme().colors().panel_focused_border;
+            // Sections are spaced apart; the padding sits on the heading row so the list stays
+            // flat for keyboard scrolling.
+            let header = div()
                 .w_full()
-                .px_2()
-                .gap_2()
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover))
-                .child(heading_icon)
-                .child(Label::new(label).color(Color::Muted))
-                .when(is_collapsed, |this| {
-                    this.child(
-                        Label::new(bucket_rows.len().to_string())
-                            .size(LabelSize::Small)
-                            .color(Color::Disabled),
-                    )
-                })
-                .on_click(cx.listener(move |this, _, _window, cx| {
-                    if !this.collapsed_buckets.remove(&bucket) {
-                        this.collapsed_buckets.insert(bucket);
-                    }
-                    cx.notify();
-                }));
-            let workspaces: Vec<AnyElement> = if is_collapsed {
-                Vec::new()
-            } else {
-                bucket_rows
-                    .into_iter()
-                    .map(|(store, project, entry)| {
-                        let is_active = active_workspace.is_some_and(|(active_store, id)| {
-                            *active_store == store && *id == entry.workspace.id
-                        });
-                        let origin = RowOrigin {
-                            branch: None,
-                            project: Some(project),
-                            host: several_daemons.then(|| store.read(cx).display_name()),
-                        };
-                        self.render_workspace(&store, entry, is_active, Some(origin), cx)
-                    })
-                    .collect()
-            };
-            let is_first = sections.is_empty();
-            sections.push(
-                v_flex()
-                    .w_full()
-                    .map(|this| if is_first { this.pt_2() } else { this.pt_5() })
-                    .gap_0p5()
-                    .child(header)
-                    .children(workspaces)
-                    .into_any_element(),
-            );
+                .map(|this| if is_first { this.pt_2() } else { this.pt_5() })
+                .child(
+                    h_flex()
+                        .id(SharedString::from(format!("paseo-status-{bucket:?}")))
+                        .h(Tab::container_height(cx))
+                        .w_full()
+                        .px_2()
+                        .gap_2()
+                        .border_1()
+                        .border_color(if is_selected {
+                            focused_border
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .child(heading_icon)
+                        .child(Label::new(label).color(Color::Muted))
+                        .when(is_collapsed, |this| {
+                            this.child(
+                                Label::new(bucket_rows.len().to_string())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Disabled),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.selected_entry = Some(SidebarEntry::StatusSection(bucket));
+                            this.toggle_status_section(bucket, cx);
+                        })),
+                );
+            rows_out.push_selectable(section.clone(), None, header.into_any_element());
+            is_first = false;
+            if is_collapsed {
+                continue;
+            }
+            for (store, project, entry) in bucket_rows {
+                let is_active = active_workspace.is_some_and(|(active_store, id)| {
+                    *active_store == store && *id == entry.workspace.id
+                });
+                let origin = RowOrigin {
+                    branch: None,
+                    project: Some(project),
+                    host: several_daemons.then(|| store.read(cx).display_name()),
+                };
+                let workspace =
+                    SidebarEntry::Workspace(DaemonItemKey::new(&store, &entry.workspace.id));
+                let row = self.render_workspace(&store, entry, is_active, Some(origin), cx);
+                rows_out.push_selectable(workspace, Some(section.clone()), row);
+            }
         }
-        sections
     }
 
     fn render_not_configured(&self, cx: &App) -> AnyElement {
@@ -1081,12 +1321,15 @@ impl PaseoSidebar {
         active_workspace: Option<&(Entity<PaseoStore>, String)>,
         show_hosts: bool,
         is_first: bool,
+        rows_out: &mut SidebarRows,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) {
         let Some((first_store, first_group)) = project.placements.first() else {
-            return div().into_any_element();
+            return;
         };
         let project_key = DaemonItemKey::new(first_store, &first_group.project_id);
+        let entry = SidebarEntry::Project(project_key.clone());
+        let is_selected = self.is_selected(&entry);
         let is_collapsed = self.collapsed_projects.contains(&project_key);
         let mut rows: Vec<(Entity<PaseoStore>, WorkspaceEntry)> = Vec::new();
         let mut placements: Vec<(Entity<PaseoStore>, String, SharedString)> = Vec::new();
@@ -1132,6 +1375,12 @@ impl PaseoSidebar {
             .w_full()
             .px_2()
             .gap_1()
+            .border_1()
+            .border_color(if is_selected {
+                color.panel_focused_border
+            } else {
+                gpui::transparent_black()
+            })
             .cursor_pointer()
             .hover(|style| style.bg(color.ghost_element_hover))
             .active(|style| style.bg(color.ghost_element_active))
@@ -1156,53 +1405,61 @@ impl PaseoSidebar {
             .child(div().flex_1())
             .child(new_workspace_button)
             .tooltip(Tooltip::text(tooltip))
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                if !this.collapsed_projects.remove(&project_key) {
-                    this.collapsed_projects.insert(project_key.clone());
+            .on_click(cx.listener({
+                let project_key = project_key.clone();
+                move |this, _, _window, cx| {
+                    this.selected_entry = Some(SidebarEntry::Project(project_key.clone()));
+                    this.toggle_project(&project_key, cx);
                 }
-                cx.notify();
             }));
 
-        v_flex()
+        let header = div()
             .w_full()
             .when(!is_first, |this| {
                 this.border_t_1().border_color(color.border_variant)
             })
-            .child(header)
-            .when(!is_collapsed, |this| {
-                this.map(|this| {
-                    if rows.is_empty() {
-                        this.child(
-                            div().pl_6().pb_1().child(
-                                Label::new("No workspaces")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Disabled),
-                            ),
-                        )
-                    } else {
-                        this.children(rows.into_iter().map(|(store, entry)| {
-                            let is_active = active_workspace.is_some_and(|(active_store, id)| {
-                                *active_store == store && *id == entry.workspace.id
-                            });
-                            let is_connected = matches!(
-                                store.read(cx).status(),
-                                ConnectionStatus::Connected(_)
-                            );
-                            let origin = show_hosts.then(|| RowOrigin {
-                                branch: None,
-                                project: None,
-                                host: Some(store.read(cx).display_name()),
-                            });
-                            let row = self.render_workspace(&store, entry, is_active, origin, cx);
-                            div()
-                                .w_full()
-                                .when(!is_connected, |this| this.opacity(0.6))
-                                .child(row)
-                        }))
-                    }
-                })
-            })
-            .into_any_element()
+            .child(header);
+        rows_out.push_selectable(entry.clone(), None, header.into_any_element());
+        if is_collapsed {
+            return;
+        }
+        if rows.is_empty() {
+            rows_out.push(
+                div()
+                    .pl_6()
+                    .pb_1()
+                    .child(
+                        Label::new("No workspaces")
+                            .size(LabelSize::Small)
+                            .color(Color::Disabled),
+                    )
+                    .into_any_element(),
+            );
+            return;
+        }
+        for (store, workspace) in rows {
+            let is_active = active_workspace.is_some_and(|(active_store, id)| {
+                *active_store == store && *id == workspace.workspace.id
+            });
+            let is_connected = matches!(store.read(cx).status(), ConnectionStatus::Connected(_));
+            let origin = show_hosts.then(|| RowOrigin {
+                branch: None,
+                project: None,
+                host: Some(store.read(cx).display_name()),
+            });
+            let workspace_entry =
+                SidebarEntry::Workspace(DaemonItemKey::new(&store, &workspace.workspace.id));
+            let row = self.render_workspace(&store, workspace, is_active, origin, cx);
+            rows_out.push_selectable(
+                workspace_entry,
+                Some(entry.clone()),
+                div()
+                    .w_full()
+                    .when(!is_connected, |this| this.opacity(0.6))
+                    .child(row)
+                    .into_any_element(),
+            );
+        }
     }
 
     /// The project's New Workspace button. A project on several daemons first asks which
@@ -1368,11 +1625,16 @@ impl PaseoSidebar {
             .notified(notified)
             .worktrees(worktrees)
             .selected(is_active)
+            .focused(self.is_selected(&SidebarEntry::Workspace(key.clone())))
             .hovered(is_hovered)
             .on_click(cx.listener({
                 let store = store.clone();
                 let workspace_id = workspace_id.clone();
                 move |this, _, window, cx| {
+                    this.selected_entry = Some(SidebarEntry::Workspace(DaemonItemKey::new(
+                        &store,
+                        &workspace_id,
+                    )));
                     this.open_workspace(&store, &workspace_id, window, cx);
                 }
             }));
@@ -1764,6 +2026,19 @@ impl Sidebar for PaseoSidebar {
     fn side(&self, cx: &App) -> SidebarSide {
         AgentSettings::get_global(cx).sidebar_side()
     }
+
+    /// Focusing the sidebar from the keyboard starts at the open workspace's row.
+    fn prepare_for_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Called while `MultiWorkspace` is being updated, which the open workspace is read from.
+        cx.defer_in(window, |this, _window, cx| {
+            if let Some((store, workspace_id)) = this.highlighted_workspace(cx) {
+                let entry = SidebarEntry::Workspace(DaemonItemKey::new(&store, &workspace_id));
+                this.selected_entry = Some(entry.clone());
+                this.select_entry(&entry, cx);
+            }
+            cx.notify();
+        });
+    }
 }
 
 impl EventEmitter<SidebarEvent> for PaseoSidebar {}
@@ -1790,26 +2065,28 @@ impl Render for PaseoSidebar {
                 store.update(cx, |store, cx| store.watch_terminals(&workspace_id, cx));
             });
         }
+        self.shows_selection = self.focus_handle.contains_focused(window, cx);
         let header = self.render_header(window, cx);
         let stores = self.stores(cx);
         let several_daemons = stores.len() > 1;
-        let sections: Vec<AnyElement> = if stores.is_empty() {
-            vec![self.render_not_configured(cx)]
+        let mut rows = SidebarRows::default();
+        if stores.is_empty() {
+            rows.push(self.render_not_configured(cx));
         } else {
             // The daemons' status rows (or only their problems, with one daemon), then every
             // daemon's workspaces by status or by project.
-            let mut sections: Vec<AnyElement> = stores
-                .iter()
-                .enumerate()
-                .map(|(index, store)| self.render_daemon(store, several_daemons, index == 0, cx))
-                .collect();
+            for (index, store) in stores.iter().enumerate() {
+                let row = self.render_daemon(store, several_daemons, index == 0, cx);
+                rows.push(row);
+            }
             match self.grouping {
-                Grouping::Status => sections.extend(self.render_status_groups(
+                Grouping::Status => self.render_status_groups(
                     &stores,
                     active_workspace.as_ref(),
                     several_daemons,
+                    &mut rows,
                     cx,
-                )),
+                ),
                 Grouping::Project => {
                     let placements = stores
                         .iter()
@@ -1829,23 +2106,38 @@ impl Render for PaseoSidebar {
                         .collect::<HashSet<_>>()
                         .len()
                         > 1;
-                    sections.extend(projects.into_iter().enumerate().map(|(index, project)| {
+                    for (index, project) in projects.into_iter().enumerate() {
                         self.render_project(
                             project,
                             active_workspace.as_ref(),
                             show_hosts,
                             index == 0,
+                            &mut rows,
                             cx,
-                        )
-                    }));
+                        );
+                    }
                 }
             }
-            sections
-        };
+        }
+        self.selectable_rows = rows.selectable;
+        let mut key_context = gpui::KeyContext::new_with_defaults(cx.platform_info().os);
+        key_context.add("PaseoSidebar");
+        // Gives the sidebar the list keys: up and down, enter, escape (bound globally to `menu`
+        // actions) and left and right (bound in the `menu` context).
+        key_context.add("menu");
 
         v_flex()
             .id("paseo-sidebar")
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_last))
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::select_parent))
+            .on_action(cx.listener(Self::select_child))
+            .on_action(cx.listener(Self::cancel))
             .font(ui_font)
             .map(|this| match window.window_decorations() {
                 Decorations::Server => this.h_full().w(self.width),
@@ -1893,7 +2185,7 @@ impl Render for PaseoSidebar {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .children(sections),
+                    .children(rows.elements),
             )
     }
 }
@@ -1931,7 +2223,10 @@ mod tests {
         let webapp = "remote:github.com/example/webapp";
         let projects = merge_projects(vec![
             ("mini", project("prj_1", Some(webapp), "webapp")),
-            ("mini", project("prj_2", Some("host:mini:/tmp/notes"), "notes")),
+            (
+                "mini",
+                project("prj_2", Some("host:mini:/tmp/notes"), "notes"),
+            ),
             ("devbox", project("prj_9", Some(webapp), "webapp")),
             ("devbox", project("prj_8", None, "Docs")),
         ]);

@@ -171,6 +171,40 @@ of several daemons first asks which machine the workspace goes on. Verified 2026
 scratch clone of webapp (only its remote URL) on the test daemon, merged with the dev box's
 webapp, and a new workspace created through the machine menu on the test daemon.
 
+### Keyboard
+
+The sidebar has the key contexts `PaseoSidebar` and `menu`, so Zed's list keys work in it once
+it has focus: up and down move the selection (outlined), home and end jump to the ends, enter
+opens the selected workspace or collapses the selected project or status section, left
+collapses a section or moves from a workspace to its section, right expands one or moves into
+it, and escape hands focus back. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
+(cmd-alt-; by default) selects the open workspace's row. The Paseo panel has the key context
+`PaseoPanel`. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
+down, enter, escape) and in the `menu` context (left, right).
+
+That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
+In the user's `keymap.json` (Pazedo.app's is in `~/Library/Application Support/Pazedo/config`):
+
+```json
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "cmd-2": "multi_workspace::FocusWorkspaceSidebar",
+      "cmd-3": "paseo_panel::ToggleFocus"
+    }
+  },
+  { "context": "PaseoSidebar", "bindings": { "cmd-2": "multi_workspace::ToggleWorkspaceSidebar" } },
+  { "context": "PaseoPanel", "bindings": { "cmd-3": "workspace::CloseActiveDock" } }
+]
+```
+
+The first block needs the `Workspace` context: Zed binds cmd-1 to cmd-9 there
+(`workspace::ActivatePane`), and a binding without a context loses to it. The sidebar is
+outside the `Workspace` element, hence its own context. Verified 2026-11-15 in a dev build with
+this keymap: cmd-2 focused the sidebar on the open workspace, the arrows moved, collapsed and
+expanded, cmd-2 in the sidebar hid it, cmd-3 focused the panel and cmd-3 in it closed the dock.
+
 ### Several daemons
 
 `daemons` lists several daemons, each with a row at the top of the sidebar with its connection

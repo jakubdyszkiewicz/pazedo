@@ -844,6 +844,7 @@ impl Render for PaseoPanel {
             .unwrap_or_else(div);
         let is_empty = self.pane.read(cx).items_len() == 0;
         container
+            .key_context("PaseoPanel")
             .size_full()
             .relative()
             .child(self.pane.clone())

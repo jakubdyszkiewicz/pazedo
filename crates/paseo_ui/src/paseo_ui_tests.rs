@@ -4,7 +4,7 @@ use crate::{
     store::{DirectorySnapshot, DirectorySubscriptions},
 };
 use fs::FakeFs;
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
 use paseo_client::{
     Event,
     frames::{TerminalFrame, TerminalOpcode},
@@ -360,6 +360,93 @@ async fn test_selecting_a_workspace_activates_its_directory(cx: &mut TestAppCont
             sidebar.highlighted_workspace_id(cx).as_deref(),
             Some("wks_second"),
             "the clicked row is highlighted even though another workspace shares its directory"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_keyboard_navigation_in_the_sidebar(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let (sidebar, _store) = sidebar_with_directory(&multi_workspace, cx);
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.register_sidebar(sidebar.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    let selected =
+        |cx: &mut VisualTestContext| sidebar.read_with(cx, |sidebar, _| sidebar.selected_row());
+    let press = |action: &dyn gpui::Action, cx: &mut VisualTestContext| {
+        let action = action.boxed_clone();
+        cx.update(|window, cx| window.dispatch_action(action, cx));
+        cx.run_until_parked();
+    };
+
+    press(&workspace::FocusWorkspaceSidebar, cx);
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        assert!(sidebar.focus_handle(cx).contains_focused(window, cx));
+    });
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_second"),
+        "focusing the sidebar selects the open workspace's row (the first with its folder)"
+    );
+
+    press(&menu::SelectNext, cx);
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_first"));
+    press(&menu::SelectNext, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_first"),
+        "stops at the bottom"
+    );
+    press(&menu::SelectPrevious, cx);
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_second"));
+    press(&menu::SelectPrevious, cx);
+    assert_eq!(selected(cx).as_deref(), Some("project prj_sandbox"));
+    press(&menu::SelectPrevious, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("project prj_sandbox"),
+        "stops at the top"
+    );
+
+    press(&menu::SelectParent, cx);
+    press(&menu::SelectNext, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("project prj_sandbox"),
+        "left collapsed the project, so there is nothing below it"
+    );
+    press(&menu::SelectChild, cx);
+    press(&menu::SelectChild, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_second"),
+        "right expands the project, then moves into it"
+    );
+    press(&menu::SelectLast, cx);
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_first"));
+    press(&menu::SelectParent, cx);
+    assert_eq!(selected(cx).as_deref(), Some("project prj_sandbox"));
+    press(&menu::Confirm, cx);
+    press(&menu::SelectNext, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("project prj_sandbox"),
+        "enter on a project collapses it"
+    );
+
+    press(&menu::Cancel, cx);
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        assert!(
+            !sidebar.focus_handle(cx).contains_focused(window, cx),
+            "escape hands focus back"
         );
     });
 }
