@@ -238,7 +238,12 @@ including its machine menu for a project on several daemons (`paseo_sidebar::New
 bound in Zed's default macOS keymap). A workspace created from the sidebar opens and then starts
 renaming, with the daemon's name (its worktree's) selected, so typing names it and escape keeps
 it. Verified 2026-11-15 in a dev build: cmd-n on a workspace row opened its project's picker,
-a local checkout was created and renamed by typing. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
+a local checkout was created and renamed by typing. Typing letters in the focused sidebar searches the workspaces'
+titles (letters in order, ignoring case; runs of letters, word starts and early matches rank
+higher) and selects the best match without hiding the others, scrolling to it. The typed
+letters show at the bottom of the sidebar, red when nothing matches; backspace takes one back,
+enter opens the selected workspace, escape ends the search, and up and down end it and move on
+from the found row. Verified 2026-11-15 in a dev build. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
 (cmd-alt-; by default) selects the open workspace's row. The Paseo panel has the key context
 `PaseoPanel`. Focusing it (`paseo_panel::ToggleFocus`, or switching to an agent tab) puts the
 cursor in the agent's message box, as activating a thread does in Zed's agent panel. Cmd-n

@@ -87,6 +87,8 @@ struct SelectableRow {
     parent: Option<SidebarEntry>,
     /// Its position among the scrolled list's children.
     index: usize,
+    /// What typing in the sidebar matches: a workspace's title.
+    search_text: Option<SharedString>,
 }
 
 /// The sidebar's list as flat rows (headers and workspaces side by side rather than nested), so
@@ -112,9 +114,52 @@ impl SidebarRows {
             entry,
             parent,
             index: self.elements.len(),
+            search_text: None,
         });
         self.elements.push(element);
     }
+
+    fn push_workspace(
+        &mut self,
+        entry: SidebarEntry,
+        parent: SidebarEntry,
+        title: SharedString,
+        element: AnyElement,
+    ) {
+        self.push_selectable(entry, Some(parent), element);
+        if let Some(row) = self.selectable.last_mut() {
+            row.search_text = Some(title);
+        }
+    }
+}
+
+/// How well `query` matches `text` as a type-ahead search: its characters in order, ignoring
+/// case. Higher is better; `None` when it does not match. Runs of consecutive characters, word
+/// starts and an early first match score higher.
+fn type_ahead_score(query: &str, text: &str) -> Option<i64> {
+    let query: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    let text: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    if query.is_empty() {
+        return None;
+    }
+    let mut score = 0;
+    let mut position = 0;
+    let mut previous_match: Option<usize> = None;
+    for wanted in query {
+        let found = (position..text.len()).find(|&index| text[index] == wanted)?;
+        let at_word_start = found == 0 || !text[found - 1].is_alphanumeric();
+        score += match previous_match {
+            Some(previous) if previous + 1 == found => 8,
+            _ if at_word_start => 6,
+            _ => 1,
+        };
+        if previous_match.is_none() {
+            score -= found.min(20) as i64;
+        }
+        previous_match = Some(found);
+        position = found + 1;
+    }
+    Some(score)
 }
 
 /// A project as the sidebar lists it when grouping by project. A repository on several daemons
@@ -203,6 +248,8 @@ pub struct PaseoSidebar {
     shows_selection: bool,
     /// The rows the keyboard can select, in order, as last rendered.
     selectable_rows: Vec<SelectableRow>,
+    /// Letters typed in the focused sidebar, which select the best-matching workspace.
+    type_ahead: Option<String>,
     /// The machine menus of projects on several daemons, so the keyboard can open them too.
     new_workspace_menus: std::cell::RefCell<HashMap<DaemonItemKey, PopoverMenuHandle<ContextMenu>>>,
     rename_editor: Entity<Editor>,
@@ -259,6 +306,7 @@ impl PaseoSidebar {
             selected_entry: None,
             shows_selection: false,
             selectable_rows: Vec::new(),
+            type_ahead: None,
             new_workspace_menus: Default::default(),
             rename_editor,
             renaming: None,
@@ -332,6 +380,7 @@ impl PaseoSidebar {
     }
 
     fn select_next(&mut self, _: &menu::SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.type_ahead = None;
         let next = match self.selected_position() {
             Some(position) => position + 1,
             None => 0,
@@ -347,6 +396,7 @@ impl PaseoSidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.type_ahead = None;
         let previous = match self.selected_position() {
             Some(position) => position.saturating_sub(1),
             None => self.selectable_rows.len().saturating_sub(1),
@@ -360,15 +410,18 @@ impl PaseoSidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.type_ahead = None;
         self.select_position(0, cx);
     }
 
     fn select_last(&mut self, _: &menu::SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
+        self.type_ahead = None;
         self.select_position(self.selectable_rows.len().saturating_sub(1), cx);
     }
 
     /// Opens the selected workspace, or collapses or expands the selected header.
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.type_ahead = None;
         match self.selected_entry.clone() {
             Some(SidebarEntry::Workspace(key)) => {
                 let store = self
@@ -392,6 +445,7 @@ impl PaseoSidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.type_ahead = None;
         let Some(position) = self.selected_position() else {
             return;
         };
@@ -419,6 +473,7 @@ impl PaseoSidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.type_ahead = None;
         let Some(position) = self.selected_position() else {
             return;
         };
@@ -518,8 +573,109 @@ impl PaseoSidebar {
         );
     }
 
+    /// Typing in the focused sidebar searches the workspaces' titles and selects the best match,
+    /// without hiding the others; backspace takes a letter back.
+    fn type_ahead_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Only the list itself: not the rename editor or an open menu.
+        if !self.focus_handle.is_focused(window) || self.renaming.is_some() {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        let modifiers = &keystroke.modifiers;
+        if modifiers.control || modifiers.platform || modifiers.function || modifiers.alt {
+            return;
+        }
+        let mut query = self.type_ahead.clone().unwrap_or_default();
+        if keystroke.key == "backspace" {
+            if self.type_ahead.is_none() {
+                return;
+            }
+            query.pop();
+        } else {
+            let Some(typed) = keystroke.key_char.as_deref() else {
+                return;
+            };
+            if typed.chars().any(char::is_control) || (typed == " " && query.is_empty()) {
+                return;
+            }
+            query.push_str(typed);
+        }
+        cx.stop_propagation();
+        if query.is_empty() {
+            self.type_ahead = None;
+            cx.notify();
+            return;
+        }
+        let best = self
+            .selectable_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(position, row)| {
+                let score = type_ahead_score(&query, row.search_text.as_deref()?)?;
+                Some((score, position))
+            })
+            // The best score, and of equals the one listed first.
+            .max_by_key(|(score, position)| (*score, std::cmp::Reverse(*position)));
+        self.type_ahead = Some(query);
+        if let Some((_, position)) = best {
+            self.select_position(position, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_type_ahead(&self, cx: &App) -> Option<AnyElement> {
+        let query = self.type_ahead.as_ref()?;
+        let matches = self.selectable_rows.iter().any(|row| {
+            row.search_text
+                .as_deref()
+                .is_some_and(|text| type_ahead_score(query, text).is_some())
+        });
+        let colors = cx.theme().colors();
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_1p5()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(colors.border)
+                .bg(colors.panel_background)
+                .child(
+                    Icon::new(IconName::MagnifyingGlass)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new(query.clone())
+                        .size(LabelSize::Small)
+                        .color(if matches {
+                            Color::Default
+                        } else {
+                            Color::Error
+                        }),
+                )
+                .child(div().flex_1())
+                .child(
+                    Label::new(if matches { "Enter to open" } else { "No match" })
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Hands focus back to where it was before the sidebar took it.
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape first ends a search, like it closes a menu.
+        if self.type_ahead.take().is_some() {
+            cx.notify();
+            return;
+        }
         window.dispatch_action(Box::new(FocusWorkspaceSidebar), cx);
     }
 
@@ -1475,8 +1631,9 @@ impl PaseoSidebar {
                 };
                 let workspace =
                     SidebarEntry::Workspace(DaemonItemKey::new(&store, &entry.workspace.id));
+                let title: SharedString = entry.workspace.name.clone().into();
                 let row = self.render_workspace(&store, entry, is_active, Some(origin), cx);
-                rows_out.push_selectable(workspace, Some(section.clone()), row);
+                rows_out.push_workspace(workspace, section.clone(), title, row);
             }
         }
     }
@@ -1644,10 +1801,12 @@ impl PaseoSidebar {
             });
             let workspace_entry =
                 SidebarEntry::Workspace(DaemonItemKey::new(&store, &workspace.workspace.id));
+            let title: SharedString = workspace.workspace.name.clone().into();
             let row = self.render_workspace(&store, workspace, is_active, origin, cx);
-            rows_out.push_selectable(
+            rows_out.push_workspace(
                 workspace_entry,
-                Some(entry.clone()),
+                entry.clone(),
+                title,
                 div()
                     .w_full()
                     .when(!is_connected, |this| this.opacity(0.6))
@@ -2328,6 +2487,7 @@ impl Render for PaseoSidebar {
             }
         }
         self.selectable_rows = rows.selectable;
+        let type_ahead = self.render_type_ahead(cx);
         let mut key_context = gpui::KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("PaseoSidebar");
         // Gives the sidebar the list keys: up and down, enter, escape (bound globally to `menu`
@@ -2347,6 +2507,7 @@ impl Render for PaseoSidebar {
             .on_action(cx.listener(Self::select_child))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::new_workspace_for_selection))
+            .on_key_down(cx.listener(Self::type_ahead_key))
             .font(ui_font)
             .map(|this| match window.window_decorations() {
                 Decorations::Server => this.h_full().w(self.width),
@@ -2396,6 +2557,7 @@ impl Render for PaseoSidebar {
                     .track_scroll(&self.scroll_handle)
                     .children(rows.elements),
             )
+            .children(type_ahead)
     }
 }
 
@@ -2467,6 +2629,33 @@ mod tests {
                 ("monorepo".to_string(), vec!["mini/prj_2".to_string()]),
                 ("monorepo".to_string(), vec!["devbox/prj_9".to_string()]),
             ]
+        );
+    }
+
+    #[test]
+    fn type_ahead_prefers_runs_and_word_starts() {
+        assert_eq!(type_ahead_score("xyz", "Dark mode"), None);
+        assert_eq!(type_ahead_score("", "Dark mode"), None);
+        assert!(
+            type_ahead_score("dm", "Dark mode").is_some(),
+            "letters in order"
+        );
+        assert!(
+            type_ahead_score("dark", "Dark mode") > type_ahead_score("dark", "Did a rename kit"),
+            "consecutive letters beat scattered ones"
+        );
+        assert!(
+            type_ahead_score("mo", "Dark mode") > type_ahead_score("mo", "Promotion"),
+            "a word start beats the middle of a word"
+        );
+        assert!(
+            type_ahead_score("say", "Say hello") > type_ahead_score("say", "Essay draft"),
+            "an early match beats a later one"
+        );
+        assert_eq!(
+            type_ahead_score("SAY", "say hello"),
+            type_ahead_score("say", "Say hello"),
+            "case does not matter"
         );
     }
 

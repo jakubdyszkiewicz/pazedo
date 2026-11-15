@@ -489,6 +489,69 @@ async fn test_keyboard_navigation_in_the_sidebar(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+async fn test_typing_in_the_sidebar_selects_a_matching_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let zed_project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(zed_project, window, cx));
+    let (sidebar, store) = sidebar_with_directory(&multi_workspace, cx);
+    store.update(cx, |store, _| {
+        let titled = |id: &str, title: &str, created_at: &str| {
+            let mut value = workspace(id, "prj_sandbox", path!("/sandbox"), created_at);
+            value.name = title.to_string();
+            value
+        };
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_sandbox", "sandbox", path!("/sandbox"))],
+            vec![
+                titled("wks_dark", "Dark mode", "2026-11-14T09:00:00Z"),
+                titled("wks_hello", "Say hello", "2026-11-14T10:00:00Z"),
+                titled("wks_docs", "Docs pass", "2026-11-14T11:00:00Z"),
+            ],
+            Vec::new(),
+        )));
+    });
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.register_sidebar(sidebar.clone(), cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.dispatch_action(Box::new(workspace::FocusWorkspaceSidebar), cx));
+    cx.run_until_parked();
+    let selected =
+        |cx: &mut VisualTestContext| sidebar.read_with(cx, |sidebar, _| sidebar.selected_row());
+
+    cx.simulate_keystrokes("d");
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_docs"),
+        "of equal matches, the one listed first (newest)"
+    );
+    cx.simulate_keystrokes("a");
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_dark"));
+    cx.simulate_keystrokes("backspace backspace s a y");
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_hello"));
+    cx.simulate_keystrokes("x");
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_hello"),
+        "without a match the selection stays"
+    );
+    // Tests have no keymap: escape and down are the actions they are bound to.
+    cx.update(|window, cx| window.dispatch_action(Box::new(menu::Cancel), cx));
+    cx.update(|window, cx| window.dispatch_action(Box::new(menu::SelectNext), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_dark"),
+        "escape ends the search; down moves on from the found workspace"
+    );
+}
+
 fn sidebar_with_directory(
     multi_workspace: &Entity<MultiWorkspace>,
     cx: &mut VisualTestContext,
