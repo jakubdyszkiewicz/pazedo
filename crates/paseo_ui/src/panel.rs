@@ -59,6 +59,8 @@ pub struct PaseoPanel {
     syncing: bool,
     /// The tab bar's New Agent or Terminal menu.
     new_menu: PopoverMenuHandle<ContextMenu>,
+    /// The New Agent menu shown instead of tabs (and the tab bar) while the panel has none.
+    empty_new_agent_menu: PopoverMenuHandle<ContextMenu>,
     _store_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -169,6 +171,7 @@ impl PaseoPanel {
             known_items: HashSet::default(),
             syncing: false,
             new_menu,
+            empty_new_agent_menu: PopoverMenuHandle::default(),
             _store_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
@@ -585,7 +588,7 @@ impl PaseoPanel {
                 .child(new_item_menu(
                     "paseo-panel-empty-new-agent",
                     panel,
-                    PopoverMenuHandle::default(),
+                    self.empty_new_agent_menu.clone(),
                     false,
                     Button::new("paseo-panel-empty-new-agent-button", "New Agent")
                         .full_width()
@@ -856,8 +859,13 @@ impl Render for PaseoPanel {
         container
             .key_context("PaseoPanel")
             .on_action(cx.listener(|this, _: &NewAgentOrTerminal, window, cx| {
+                // Without tabs there is no tab bar, and its menu is not on screen.
+                let menu = if this.pane.read(cx).items_len() == 0 {
+                    this.empty_new_agent_menu.clone()
+                } else {
+                    this.new_menu.clone()
+                };
                 // The menu reads the panel, which is being updated here.
-                let menu = this.new_menu.clone();
                 window.defer(cx, move |window, cx| menu.toggle(window, cx));
             }))
             .size_full()

@@ -243,7 +243,8 @@ a local checkout was created and renamed by typing. Focusing the sidebar with `m
 `PaseoPanel`. Focusing it (`paseo_panel::ToggleFocus`, or switching to an agent tab) puts the
 cursor in the agent's message box, as activating a thread does in Zed's agent panel. Cmd-n
 anywhere in the panel, including an agent's message box and a terminal, opens its New Agent or
-Terminal menu (`paseo_panel::NewAgentOrTerminal`, bound in Zed's default macOS keymap); outside
+Terminal menu (`paseo_panel::NewAgentOrTerminal`, bound in Zed's default macOS keymap), or the
+New Agent menu of an empty panel, which has no tab bar; outside
 the panel cmd-n still makes a new file. Verified 2026-11-15 in a dev build: cmd-n from an agent's
 message box opened the menu, and escape returned to the message box. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
 down, enter, escape) and in the `menu` context (left, right).
