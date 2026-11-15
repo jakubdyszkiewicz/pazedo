@@ -216,6 +216,15 @@ of several daemons first asks which machine the workspace goes on. Verified 2026
 scratch clone of webapp (only its remote URL) on the test daemon, merged with the dev box's
 webapp, and a new workspace created through the machine menu on the test daemon.
 
+### Panel position
+
+The Paseo panel's dock menu (right-click its status bar icon: Dock Left, Right or Bottom) writes
+`"paseo": { "dock": "right" }` to settings.json, and the panel docks there from then on, also
+after a restart. Zed's dock only moves a panel when the settings change, which is why Zed's own
+panels keep their position in settings too; until 2026-11-15 the Paseo panel kept it in memory,
+and the menu did nothing. Verified 2026-11-15 in a dev build: Dock Right moved the panel and its
+icon to the right and wrote the setting, and a restart kept it there.
+
 ### Keyboard
 
 The sidebar has the key contexts `PaseoSidebar` and `menu`, so Zed's list keys work in it once

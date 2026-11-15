@@ -902,6 +902,7 @@ fn test_the_daemon_settings_connect_and_reconnect(cx: &mut TestAppContext) {
             endpoint: Some("127.0.0.1:1".into()),
             name: None,
             ssh: None,
+            dock: None,
             daemons: Some(vec![settings::PaseoDaemonContent {
                 name: Some("dev box".into()),
                 endpoint: Some("127.0.0.1:2".into()),
@@ -999,6 +1000,7 @@ async fn test_the_ssh_setting_puts_the_daemon_on_a_remote_host(cx: &mut TestAppC
                     endpoint: Some("127.0.0.1:1".into()),
                     name: None,
                     ssh: None,
+                    dock: None,
                     daemons: Some(vec![
                         settings::PaseoDaemonContent {
                             name: None,
@@ -1093,6 +1095,7 @@ fn renaming_a_daemon_writes_its_settings_entry() {
         endpoint: Some("100.64.0.1:6767".into()),
         name: None,
         ssh: None,
+        dock: None,
         daemons: Some(vec![settings::PaseoDaemonContent {
             name: None,
             endpoint: Some("100.64.0.2:6767".into()),

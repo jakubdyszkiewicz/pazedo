@@ -28,7 +28,6 @@ done; record decisions where the code or docs that implement them live.
 ## Paseo panel
 
 - One pane only: no splits inside the panel yet (Zed's terminal panel has them).
-- The panel's dock position is not persisted; moving it to the right lasts until restart.
 - The panel's tab bar scrolls when a workspace has many agents; there is no overview of them.
 - Rename terminals from the panel.
 

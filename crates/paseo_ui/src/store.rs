@@ -59,6 +59,8 @@ impl DaemonConfig {
 #[derive(Clone, Debug, Default, PartialEq, RegisterSetting)]
 pub struct PaseoSettings {
     pub daemons: Vec<DaemonConfig>,
+    /// Where the Paseo panel docks; left when unset.
+    pub dock: Option<settings::DockPosition>,
 }
 
 impl Settings for PaseoSettings {
@@ -83,6 +85,7 @@ impl Settings for PaseoSettings {
                 .chain(listed)
                 .filter(|daemon| daemon.endpoint.is_some())
                 .collect(),
+            dock: paseo.dock,
         }
     }
 }

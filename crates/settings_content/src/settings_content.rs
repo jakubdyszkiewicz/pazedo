@@ -1235,6 +1235,10 @@ pub struct PaseoSettingsContent {
     ///
     /// Default: null
     pub daemons: Option<Vec<PaseoDaemonContent>>,
+    /// Where the Paseo panel docks: `left`, `right` or `bottom`. The panel's dock menu writes it.
+    ///
+    /// Default: left
+    pub dock: Option<DockPosition>,
 }
 
 /// pazedo: one Paseo daemon in `paseo.daemons`.

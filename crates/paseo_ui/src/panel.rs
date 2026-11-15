@@ -17,6 +17,7 @@ use workspace::{
     pane,
 };
 
+use crate::store::PaseoSettings;
 use crate::{
     PaseoAgentItem, PaseoDaemons, PaseoStore, PaseoTerminalItem,
     agent_session::{NewAgent, PROVIDER_ENV_VAR},
@@ -54,7 +55,6 @@ pub struct PaseoPanel {
     known_items: HashSet<String>,
     /// Set while the panel adds and removes tabs itself, which must not close the dock.
     syncing: bool,
-    position: DockPosition,
     _store_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -164,7 +164,6 @@ impl PaseoPanel {
             paseo_workspace_id: None,
             known_items: HashSet::default(),
             syncing: false,
-            position: DockPosition::Left,
             _store_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
@@ -774,22 +773,28 @@ impl Panel for PaseoPanel {
         "paseo_panel"
     }
 
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        PaseoSettings::get_global(cx)
+            .dock
+            .map(DockPosition::from)
+            .unwrap_or(DockPosition::Left)
     }
 
     fn position_is_valid(&self, _position: DockPosition) -> bool {
         true
     }
 
+    /// The dock moves panels when the settings change, so the position lives in settings.json,
+    /// as Zed's own panels keep theirs.
     fn set_position(
         &mut self,
         position: DockPosition,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.position = position;
-        cx.notify();
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |content, _| {
+            content.paseo.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn default_size(&self, _window: &Window, cx: &App) -> Pixels {
