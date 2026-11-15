@@ -1,6 +1,7 @@
 use agent_settings::{AgentSettings, THREADS_LIST_MAX_WIDTH, THREADS_LIST_MIN_WIDTH};
 use chrono::{DateTime, Utc};
 use collections::HashSet;
+use editor::Editor;
 use gpui::{
     App, Context, Decorations, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
     Pixels, Render, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window, px,
@@ -13,8 +14,8 @@ use settings::Settings as _;
 use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, Indicator, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind,
-    prelude::*, utils::platform_title_bar_height,
+    AgentThreadStatus, ContextMenu, Indicator, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip,
+    WorktreeKind, prelude::*, right_click_menu, utils::platform_title_bar_height,
 };
 use util::path_list::PathList;
 use workspace::{
@@ -40,6 +41,9 @@ pub struct PaseoSidebar {
     /// Several Paseo workspaces can share a directory; this remembers which one was clicked so
     /// only it is highlighted.
     selected_workspace: Option<String>,
+    rename_editor: Entity<Editor>,
+    /// The workspace whose name is being edited in place.
+    renaming_workspace: Option<String>,
     scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -47,11 +51,21 @@ pub struct PaseoSidebar {
 impl PaseoSidebar {
     pub fn new(
         multi_workspace: Entity<MultiWorkspace>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let store = PaseoStore::global(cx);
+        let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
         let subscriptions = vec![
+            cx.subscribe_in(
+                &rename_editor,
+                window,
+                |this, _, event: &editor::EditorEvent, window, cx| {
+                    if let editor::EditorEvent::Blurred = event {
+                        this.finish_rename(true, window, cx);
+                    }
+                },
+            ),
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&multi_workspace, |_, _, event: &MultiWorkspaceEvent, cx| {
                 if let MultiWorkspaceEvent::ActiveWorkspaceChanged { .. } = event {
@@ -67,6 +81,8 @@ impl PaseoSidebar {
             collapsed_projects: HashSet::default(),
             hovered_workspace: None,
             selected_workspace: None,
+            rename_editor,
+            renaming_workspace: None,
             scroll_handle: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
@@ -313,6 +329,85 @@ impl PaseoSidebar {
         );
     }
 
+    fn start_rename(&mut self, workspace_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .store
+            .read(cx)
+            .workspace(workspace_id)
+            .map(|workspace| workspace.name.clone())
+        else {
+            return;
+        };
+        if self.renaming_workspace.is_some() {
+            self.finish_rename(true, window, cx);
+        }
+        self.renaming_workspace = Some(workspace_id.to_string());
+        self.rename_editor.update(cx, |editor, cx| {
+            editor.set_text(name, window, cx);
+            editor.select_all(&editor::actions::SelectAll, window, cx);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Ends renaming in place, saving the edited name unless `save` is false. Like Paseo, an
+    /// empty or unchanged name leaves the workspace as it was.
+    fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.renaming_workspace.take() else {
+            return;
+        };
+        cx.notify();
+        if self.rename_editor.focus_handle(cx).is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
+        if !save {
+            return;
+        }
+        let title = self.rename_editor.read(cx).text(cx).trim().to_string();
+        let unchanged = self
+            .store
+            .read(cx)
+            .workspace(&workspace_id)
+            .is_none_or(|workspace| workspace.name == title);
+        if title.is_empty() || unchanged {
+            return;
+        }
+        self.store
+            .update(cx, |store, cx| {
+                store.set_workspace_title(workspace_id, Some(title), cx)
+            })
+            .detach_and_prompt_err(
+                "Could not rename the workspace",
+                window,
+                cx,
+                |error, _, _| Some(format!("{error:#}")),
+            );
+    }
+
+    fn render_rename_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .h_full()
+            .min_w_0()
+            .flex_1()
+            .capture_action(
+                cx.listener(|this, _: &editor::actions::Newline, window, cx| {
+                    this.finish_rename(true, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                this.finish_rename(true, window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &editor::actions::Cancel, window, cx| {
+                    this.finish_rename(false, window, cx);
+                }),
+            )
+            // Clicks while editing place the cursor rather than open the workspace.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(self.rename_editor.clone())
+            .into_any_element()
+    }
+
     /// Asks for a folder and adds it to Paseo as a project.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -510,6 +605,7 @@ impl PaseoSidebar {
         let workspace = &entry.workspace;
         let workspace_id = workspace.id.clone();
         let is_hovered = self.hovered_workspace.as_deref() == Some(workspace.id.as_str());
+        let is_renaming = self.renaming_workspace.as_deref() == Some(workspace.id.as_str());
 
         let (status, notified) = match workspace.status {
             WorkspaceStatus::Running => (AgentThreadStatus::Running, false),
@@ -564,11 +660,9 @@ impl PaseoSidebar {
             workspace.name.clone(),
         )
         .base_bg(cx.theme().colors().panel_background)
-        .icon(if is_worktree {
-            IconName::GitWorktree
-        } else {
-            IconName::Folder
-        })
+        // Shown when no status icon replaces it: a workspace whose agents' work was seen.
+        .icon(IconName::Circle)
+        .icon_color(Color::Disabled)
         .status(status)
         .notified(notified)
         .worktrees(worktrees)
@@ -582,9 +676,30 @@ impl PaseoSidebar {
         )
         .selected(is_active)
         .hovered(is_hovered)
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.open_workspace(&workspace_id, window, cx);
+        .on_click(cx.listener({
+            let workspace_id = workspace_id.clone();
+            move |this, _, window, cx| {
+                this.open_workspace(&workspace_id, window, cx);
+            }
         }));
+        if is_renaming {
+            item = item
+                .is_truncated(false)
+                .title_slot(self.render_rename_editor(cx));
+        } else if is_hovered {
+            item = item.action_slot(
+                IconButton::new(
+                    SharedString::from(format!("paseo-rename-workspace-{}", workspace.id)),
+                    IconName::Pencil,
+                )
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Rename Workspace"))
+                .on_click(cx.listener({
+                    let workspace_id = workspace_id.clone();
+                    move |this, _, window, cx| this.start_rename(&workspace_id, window, cx)
+                })),
+            );
+        }
         if let Some(pull_request) = pull_request {
             item = item.project_name(pull_request);
         }
@@ -616,13 +731,32 @@ impl PaseoSidebar {
             },
         )
         .into();
+        let sidebar = cx.weak_entity();
+        let menu = right_click_menu(SharedString::from(format!(
+            "paseo-workspace-menu-{}",
+            workspace.id
+        )))
+        .trigger(move |_, _, _| item)
+        .menu(move |window, cx| {
+            let sidebar = sidebar.clone();
+            let workspace_id = workspace_id.clone();
+            ContextMenu::build(window, cx, move |menu, _, _| {
+                menu.entry("Rename Workspace", None, move |window, cx| {
+                    sidebar
+                        .update(cx, |sidebar, cx| {
+                            sidebar.start_rename(&workspace_id, window, cx)
+                        })
+                        .ok();
+                })
+            })
+        });
         div()
             .id(SharedString::from(format!(
                 "paseo-workspace-row-{}",
                 workspace.id
             )))
             .w_full()
-            .child(item)
+            .child(menu)
             .on_hover(cx.listener({
                 let workspace_id = workspace.id.clone();
                 move |this, is_hovered: &bool, _window, cx| {

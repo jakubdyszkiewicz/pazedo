@@ -1572,6 +1572,50 @@ impl Request for RefreshAgent {
     type Response = RefreshAgentResponse;
 }
 
+/// Marks an agent's finished turn or error as seen, which turns its workspace from `attention`
+/// to `done`. Paseo's apps send it when the user views the agent.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearAgentAttention {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearAgentAttentionResponse {
+    #[serde(default)]
+    pub agents: Vec<Agent>,
+}
+
+impl Request for ClearAgentAttention {
+    const TYPE: &'static str = "clear_agent_attention";
+    const RESPONSE_TYPE: &'static str = "clear_agent_attention_response";
+    type Response = ClearAgentAttentionResponse;
+}
+
+/// Sets a workspace's title; `None` reverts its name to the one derived from its branch or
+/// directory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkspaceTitle {
+    pub workspace_id: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWorkspaceTitleResponse {
+    pub accepted: bool,
+    pub title: Option<String>,
+    pub error: Option<String>,
+}
+
+impl Request for SetWorkspaceTitle {
+    const TYPE: &'static str = "workspace.title.set.request";
+    const RESPONSE_TYPE: &'static str = "workspace.title.set.response";
+    type Response = SetWorkspaceTitleResponse;
+}
+
 /// Creates a workspace: always a new one, never a lookup by directory.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

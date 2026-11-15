@@ -744,3 +744,51 @@ fn test_the_endpoint_setting_connects_and_reconnects(cx: &mut TestAppContext) {
     set_endpoint(None, cx);
     assert_eq!(status(&store, cx), "NotConfigured");
 }
+
+#[gpui::test]
+fn test_finished_and_failed_agents_are_unseen_until_cleared(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, _| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_sandbox", "sandbox", "/sandbox")],
+            vec![with_status(
+                workspace("wks", "prj_sandbox", "/sandbox", "2026-11-14T09:00:00Z"),
+                WorkspaceStatus::Attention,
+            )],
+            vec![
+                agent(
+                    "finished",
+                    "wks",
+                    "idle",
+                    json!({
+                        "requiresAttention": true,
+                        "attentionReason": "finished",
+                        "attentionTimestamp": "2026-11-14T10:00:00Z",
+                    }),
+                ),
+                agent(
+                    "failed",
+                    "wks",
+                    "error",
+                    json!({"requiresAttention": true, "attentionReason": "error"}),
+                ),
+                agent(
+                    "asking",
+                    "wks",
+                    "idle",
+                    json!({"requiresAttention": true, "attentionReason": "permission"}),
+                ),
+                agent("seen", "wks", "idle", json!({})),
+            ],
+        )));
+        assert!(store.has_unseen_attention("finished"));
+        assert!(store.has_unseen_attention("failed"));
+        assert!(
+            !store.has_unseen_attention("asking"),
+            "a permission request stays until it is answered"
+        );
+        assert!(!store.has_unseen_attention("seen"));
+        assert!(!store.has_unseen_attention("unknown"));
+    });
+}

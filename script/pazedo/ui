@@ -5,6 +5,7 @@
 #   script/pazedo/ui key <key code> [modifiers]   # e.g. `ui key 53` (Escape), `ui key 36` (Return)
 #   script/pazedo/ui type <text>                  # types text into the focused field
 #   script/pazedo/ui click <x> <y>                # in screenshot coordinates (1600 px wide)
+#   script/pazedo/ui right-click <x> <y>          # e.g. to open a context menu
 #   script/pazedo/ui move <x> <y>                 # hover only, e.g. to reveal a row's buttons
 #   script/pazedo/ui scroll <x> <y> <lines>       # negative lines scroll down
 #   script/pazedo/ui frame                        # window position and size in points
@@ -42,7 +43,7 @@ case "${1:-}" in
   type)
     osascript -e "tell application \"System Events\" to keystroke \"$2\""
     ;;
-  click|move|scroll)
+  click|right-click|move|scroll)
     # Screenshots are scaled to 1600 px wide; convert to screen points within the window.
     IFS=, read -r left top width height <<FRAME
 $(frame)
@@ -55,13 +56,16 @@ FRAME
     elif [ "$1" = move ]; then
       swift "$(dirname -- "$0")/click.swift" --move "$x" "$y"
       echo "moved to $x,$y"
+    elif [ "$1" = right-click ]; then
+      swift "$(dirname -- "$0")/click.swift" --right "$x" "$y"
+      echo "right-clicked at $x,$y"
     else
       swift "$(dirname -- "$0")/click.swift" "$x" "$y"
       echo "clicked at $x,$y"
     fi
     ;;
   *)
-    echo "usage: $0 frame | key <code> [modifiers] | type <text> | click|move <x> <y>" >&2
+    echo "usage: $0 frame | key <code> [modifiers] | type <text> | click|right-click|move <x> <y>" >&2
     exit 2
     ;;
 esac

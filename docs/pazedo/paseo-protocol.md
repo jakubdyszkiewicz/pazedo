@@ -84,6 +84,17 @@ Workspace `status` is a bucket the daemon derives from its agents: pending permi
 `needs_input`, unread error → `failed`, running → `running`, `requiresAttention` →
 `attention`, otherwise `done`.
 
+Read and unread (verified 2026-11-15, test daemon): `attention` is Paseo's unread and `done`
+its read. Paseo's app clears an agent's attention when the agent's screen gains focus while
+the app is visible, unless the reason is `permission` (that lasts until answered), with
+`clear_agent_attention {agentId: string | string[], requestId?}` →
+`clear_agent_attention_response {requestId, agentId, agents}` (the updated snapshots). The
+workspace turns `done` once none of its agents needs attention. pazedo clears an agent when its
+tab renders in the active window (`PaseoAgentItem::render`), and opening a workspace from the
+sidebar shows the agent that most recently finished unseen. Not used yet:
+`workspace.clear_attention.request {workspaceId}` (Paseo's "Mark as read") and
+`workspace.mark_unread.request {workspaceId}`.
+
 ## Agent timeline
 
 - `fetch_agent_timeline_request {agentId, direction: tail|before|after, cursor?: {epoch, seq},
@@ -209,6 +220,11 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   `agent` / `firstAgentContext` starts an agent too (Paseo's app does; pazedo does not yet).
 - `branch_suggestions_request {cwd, query?, limit?}` lists branches, most recently committed
   first: `{branches, branchDetails?, error}`.
+- `workspace.title.set.request {workspaceId, title}` renames a workspace; `null` or `""`
+  reverts to the derived name: `workspace.title.set.response {requestId, workspaceId,
+  accepted, title, error}`. Afterwards the workspace's `name` is the title and `title` mirrors
+  it (verified 2026-11-15). pazedo renames inline from the sidebar (the row's pencil or its
+  right-click menu); like Paseo's app, an empty name changes nothing.
 - Agents whose provider session ended (status `closed`, e.g. after a daemon restart) are
   resumed by the daemon when a client opens them (they turned `idle` as soon as pazedo
   subscribed to their timeline). `refresh_agent_request {agentId}` resumes one explicitly; it

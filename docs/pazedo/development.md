@@ -148,6 +148,7 @@ script/pazedo/ui click 120 95      # coordinates as seen in a script/pazedo/scre
 script/pazedo/ui key 53            # a macOS key code (53 is Escape, 36 is Return)
 script/pazedo/ui type "some text"  # types into the focused field
 script/pazedo/ui move 200 92       # hover only, e.g. to reveal a row's + button
+script/pazedo/ui right-click 100 488  # move there first: a context menu opens only on a hovered row
 script/pazedo/ui scroll 200 600 -5 # scroll lines at a point; negative scrolls down
 script/pazedo/ui frame             # window position and size in points
 ```

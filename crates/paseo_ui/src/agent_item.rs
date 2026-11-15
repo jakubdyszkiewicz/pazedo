@@ -36,6 +36,7 @@ pub struct PaseoAgentItem {
     /// While a closed agent is being reloaded.
     reloading: Option<Task<()>>,
     _conversation_subscription: Option<Subscription>,
+    _store_subscription: Subscription,
 }
 
 impl PaseoAgentItem {
@@ -84,6 +85,17 @@ impl PaseoAgentItem {
         work_dirs: PathList,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Rendering marks the agent as seen; this re-renders a shown tab when its agent
+        // finishes, so that it does not show up as unread while the user is looking at it.
+        let store = PaseoStore::global(cx);
+        let store_subscription = cx.observe(&store, |this, store, cx| {
+            if this
+                .agent_id(cx)
+                .is_some_and(|agent_id| store.read(cx).has_unseen_attention(&agent_id))
+            {
+                cx.notify();
+            }
+        });
         Self {
             agent_id,
             new_agent,
@@ -96,6 +108,7 @@ impl PaseoAgentItem {
             detached: Cell::new(false),
             reloading: None,
             _conversation_subscription: None,
+            _store_subscription: store_subscription,
         }
     }
 
@@ -355,6 +368,18 @@ impl Render for PaseoAgentItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_conversation_view(window, cx);
         let agent_id = self.agent_id(cx);
+        // Only the active tab of a shown panel renders, so this is the user seeing the agent.
+        if window.is_window_active()
+            && let Some(agent_id) = agent_id.clone()
+            && PaseoStore::global(cx)
+                .read(cx)
+                .has_unseen_attention(&agent_id)
+        {
+            cx.defer(move |cx| {
+                PaseoStore::global(cx)
+                    .update(cx, |store, cx| store.clear_agent_attention(&agent_id, cx));
+            });
+        }
         let truncated = agent_id
             .as_ref()
             .is_some_and(|agent_id| PaseoConnection::global(cx).history_truncated(agent_id));

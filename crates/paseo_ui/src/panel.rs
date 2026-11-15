@@ -469,9 +469,10 @@ impl PaseoPanel {
         });
     }
 
-    /// Opens the Paseo panel of a workspace just opened from the sidebar. A new Zed workspace
-    /// adds its panels asynchronously, so this waits for the panel (or gives up after
-    /// [`PANEL_WAIT`]).
+    /// Opens the Paseo panel of a workspace just opened from the sidebar, on the tab of the
+    /// agent that most recently finished unseen, if any, so opening an unread workspace shows
+    /// what is new. A new Zed workspace adds its panels asynchronously, so this waits for the
+    /// panel (or gives up after [`PANEL_WAIT`]).
     pub(crate) async fn reveal_when_ready(
         workspace: &Entity<Workspace>,
         cx: &mut AsyncWindowContext,
@@ -483,6 +484,9 @@ impl PaseoPanel {
             if has_panel {
                 return workspace.update_in(cx, |workspace, window, cx| {
                     workspace.reveal_panel::<Self>(window, cx);
+                    if let Some(item) = Self::newest_unseen_agent(workspace, cx) {
+                        Self::show_item(workspace, Box::new(item), window, cx);
+                    }
                 });
             }
             cx.background_executor()
@@ -490,6 +494,19 @@ impl PaseoPanel {
                 .await;
         }
         Ok(())
+    }
+
+    fn newest_unseen_agent(workspace: &Workspace, cx: &App) -> Option<Entity<PaseoAgentItem>> {
+        let panel = workspace.panel::<Self>(cx)?;
+        let panel = panel.read(cx);
+        let paseo_workspace_id = panel.paseo_workspace_id.as_deref()?;
+        let store = panel.store.read(cx);
+        let agent = store
+            .workspace_agents(paseo_workspace_id)
+            .into_iter()
+            .filter(|agent| store.has_unseen_attention(&agent.id))
+            .max_by(|a, b| a.attention_timestamp.cmp(&b.attention_timestamp))?;
+        PaseoAgentItem::find(workspace, &agent.id, cx)
     }
 
     #[cfg(any(test, feature = "test-support"))]

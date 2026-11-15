@@ -9,11 +9,12 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
-        AgentUpdate, BranchSuggestions, CloseItems, CreateTerminal, CreateWorkspace, FetchAgents,
-        FetchWorkspaces, GetProvidersSnapshot, ListProjects, Page, ProjectSummary, ProjectUpdate,
-        ProviderEntry, RefreshAgent, ServerInfo, ServerMessage, SetSessionEventSubscription,
-        Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged,
-        Workspace, WorkspaceSource, WorkspaceUpdate,
+        AgentUpdate, AttentionReason, BranchSuggestions, ClearAgentAttention, CloseItems,
+        CreateTerminal, CreateWorkspace, FetchAgents, FetchWorkspaces, GetProvidersSnapshot,
+        ListProjects, Page, ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, ServerInfo,
+        ServerMessage, SetSessionEventSubscription, SetWorkspaceTitle, Subscribe,
+        SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged, Workspace,
+        WorkspaceSource, WorkspaceUpdate,
     },
 };
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
@@ -115,6 +116,9 @@ pub struct PaseoStore {
     /// Agents and terminals closed from pazedo, until the daemon's update removes them; their
     /// tabs must not come back in the meantime.
     closing: HashSet<String>,
+    /// Agents whose attention pazedo cleared, with the attention timestamp it cleared, so that
+    /// re-rendering a viewed agent before the daemon's update arrives does not clear it again.
+    cleared_attention: HashMap<String, Option<String>>,
     _settings_subscription: Option<Subscription>,
     _tasks: Vec<Task<()>>,
 }
@@ -218,6 +222,7 @@ impl PaseoStore {
             terminal_tasks: HashMap::default(),
             selected_workspaces: HashMap::default(),
             closing: HashSet::default(),
+            cleared_attention: HashMap::default(),
             _settings_subscription: None,
             _tasks: Vec::new(),
         };
@@ -251,6 +256,7 @@ impl PaseoStore {
         self.terminal_tasks.clear();
         self.selected_workspaces.clear();
         self.closing.clear();
+        self.cleared_attention.clear();
         cx.notify();
 
         let Some(endpoint) = endpoint else {
@@ -481,6 +487,95 @@ impl PaseoStore {
         };
         cx.background_spawn(async move {
             client.request(&RefreshAgent { agent_id }).await?;
+            Ok(())
+        })
+    }
+
+    /// Whether the agent finished or failed since the user last saw it. A pending permission
+    /// is not cleared by looking at the agent, as in Paseo's apps: it lasts until answered.
+    pub fn has_unseen_attention(&self, agent_id: &str) -> bool {
+        self.agents.get(agent_id).is_some_and(|agent| {
+            agent.requires_attention
+                && agent.attention_reason != Some(AttentionReason::Permission)
+                && self.cleared_attention.get(agent_id) != Some(&agent.attention_timestamp)
+        })
+    }
+
+    /// Marks what the agent did as seen, which makes its workspace read (`done`) once no other
+    /// agent there needs attention.
+    pub fn clear_agent_attention(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        if !self.has_unseen_attention(agent_id) {
+            return;
+        }
+        let Some(client) = self.client.clone().filter(Client::is_connected) else {
+            return;
+        };
+        let attention_timestamp = self
+            .agents
+            .get(agent_id)
+            .and_then(|agent| agent.attention_timestamp.clone());
+        self.cleared_attention
+            .insert(agent_id.to_string(), attention_timestamp);
+        let agent_id = agent_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = client
+                .request(&ClearAgentAttention {
+                    agent_id: agent_id.clone(),
+                })
+                .await;
+            this.update(cx, |this, cx| match result {
+                Ok(response) => {
+                    for agent in response.agents {
+                        this.agents.insert(agent.id.clone(), agent);
+                    }
+                    cx.notify();
+                }
+                Err(error) => {
+                    log::error!("failed to mark Paseo agent {agent_id} as seen: {error:#}");
+                    this.cleared_attention.remove(&agent_id);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Renames a workspace; `None` or an empty title reverts to the name Paseo derives from its
+    /// branch or directory.
+    pub fn set_workspace_title(
+        &mut self,
+        workspace_id: String,
+        title: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.spawn(async move |this, cx| {
+            let response = client
+                .request(&SetWorkspaceTitle {
+                    workspace_id: workspace_id.clone(),
+                    title,
+                })
+                .await?;
+            if !response.accepted {
+                anyhow::bail!(
+                    "Paseo did not rename the workspace: {}",
+                    response.error.as_deref().unwrap_or("no reason given")
+                );
+            }
+            // Show the new name without waiting for the workspace update. A reverted name is
+            // derived by the daemon, so that one waits.
+            if let Some(title) = response.title {
+                this.update(cx, |this, cx| {
+                    if let Some(workspace) = this.workspaces.get_mut(&workspace_id) {
+                        workspace.name = title.clone();
+                        workspace.title = Some(title);
+                        cx.notify();
+                    }
+                })?;
+            }
             Ok(())
         })
     }
