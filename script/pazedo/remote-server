@@ -1,0 +1,36 @@
+#!/bin/sh
+# Cross-compiles Zed's remote server for a Linux dev box, so pazedo can open SSH projects there.
+#
+#   script/pazedo/remote-server [target triple]   # default x86_64-unknown-linux-musl
+#
+# pazedo builds as the `dev` release channel, so over SSH it looks for
+# ~/.zed_server/zed-remote-server-dev-build on the remote. Official Zed's servers do not fit:
+# the server must come from the same source as the app. Only debug builds can build one on
+# the fly, so this builds it ahead of time, the way Zed's debug builds do (cargo-zigbuild, a
+# static musl binary), but optimized and stripped. Rebuild after merging upstream Zed; pazedo's
+# own crates are not part of the server.
+#
+# Needs zig (Homebrew), cargo-zigbuild (`cargo install --locked cargo-zigbuild`), the rustup
+# target and the llvm-tools component. Prints the gzipped binary to copy to the remote:
+#
+#   scp <printed path> devbox:
+#   ssh devbox 'mkdir -p ~/.zed_server && gunzip -c zed-remote-server-dev-build.gz \
+#     > ~/.zed_server/zed-remote-server-dev-build && chmod +x ~/.zed_server/zed-remote-server-dev-build'
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+triple="${1:-x86_64-unknown-linux-musl}"
+target_dir="$repo/target/remote_server"
+output="$repo/target/zed-remote-server-dev-build.gz"
+
+cd "$repo"
+rustup target add "$triple" >/dev/null
+rustup component add llvm-tools >/dev/null
+RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" \
+  cargo zigbuild --release --package remote_server --target "$triple" --target-dir "$target_dir"
+
+strip=$(find "$(rustc --print sysroot)" -name llvm-strip -type f | head -n 1)
+binary="$target_dir/$triple/release/remote-server"
+"$strip" --strip-all "$binary" -o "$binary-stripped"
+gzip -9 -c "$binary-stripped" > "$output"
+ls -lh "$output"

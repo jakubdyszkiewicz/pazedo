@@ -60,6 +60,21 @@ setting in the app's own settings file, `~/Library/Application Support/Pazedo/co
 First launch asks whether to trust the opened project (Zed's restricted mode), because the
 data directory is new.
 
+## Remote server for SSH projects
+
+Opening a folder on another machine over SSH (Zed's remote development) needs Zed's remote
+server on that machine, built from the same source as the app. Official Zed downloads its
+server from zed.dev; pazedo, on the dev channel, looks for
+`~/.zed_server/zed-remote-server-dev-build` on the remote, and only debug builds can build
+one on the fly. `script/pazedo/remote-server` cross-compiles it for Linux x86_64 (a static
+musl binary, with zig and cargo-zigbuild like Zed's own dev setup) and writes
+`target/zed-remote-server-dev-build.gz`; its header has the commands to install it on the
+remote. Rebuild it after merging upstream Zed; pazedo's own crates are not part of it.
+
+Measured 2026-11-15 on the Mac mini (M1, 8 cores, 16 GB): first build 12 min 10 s wall, 57 min
+user CPU, peak RSS 7.6 GB, `target/remote_server` 5.5 GB; the binary is 679 MB with debug info,
+90 MB stripped, 36 MB gzipped.
+
 ## Running a dev build
 
 ```sh
