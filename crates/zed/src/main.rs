@@ -763,6 +763,8 @@ fn main() {
         project_bookmarks::init(cx);
         project_symbols::init(cx);
         project_panel::init(cx);
+        // pazedo: the AI usage in the title bar.
+        paseo_ui::init(cx);
         outline_panel::init(cx);
         tasks_ui::init(cx);
         snippets_ui::init(cx);

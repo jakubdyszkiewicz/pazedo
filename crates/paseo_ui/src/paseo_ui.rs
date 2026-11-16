@@ -12,6 +12,7 @@ mod panel;
 mod sidebar;
 mod store;
 mod terminal_item;
+mod usage;
 
 #[cfg(test)]
 mod paseo_ui_tests;
@@ -28,3 +29,8 @@ pub use store::{
     ProjectGroup, SSH_ENV_VAR, WorkspaceEntry,
 };
 pub use terminal_item::PaseoTerminalItem;
+
+/// Shows the AI subscriptions' usage in every window's title bar. Call before windows open.
+pub fn init(cx: &mut gpui::App) {
+    usage::init(cx);
+}

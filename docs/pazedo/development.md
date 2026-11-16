@@ -300,6 +300,23 @@ on every click, as in Zed. Folders still open and close on the first click. Veri
 in a dev build: a click on main.rs only selected it, the next click opened it. Synthetic clicks
 need a click state of 1 (`script/pazedo/click.swift` sets it), or apps see a click count of 0.
 
+### AI usage in the title bar
+
+Every window's title bar shows the usage of the AI subscriptions on the right, as the Paseo app
+does at the bottom of its sidebar: each account's icon (Claude, OpenAI for Codex, …), then for
+each of its summary windows a meter, the percent left and the window's short label, e.g.
+"✳ ▬ 71% 5h ▬ 59% wk ◎ ▬ 82% 5h ▬ 67% wk". Meters and percents turn orange or red with the
+window's tone. A click opens every window with its reset time, the balances and details, which
+daemon it came from and when, and Refresh (which skips the daemon's five-minute cache). The
+usage comes from the daemon whose folders are on the window's machine, else the first daemon
+with usage; each store reads it on connecting and every five minutes after
+(`PaseoStore::read_usage`). Accounts without summary windows show only in the popover, and the
+indicator is empty while no daemon reports usage. The code is `crates/paseo_ui/src/usage.rs`,
+attached to each `TitleBar` through `TitleBar::add_item` (see docs/pazedo/README.md). Verified
+2026-11-16 in a dev build against the test daemon: the title bar showed Claude and Codex, the
+popover listed their windows, the Codex credits in red, "From My Mac", and Refresh
+read them again.
+
 ### Several daemons
 
 `daemons` lists several daemons; their workspaces are listed together (see "Grouping"). The

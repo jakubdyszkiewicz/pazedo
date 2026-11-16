@@ -11,11 +11,11 @@ use paseo_client::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
         AgentUpdate, ArchiveWorkspace, AttentionReason, BranchSuggestions, ClearAgentAttention,
         CloseItems, CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents,
-        FetchWorkspaces, GetProvidersSnapshot, HelloAuth, ListProjects, Page, ProjectSummary,
-        ProjectUpdate, ProviderEntry, RefreshAgent, ServerInfo, ServerMessage,
+        FetchWorkspaces, GetProvidersSnapshot, HelloAuth, ListProjects, ListUsageReports, Page,
+        ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, ServerInfo, ServerMessage,
         SetSessionEventSubscription, SetWorkspaceTitle, Subscribe, SubscribeTerminals,
-        TerminalInfo, TerminalStreamExit, TerminalsChanged, Workspace, WorkspaceSource,
-        WorkspaceUpdate,
+        TerminalInfo, TerminalStreamExit, TerminalsChanged, UsageReportEntry, Workspace,
+        WorkspaceSource, WorkspaceUpdate,
     },
 };
 use project::Project;
@@ -194,6 +194,7 @@ impl PaseoDaemons {
 }
 
 const CLIENT_ID: &str = "pazedo";
+const USAGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const PAGE_SIZE: u32 = 200;
 const SESSION_EVENTS: &[&str] = &[
     "project.update",
@@ -225,6 +226,8 @@ pub enum PaseoStoreEvent {
     AgentStream(AgentStream),
     AgentTimelineReplacement(AgentTimelineReplacement),
     TerminalStreamExit(TerminalStreamExit),
+    /// The usage reports, or whether they are being read, changed.
+    UsageChanged,
 }
 
 /// The live directory of one Paseo daemon: projects, workspaces and agents, kept current through
@@ -245,6 +248,12 @@ pub struct PaseoStore {
     agents: HashMap<String, Agent>,
     providers: Vec<ProviderEntry>,
     providers_task: Option<Task<()>>,
+    /// The usage of the AI subscriptions the daemon's machine is logged into, as last read; kept
+    /// while the daemon is away.
+    usage: Vec<UsageReportEntry>,
+    usage_error: Option<SharedString>,
+    reading_usage: bool,
+    usage_task: Option<Task<()>>,
     subscriptions: DirectorySubscriptions,
     /// Pushes that arrive while a snapshot is being fetched. Their order relative to the
     /// snapshot response is not preserved between the two foreground tasks, so they are
@@ -346,6 +355,10 @@ impl PaseoStore {
             agents: HashMap::default(),
             providers: Vec::new(),
             providers_task: None,
+            usage: Vec::new(),
+            usage_error: None,
+            reading_usage: false,
+            usage_task: None,
             subscriptions: DirectorySubscriptions::default(),
             queued_messages: None,
             sync_task: None,
@@ -441,6 +454,10 @@ impl PaseoStore {
         self.agents.clear();
         self.providers.clear();
         self.providers_task = None;
+        self.usage.clear();
+        self.usage_error = None;
+        self.reading_usage = false;
+        self.usage_task = None;
         self.subscriptions = DirectorySubscriptions::default();
         self.queued_messages = None;
         self.sync_task = None;
@@ -554,6 +571,67 @@ impl PaseoStore {
                     .ok();
                 }
                 Err(error) => log::warn!("failed to load Paseo providers: {error:#}"),
+            }
+        }));
+    }
+
+    /// Whether the daemon reports usage (`usage.list_reports`, Paseo 0.14 and later).
+    pub fn reports_usage(&self) -> bool {
+        matches!(&self.status, ConnectionStatus::Connected(server_info)
+            if server_info.has_feature("usageSources"))
+    }
+
+    pub fn usage(&self) -> &[UsageReportEntry] {
+        &self.usage
+    }
+
+    pub fn usage_error(&self) -> Option<&SharedString> {
+        self.usage_error.as_ref()
+    }
+
+    pub fn is_reading_usage(&self) -> bool {
+        self.reading_usage
+    }
+
+    /// Reads the usage now, and again every five minutes while connected, as the Paseo app
+    /// does. The daemon caches each report for five minutes; `force` skips its cache.
+    pub fn read_usage(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone().filter(Client::is_connected) else {
+            return;
+        };
+        if !self.reports_usage() {
+            return;
+        }
+        self.reading_usage = true;
+        cx.emit(PaseoStoreEvent::UsageChanged);
+        self.usage_task = Some(cx.spawn(async move |this, cx| {
+            let mut force = force;
+            loop {
+                let request = ListUsageReports {
+                    force_refresh: force.then_some(true),
+                };
+                force = false;
+                let result = client.request_with_updates(&request).await;
+                let updated = this.update(cx, |this, cx| {
+                    this.reading_usage = false;
+                    match result {
+                        Ok((response, updates)) => {
+                            this.usage = updates.into_iter().map(|update| update.report).collect();
+                            this.usage_error = response.error.map(SharedString::from);
+                        }
+                        // Keeps the last reports, as the Paseo app does.
+                        Err(error) => {
+                            log::warn!("failed to read the Paseo usage: {error:#}");
+                            this.usage_error = Some(format!("{error:#}").into());
+                        }
+                    }
+                    cx.emit(PaseoStoreEvent::UsageChanged);
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(USAGE_INTERVAL).await;
             }
         }));
     }
@@ -1101,6 +1179,7 @@ impl PaseoStore {
                 }
                 self.sync(cx);
                 self.refresh_providers(cx);
+                self.read_usage(false, cx);
                 cx.emit(PaseoStoreEvent::Connected);
             }
             Event::Disconnected { reason } => {
@@ -1109,6 +1188,8 @@ impl PaseoStore {
                 self.subscriptions = DirectorySubscriptions::default();
                 self.queued_messages = None;
                 self.sync_task = None;
+                self.usage_task = None;
+                self.reading_usage = false;
                 self.terminal_tasks.clear();
                 for subscription in self.terminal_subscriptions.values_mut() {
                     *subscription = None;

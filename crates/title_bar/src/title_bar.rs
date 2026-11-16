@@ -231,6 +231,8 @@ pub struct TitleBar {
     update_version: Entity<UpdateVersion>,
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
     _diagnostics_subscription: Option<gpui::Subscription>,
+    // Pazedo: views other crates add, shown before the user menu.
+    extra_items: Vec<AnyView>,
 }
 
 impl Render for TitleBar {
@@ -394,6 +396,7 @@ impl Render for TitleBar {
                 .child(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
+                .children(self.extra_items.iter().cloned())
                 .when(
                     user.is_none()
                         && is_signed_out_or_auth_error
@@ -545,11 +548,23 @@ impl TitleBar {
             update_version,
             screen_share_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
+            extra_items: Vec::new(),
         };
 
         this.observe_diagnostics(cx);
 
         this
+    }
+
+    /// Pazedo: shows `view` on the right, before the user menu.
+    pub fn add_item(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.extra_items.push(view);
+        cx.notify();
+    }
+
+    /// Pazedo: the workspace this title bar belongs to.
+    pub fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
     }
 
     fn worktree_count(&self, cx: &App) -> usize {

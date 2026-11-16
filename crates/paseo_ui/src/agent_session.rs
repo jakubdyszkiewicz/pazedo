@@ -909,7 +909,9 @@ fn handle_store_event(
                 thread.update(cx, |thread, cx| thread.handle_connection_lost(cx));
             }
         }
-        PaseoStoreEvent::Connected | PaseoStoreEvent::TerminalStreamExit(_) => {}
+        PaseoStoreEvent::Connected
+        | PaseoStoreEvent::TerminalStreamExit(_)
+        | PaseoStoreEvent::UsageChanged => {}
     }
 }
 
