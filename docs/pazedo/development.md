@@ -89,7 +89,18 @@ backdrop. `swift script/pazedo/app-icon.swift` cuts its tile out and places it o
 grid (an 824px tile in a 1024px canvas, transparent around it, with a drop shadow), writing
 `crates/zed/resources/app-icon-dev@2x.png` and `app-icon-dev.png`: the dev channel's icons,
 which `bundle` and `run-dev` turn into `Pazedo.icns` and the About window embeds. Release and
-dev builds share it.
+dev builds share it. The script also writes `assets/images/pazedo_logo.png` (the tile alone),
+which the welcome and onboarding pages show.
+
+The app menu, Help menu, About window, welcome page and onboarding page use Pazedo's name and
+logo instead of Zed's (see "Upstream touch points" in `docs/pazedo/README.md`). Zed's name
+stays where it names Zed itself: its documentation, its AI plans, the "Zed Agent", settings
+descriptions and other text deeper in the UI.
+
+Verified 2026-11-16 in a debug build with a fresh data directory, against the test daemon: the
+onboarding and welcome pages show the Pazedo logo, "Welcome to Pazedo" and "Zed as a client for
+Paseo"; the About window is titled "About Pazedo" and shows the icon and "Pazedo 1.30.0
+(debug)"; the app and Help menus list the items above (read through System Events).
 
 Verified 2026-11-16: both PNGs are 1024 and 512 px with alpha, the tile's edges have no light
 rim on white or black, its size matches Zed's icon, the "P" reads at 16 to 256 px on light

@@ -6,13 +6,14 @@
 // shadow and no transparency. This cuts the tile out and places it on macOS's icon grid (an
 // 824px tile in a 1024px canvas) with a transparent background and the usual drop shadow, and
 // writes crates/zed/resources/app-icon-dev@2x.png and app-icon-dev.png. Pazedo builds the dev
-// channel, so those are the files its bundle, About window and Linux window icon use.
+// channel, so those are the files its bundle, About window and Linux window icon use. It also
+// writes assets/images/pazedo_logo.png, the tile alone, which the welcome and onboarding pages
+// show in place of Zed's logo.
 import AppKit
 
 let repository = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 let conceptURL = repository.appendingPathComponent("docs/pazedo/design/app-icon-white-on-charcoal.png")
-let resources = repository.appendingPathComponent("crates/zed/resources")
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -60,9 +61,11 @@ guard let tile = concept.cropping(to: tileBounds) else { fail("cannot crop the t
 // Measured on the concept: its corners are round with a radius of about 26% of the tile.
 let cornerFraction = 0.26
 
-func renderIcon(size: Int) -> Data {
+func renderIcon(size: Int, padded: Bool) -> Data {
     let scale = CGFloat(size) / 1024
-    let tileRect = CGRect(x: 100 * scale, y: 100 * scale, width: 824 * scale, height: 824 * scale)
+    let tileRect = padded
+        ? CGRect(x: 100 * scale, y: 100 * scale, width: 824 * scale, height: 824 * scale)
+        : CGRect(x: 0, y: 0, width: size, height: size)
     let corner = tileRect.width * cornerFraction
     let tilePath = CGPath(roundedRect: tileRect, cornerWidth: corner, cornerHeight: corner, transform: nil)
 
@@ -73,14 +76,16 @@ func renderIcon(size: Int) -> Data {
     else { fail("cannot create a \(size)px canvas") }
     context.interpolationQuality = .high
 
-    context.saveGState()
-    context.setShadow(
-        offset: CGSize(width: 0, height: -12 * scale), blur: 28 * scale,
-        color: CGColor(gray: 0, alpha: 0.35))
-    context.addPath(tilePath)
-    context.setFillColor(CGColor(gray: 0.13, alpha: 1))
-    context.fillPath()
-    context.restoreGState()
+    if padded {
+        context.saveGState()
+        context.setShadow(
+            offset: CGSize(width: 0, height: -12 * scale), blur: 28 * scale,
+            color: CGColor(gray: 0, alpha: 0.35))
+        context.addPath(tilePath)
+        context.setFillColor(CGColor(gray: 0.13, alpha: 1))
+        context.fillPath()
+        context.restoreGState()
+    }
 
     context.addPath(tilePath)
     context.clip()
@@ -92,10 +97,15 @@ func renderIcon(size: Int) -> Data {
     return png
 }
 
-for (name, size) in [("app-icon-dev@2x.png", 1024), ("app-icon-dev.png", 512)] {
-    let url = resources.appendingPathComponent(name)
+let outputs = [
+    ("crates/zed/resources/app-icon-dev@2x.png", 1024, true),
+    ("crates/zed/resources/app-icon-dev.png", 512, true),
+    ("assets/images/pazedo_logo.png", 256, false),
+]
+for (path, size, padded) in outputs {
+    let url = repository.appendingPathComponent(path)
     do {
-        try renderIcon(size: size).write(to: url)
+        try renderIcon(size: size, padded: padded).write(to: url)
     } catch {
         fail("cannot write \(url.path): \(error)")
     }

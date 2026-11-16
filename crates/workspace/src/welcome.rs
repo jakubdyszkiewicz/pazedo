@@ -10,13 +10,13 @@ use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     ParentElement, Render, Styled, Task, TaskExt, Window, actions,
 };
-use gpui::{WeakEntity, linear_color_stop, linear_gradient};
+use gpui::{WeakEntity, img, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
 use util::ResultExt;
 use zed_actions::{
     Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
@@ -450,10 +450,11 @@ impl Render for WelcomePage {
                 .into_any_element()
         };
 
+        // Pazedo: the app's own name, logo and description instead of Zed's.
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            "Welcome back to Pazedo"
         } else {
-            "Welcome to Zed"
+            "Welcome to Pazedo"
         };
 
         h_flex()
@@ -480,10 +481,14 @@ impl Render for WelcomePage {
                             .justify_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45_f32)))
+                            .child(
+                                img("images/pazedo_logo.png")
+                                    .flex_none()
+                                    .size(rems_from_px(45_f32)),
+                            )
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new("Zed as a client for Paseo")
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),

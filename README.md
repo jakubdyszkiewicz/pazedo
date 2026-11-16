@@ -108,6 +108,16 @@ several daemons:
 
 Daemons can also be added and edited from the gear button in the sidebar header.
 
+### Updating
+
+Pazedo doesn't update itself: it builds Zed's dev channel, which has no update server, and the
+app never checks for new versions. To update, pull this repository and build again:
+
+```sh
+git pull
+script/pazedo/bundle --install
+```
+
 ## Documentation
 
 - [docs/pazedo/development.md](./docs/pazedo/development.md): building, settings and every
