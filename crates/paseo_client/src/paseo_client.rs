@@ -42,7 +42,7 @@ use crate::{
     frames::{ChunkAssembler, Frame, TerminalFrame},
     protocol::{
         ClientType, Hello, HelloAuth, HelloRejectionReason, Notification, PROTOCOL_VERSION,
-        Request, RpcErrorPayload, ServerInfo, ServerMessage, SubscribeTerminal,
+        Request, RpcErrorPayload, ServerInfo, ServerMessage, StreamingRequest, SubscribeTerminal,
         SubscribeTerminalResponse, capabilities,
     },
 };
@@ -281,6 +281,13 @@ struct PendingResponse {
     response: oneshot::Sender<Result<RawMessage>>,
     /// For `subscribe_terminal_request`: where the frames of the slot in the response go.
     terminal_route: Option<mpsc::UnboundedSender<TerminalFrame>>,
+    /// For a [`StreamingRequest`]: where its updates go until the response arrives.
+    update_route: Option<UpdateRoute>,
+}
+
+struct UpdateRoute {
+    message_type: &'static str,
+    payloads: mpsc::UnboundedSender<Value>,
 }
 
 struct Connection {
@@ -430,7 +437,7 @@ impl Client {
             .with_context(|| format!("failed to encode {}", SubscribeTerminal::TYPE))?;
         let (frames_tx, frames_rx) = mpsc::unbounded();
         let response = self
-            .send_request(SubscribeTerminal::TYPE, body, Some(frames_tx))
+            .send_request(SubscribeTerminal::TYPE, body, Some(frames_tx), None)
             .await?;
         let response: SubscribeTerminalResponse = serde_json::from_value(response.payload)
             .with_context(|| format!("failed to decode {}", SubscribeTerminal::RESPONSE_TYPE))?;
@@ -446,7 +453,42 @@ impl Client {
     /// Sends any session request and returns the correlated response untyped. For messages
     /// this crate does not model yet.
     pub async fn request_raw(&self, message_type: &str, body: Value) -> Result<RawMessage> {
-        self.send_request(message_type, body, None).await
+        self.send_request(message_type, body, None, None).await
+    }
+
+    /// Sends a request the daemon answers with updates before its response, and returns the
+    /// response with the updates. An update that does not decode is logged and left out.
+    pub async fn request_with_updates<R: StreamingRequest>(
+        &self,
+        request: &R,
+    ) -> Result<(R::Response, Vec<R::Update>)> {
+        let body = serde_json::to_value(request)
+            .with_context(|| format!("failed to encode {}", R::TYPE))?;
+        let (payloads_tx, mut payloads_rx) = mpsc::unbounded();
+        let route = UpdateRoute {
+            message_type: R::UPDATE_TYPE,
+            payloads: payloads_tx,
+        };
+        let response = self.send_request(R::TYPE, body, None, Some(route)).await?;
+        if response.message_type != R::RESPONSE_TYPE {
+            bail!(
+                "unexpected response to {}: expected {}, got {}",
+                R::TYPE,
+                R::RESPONSE_TYPE,
+                response.message_type
+            );
+        }
+        let response = serde_json::from_value(response.payload)
+            .with_context(|| format!("failed to decode {}", R::RESPONSE_TYPE))?;
+        // The updates came before the response, on the same connection.
+        let mut updates = Vec::new();
+        while let Ok(payload) = payloads_rx.try_recv() {
+            match serde_json::from_value(payload) {
+                Ok(update) => updates.push(update),
+                Err(error) => log::warn!("failed to decode {}: {error}", R::UPDATE_TYPE),
+            }
+        }
+        Ok((response, updates))
     }
 
     async fn send_request(
@@ -454,6 +496,7 @@ impl Client {
         message_type: &str,
         body: Value,
         terminal_route: Option<mpsc::UnboundedSender<TerminalFrame>>,
+        update_route: Option<UpdateRoute>,
     ) -> Result<RawMessage> {
         let Value::Object(mut message) = body else {
             bail!("{message_type} body must be a JSON object");
@@ -478,6 +521,7 @@ impl Client {
                 PendingResponse {
                     response: response_tx,
                     terminal_route,
+                    update_route,
                 },
             );
             if connection.outgoing.unbounded_send(frame).is_err() {
@@ -783,6 +827,18 @@ fn handle_text(shared: &Shared, events: &mpsc::UnboundedSender<Event>, text: &st
             return;
         }
     };
+
+    if let Some(request_id) = message.payload.get("requestId").and_then(Value::as_str) {
+        let pending = shared.pending.lock();
+        if let Some(route) = pending
+            .get(request_id)
+            .and_then(|pending| pending.update_route.as_ref())
+            && route.message_type == message.message_type
+        {
+            route.payloads.unbounded_send(message.payload.clone()).ok();
+            return;
+        }
+    }
 
     // `agent_permission_resolved` also has a `requestId`, but it names a permission request and
     // never matches the client's own `pazedo-` ids.

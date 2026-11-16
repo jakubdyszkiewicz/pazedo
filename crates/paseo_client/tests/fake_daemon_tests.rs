@@ -5,8 +5,9 @@ use paseo_client::{
     fake_daemon::{FakeConnection, FakeDaemon, smol_sleep, with_timeout},
     frames::{TerminalFrame, TerminalOpcode},
     protocol::{
-        FetchWorkspaces, HelloAuth, HelloRejectionReason, ListProjects, ServerMessage, Subscribe,
-        SubscribeTerminal, TerminalClientMessage, TerminalInput, WorkspaceStatus, WorkspaceUpdate,
+        FetchWorkspaces, HelloAuth, HelloRejectionReason, ListProjects, ListUsageReports,
+        ServerMessage, Subscribe, SubscribeTerminal, TerminalClientMessage, TerminalInput,
+        UsageProblem, UsageReport, UsageTone, WorkspaceStatus, WorkspaceUpdate,
     },
 };
 use pretty_assertions::assert_eq;
@@ -137,6 +138,96 @@ fn requests_are_correlated_by_request_id() -> Result<()> {
         assert_eq!(workspaces.subscription_id.as_deref(), Some("sub-1"));
         assert_eq!(workspaces.entries[0].status, WorkspaceStatus::Running);
         assert!(with_timeout(projects).await??.projects.is_empty());
+        Ok(())
+    })
+}
+
+#[test]
+fn streamed_updates_arrive_with_the_response() -> Result<()> {
+    smol::block_on(async {
+        let mut harness = Harness::start(|_| {}).await?;
+        let mut connection = harness.connect().await?;
+        let client = harness.client.clone();
+        let reports = smol::spawn(async move {
+            client
+                .request_with_updates(&ListUsageReports {
+                    force_refresh: Some(true),
+                })
+                .await
+        });
+
+        let request = connection
+            .expect_request("usage.list_reports.request")
+            .await?;
+        assert_eq!(request["forceRefresh"], true);
+        let request_id = request["requestId"].clone();
+        connection.push(
+            "usage.list_reports.update",
+            json!({"requestId": request_id, "report": {
+                "id": "claude", "account": {"label": "me@example.com"},
+                "fetchedAt": "2026-11-16T10:32:01.826Z", "sourceId": "claude",
+                "sourceLabel": "Claude", "icon": "anthropic",
+                "report": {"status": "available", "planLabel": "Max 5x", "windows": [
+                    {"id": "five_hour", "label": "Session", "shortLabel": "5h", "summary": true,
+                     "usedPct": 24, "remainingPct": 76, "resetsAt": "2026-11-16T10:50:00Z",
+                     "tone": "ok"},
+                    {"id": "weekly_model_fable", "label": "Weekly · Fable", "usedPct": 0,
+                     "remainingPct": 100, "tone": "something new"},
+                ]},
+            }}),
+        )?;
+        // A message pushed meanwhile is still an event.
+        connection.push(
+            "workspace_update",
+            json!({"kind": "upsert", "workspace": workspace_json("wks_1", "running")}),
+        )?;
+        connection.push(
+            "usage.list_reports.update",
+            json!({"requestId": request_id, "report": {
+                "id": "codex", "account": {}, "fetchedAt": "2026-11-16T10:32:02Z",
+                "sourceId": "codex", "sourceLabel": "Codex",
+                "report": {"status": "unavailable", "problem": {"kind": "expired",
+                    "expiresAt": "2026-11-16T09:00:00Z"}},
+                "lastSuccessful": {"fetchedAt": "2026-11-16T08:00:00Z", "report": {
+                    "status": "available", "windows": [], "balances": [
+                        {"id": "credits", "label": "Credits", "remaining": 0,
+                         "unit": "credits", "tone": "danger"}]}},
+            }}),
+        )?;
+        connection.respond(
+            &request,
+            "usage.list_reports.response",
+            json!({"error": null}),
+        )?;
+
+        let (response, updates) = with_timeout(reports).await??;
+        assert_eq!(response.error, None);
+        let [claude, codex] = <[_; 2]>::try_from(updates).unwrap();
+        let claude = claude.report;
+        assert_eq!(claude.icon.as_deref(), Some("anthropic"));
+        let available = claude.available().expect("Claude's usage");
+        assert_eq!(available.plan_label.as_deref(), Some("Max 5x"));
+        assert_eq!(available.windows[0].short_label.as_deref(), Some("5h"));
+        assert!(available.windows[0].summary);
+        assert_eq!(available.windows[0].remaining_pct, Some(76.0));
+        assert_eq!(available.windows[0].tone, UsageTone::Ok);
+        assert_eq!(available.windows[1].tone, UsageTone::Default);
+        let codex = codex.report;
+        assert_eq!(
+            codex.report,
+            UsageReport::Unavailable {
+                problem: UsageProblem::Expired {}
+            }
+        );
+        assert_eq!(
+            codex.available().map(|usage| usage.balances[0].tone),
+            Some(UsageTone::Danger),
+            "an unavailable report keeps its last data"
+        );
+        match harness.next_event().await? {
+            Event::Message(ServerMessage::WorkspaceUpdate(_)) => {}
+            other => panic!("expected the workspace update, got {other:?}"),
+        }
         Ok(())
     })
 }

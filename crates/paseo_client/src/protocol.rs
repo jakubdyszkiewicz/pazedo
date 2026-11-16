@@ -22,6 +22,13 @@ pub trait Request: Serialize {
     type Response: DeserializeOwned;
 }
 
+/// A session request that the daemon answers with any number of `UPDATE_TYPE` messages carrying
+/// its `requestId`, then its response.
+pub trait StreamingRequest: Request {
+    const UPDATE_TYPE: &'static str;
+    type Update: DeserializeOwned;
+}
+
 /// A session message the daemon does not answer.
 pub trait Notification: Serialize {
     const TYPE: &'static str;
@@ -1902,6 +1909,189 @@ pub struct TerminalStreamExit {
     pub subscription_id: Option<String>,
     pub terminal_id: String,
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Usage
+// ---------------------------------------------------------------------------------------------
+
+/// Lists the usage of the AI subscriptions the daemon's machine is logged into, one report per
+/// account, as the Paseo app's Usage shows it. Needs the `usageSources` feature. The daemon caches
+/// each report for five minutes; `force_refresh` skips the cache.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListUsageReports {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_refresh: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListUsageReportsResponse {
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageReportUpdate {
+    pub report: UsageReportEntry,
+}
+
+impl Request for ListUsageReports {
+    const TYPE: &'static str = "usage.list_reports.request";
+    const RESPONSE_TYPE: &'static str = "usage.list_reports.response";
+    type Response = ListUsageReportsResponse;
+}
+
+impl StreamingRequest for ListUsageReports {
+    const UPDATE_TYPE: &'static str = "usage.list_reports.update";
+    type Update = UsageReportUpdate;
+}
+
+/// One account's usage, e.g. Claude or Codex.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReportEntry {
+    pub id: String,
+    #[serde(default)]
+    pub account: UsageAccount,
+    pub fetched_at: String,
+    pub source_id: String,
+    /// e.g. "Claude".
+    pub source_label: String,
+    /// The source's icon as SVG markup.
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub report: UsageReport,
+    /// The last report that had data, kept while the current one is an error.
+    #[serde(default)]
+    pub last_successful: Option<LastSuccessfulUsage>,
+}
+
+impl UsageReportEntry {
+    /// The report's data, or the last data it had while it can't be read.
+    pub fn available(&self) -> Option<&AvailableUsage> {
+        match &self.report {
+            UsageReport::Available(report) => Some(report),
+            _ => self.last_successful.as_ref().map(|last| &last.report),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct UsageAccount {
+    /// e.g. the account's email.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSuccessfulUsage {
+    pub fetched_at: String,
+    pub report: AvailableUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum UsageReport {
+    Available(AvailableUsage),
+    Unavailable {
+        problem: UsageProblem,
+    },
+    Error {
+        error: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableUsage {
+    /// e.g. "Max 5x".
+    #[serde(default)]
+    pub plan_label: Option<String>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub balances: Vec<UsageBalance>,
+    #[serde(default)]
+    pub details: Vec<UsageDetail>,
+}
+
+/// Why a report has no data.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UsageProblem {
+    /// The login expired.
+    Expired {},
+    /// The provider refused the login.
+    Rejected {},
+    /// The account has no quota to report.
+    NoQuota { detail: String },
+    #[serde(other)]
+    Unknown,
+}
+
+/// A rate limit window, e.g. the five-hour or weekly one.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    pub id: String,
+    /// e.g. "Session" or "Weekly".
+    pub label: String,
+    /// e.g. "5h" or "wk": an empty one shows the percent alone, none shows `label`.
+    #[serde(default)]
+    pub short_label: Option<String>,
+    /// Shown in the compact summary.
+    #[serde(default)]
+    pub summary: bool,
+    #[serde(default)]
+    pub used_pct: Option<f64>,
+    #[serde(default)]
+    pub remaining_pct: Option<f64>,
+    #[serde(default)]
+    pub resets_at: Option<String>,
+    #[serde(default)]
+    pub tone: UsageTone,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageBalance {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub used: Option<f64>,
+    #[serde(default)]
+    pub remaining: Option<f64>,
+    #[serde(default)]
+    pub limit: Option<f64>,
+    /// "usd", "credits", "requests" or "tokens".
+    pub unit: String,
+    #[serde(default)]
+    pub tone: UsageTone,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct UsageDetail {
+    pub id: String,
+    pub label: String,
+    pub value: String,
+    #[serde(default)]
+    pub tone: UsageTone,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageTone {
+    Ok,
+    Warning,
+    Danger,
+    /// Also "default".
+    #[default]
+    #[serde(other)]
+    Default,
 }
 
 // ---------------------------------------------------------------------------------------------

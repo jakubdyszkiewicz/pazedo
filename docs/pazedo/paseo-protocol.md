@@ -253,6 +253,28 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   app offers it as "Reload agent". Mock agents that never received a prompt have no history
   either way.
 
+## Usage (verified 2026-11-16, both daemons, Paseo 0.15.4)
+
+`usage.list_reports.request {requestId, forceRefresh?, reportIds?, agentId?}` (feature
+`usageSources`) is answered by one `usage.list_reports.update {requestId, report}` per account,
+then `usage.list_reports.response {requestId, error}`. A report entry has `id`, `sourceId`
+(`claude`, `codex`, `opencode-go`, `copilot`, …), `sourceLabel`, `account.label` (the email),
+`fetchedAt`, `icon` (SVG markup, not a name), `report` and, while it fails, `lastSuccessful`.
+`report.status` is `available` (`planLabel`, `windows`, `balances`, `details`), `unavailable`
+(`problem.kind`: `expired`, `rejected`, `no_quota`) or `error`. A window has `label` ("Session"),
+`shortLabel` ("5h"; empty shows the percent alone), `summary` (shown in the compact summary),
+`usedPct`, `remainingPct`, `resetsAt` and `tone` (`default`, `ok`, `warning`, `danger`). The daemon
+caches each report for five minutes; the Paseo app reads every five minutes while visible and
+shows the percent left. The older `provider.usage.list.request` (feature `providerUsageList`,
+marked for removal after 2027-03-26) answers the same in one response. The daemon config's
+`usage.enabled` turns the feature off. Both daemons report Claude (Max 5x) and Codex (plus); the
+Mac mini adds OpenCode Go and the dev box GitHub Copilot, neither with summary windows. The
+test daemon on the Mac mini reports the same accounts as the real one.
+
+`Client::request_with_updates` sends a `StreamingRequest` and collects its updates: an update
+with the request's `requestId` and the request's `UPDATE_TYPE` goes to the request rather than
+resolving it, so messages pushed in between still arrive as events.
+
 ## Observations and open questions
 
 - Each `paseo run` from the CLI created a **new** workspace for the same directory

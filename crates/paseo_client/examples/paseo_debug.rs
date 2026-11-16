@@ -3,7 +3,7 @@
 //!   cargo run -p paseo_client --example paseo_debug -- [--endpoint 127.0.0.1:6868] <command>
 //!
 //! Commands: `info`, `workspaces`, `agents`, `watch [seconds]`, `timeline <agent-id> [seconds]`,
-//! `terminals <cwd> [workspace-id]`, `raw <message type> [json body]`, `terminal-stream <cwd> [terminal-id] [restore-mode]`. The endpoint defaults to the isolated test daemon
+//! `terminals <cwd> [workspace-id]`, `usage`, `raw <message type> [json body]`, `terminal-stream <cwd> [terminal-id] [restore-mode]`. The endpoint defaults to the isolated test daemon
 //! (docs/pazedo/development.md), never to the user's real daemon.
 
 use anyhow::{Context as _, Result, bail};
@@ -15,10 +15,10 @@ use paseo_client::{
     protocol::{
         AgentFilter, AgentSessionConfig, AgentStreamEvent, AgentUpdate, CreateAgent,
         CreateTerminal, FetchAgentTimeline, FetchAgents, FetchWorkspaces, ListProjects,
-        PermissionResponse, ProjectUpdate, RespondToPermission, SendAgentMessage, ServerMessage,
-        SetAgentTimelineSubscription, SetSessionEventSubscription, Subscribe, SubscribeTerminal,
-        SubscribeTerminals, TerminalRestore, TerminalRestoreMode, TerminalSize, TimelineDirection,
-        TimelineProjection, WorkspaceUpdate,
+        ListUsageReports, PermissionResponse, ProjectUpdate, RespondToPermission, SendAgentMessage,
+        ServerMessage, SetAgentTimelineSubscription, SetSessionEventSubscription, Subscribe,
+        SubscribeTerminal, SubscribeTerminals, TerminalRestore, TerminalRestoreMode, TerminalSize,
+        TimelineDirection, TimelineProjection, WorkspaceUpdate,
     },
 };
 use std::time::{Duration, Instant};
@@ -138,6 +138,24 @@ fn main() -> Result<()> {
                         "{}  {}  {:?}  workspace={:?}",
                         terminal.id, terminal.name, terminal.title, terminal.workspace_id
                     );
+                }
+                Ok(())
+            }
+            "usage" => {
+                let (response, updates) = client
+                    .request_with_updates(&ListUsageReports::default())
+                    .await?;
+                for update in updates {
+                    let entry = update.report;
+                    println!(
+                        "{} ({}) {:?}",
+                        entry.source_label,
+                        entry.account.label.as_deref().unwrap_or("-"),
+                        entry.report
+                    );
+                }
+                if let Some(error) = response.error {
+                    println!("error: {error}");
                 }
                 Ok(())
             }
