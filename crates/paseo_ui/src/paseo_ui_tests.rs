@@ -534,8 +534,13 @@ async fn test_revealing_the_open_workspace_expands_its_project(cx: &mut TestAppC
     // Collapse the open workspace's project, then leave and close the sidebar.
     focus_editor_pane(cx);
     press(&workspace::FocusWorkspaceSidebar, cx);
-    press(&menu::SelectParent, cx);
-    press(&menu::SelectParent, cx);
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_second"));
+    press(&crate::sidebar::CollapseAll, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("project prj_sandbox"),
+        "collapsing all moves the selection to the workspace's project"
+    );
     press(&menu::SelectNext, cx);
     assert_eq!(
         selected(cx).as_deref(),

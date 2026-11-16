@@ -59,7 +59,9 @@ gpui::actions!(
         /// Shows the open workspace in the sidebar: opens and focuses the sidebar, expands the
         /// workspace's project or status section and selects its row, like the project panel's
         /// reveal of the open file.
-        RevealActiveWorkspace
+        RevealActiveWorkspace,
+        /// Collapses every project, or every status section when grouping by status.
+        CollapseAll
     ]
 );
 
@@ -636,6 +638,31 @@ impl PaseoSidebar {
             return;
         }
         window.dispatch_action(Box::new(FocusWorkspaceSidebar), cx);
+    }
+
+    /// Collapses every project or status section listed. A selected workspace hands the
+    /// selection to the header it was under, so it stays visible.
+    fn collapse_all(&mut self, _: &CollapseAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.type_ahead.end();
+        if let Some(row) = self
+            .selected_position()
+            .and_then(|position| self.selectable_rows.get(position))
+        {
+            self.selected_entry = Some(row.parent.clone().unwrap_or_else(|| row.entry.clone()));
+            self.scroll_to_selection = true;
+        }
+        for row in &self.selectable_rows {
+            match &row.entry {
+                SidebarEntry::Project(project) => {
+                    self.collapsed_projects.insert(project.clone());
+                }
+                SidebarEntry::StatusSection(bucket) => {
+                    self.collapsed_buckets.insert(*bucket);
+                }
+                SidebarEntry::Workspace(_) => {}
+            }
+        }
+        cx.notify();
     }
 
     /// Selects the open workspace's row, expanding the project or status section it is under,
@@ -2461,6 +2488,7 @@ impl Render for PaseoSidebar {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::new_workspace_for_selection))
             .on_action(cx.listener(Self::toggle_grouping))
+            .on_action(cx.listener(Self::collapse_all))
             .on_action(cx.listener(|this, _: &RevealActiveWorkspace, _window, cx| {
                 this.reveal_active_workspace(cx)
             }))
