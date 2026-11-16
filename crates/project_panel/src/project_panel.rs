@@ -6615,6 +6615,15 @@ impl ProjectPanel {
                         } else {
                             project_panel.toggle_expanded(entry_id, window, cx);
                         }
+                    } else if ProjectPanelSettings::get_global(cx).open_files_on_click
+                        == settings::ProjectPanelOpenFilesOnClick::WhenSelected
+                        && event.click_count() < 2
+                        && project_panel.selection != Some(selection)
+                    {
+                        // Pazedo: a first click only selects the file; another click opens it.
+                        project_panel.marked_entries.clear();
+                        project_panel.selection = Some(selection);
+                        cx.notify();
                     } else {
                         let preview_tabs_enabled =
                             PreviewTabsSettings::get_global(cx).enable_preview_from_project_panel;

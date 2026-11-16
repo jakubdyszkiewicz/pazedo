@@ -995,6 +995,13 @@
     "diagnostic_badges": false,
     // Whether to show the git status indicator next to file names in the project panel.
     "git_status_indicator": false,
+    // Pazedo: when a click on a file opens it (Zed always opens it; Pazedo waits for the second click):
+    // 1. Every click opens the file:
+    //    "always"
+    // 2. A click on a file that isn't selected only selects it; a click on the selected file,
+    //    or a double click, opens it:
+    //    "when_selected"
+    "open_files_on_click": "when_selected",
     // Whether to enable drag-and-drop operations in the project panel.
     "drag_and_drop": true,
     // Whether to hide the root entry when only one folder is open in the window;

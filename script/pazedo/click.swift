@@ -35,6 +35,8 @@ for type in types {
     let event = CGEvent(
         mouseEventSource: source, mouseType: type, mouseCursorPosition: point,
         mouseButton: rightClick ? .right : .left)
+    // Without it apps see a click count of 0 rather than a single click.
+    event?.setIntegerValueField(.mouseEventClickState, value: 1)
     event?.post(tap: .cghidEventTap)
     usleep(60_000)
 }

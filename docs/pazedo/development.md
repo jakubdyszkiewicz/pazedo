@@ -291,6 +291,12 @@ leaving the panel ends it. The code is in `crates/project_panel/src/type_to_find
 README.md, backspace shortened the search without trashing the file, and "ma" then enter opened
 main.rs.
 
+A click on a file selects it, and a click on the selected file (or a double click) opens it:
+`"project_panel": { "open_files_on_click": "when_selected" }`, Pazedo's default; `"always"` opens
+on every click, as in Zed. Folders still open and close on the first click. Verified 2026-11-16
+in a dev build: a click on main.rs only selected it, the next click opened it. Synthetic clicks
+need a click state of 1 (`script/pazedo/click.swift` sets it), or apps see a click count of 0.
+
 ### Several daemons
 
 `daemons` lists several daemons; their workspaces are listed together (see "Grouping"). The

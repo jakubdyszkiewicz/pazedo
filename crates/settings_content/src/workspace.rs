@@ -920,6 +920,35 @@ pub struct ProjectPanelSettingsContent {
     ///
     /// Default: false
     pub git_status_indicator: Option<bool>,
+    /// Pazedo: when a click on a file opens it.
+    ///
+    /// Default: always
+    pub open_files_on_click: Option<ProjectPanelOpenFilesOnClick>,
+}
+
+/// Pazedo: when a click on a file in the project panel opens it.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPanelOpenFilesOnClick {
+    /// Every click opens the file.
+    #[default]
+    Always,
+    /// A click on a file that isn't selected only selects it; a click on the selected file, or a
+    /// double click, opens it.
+    WhenSelected,
 }
 
 /// Controls the width of the git diff hunk indicators in the gutter.
