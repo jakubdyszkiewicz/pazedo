@@ -1,6 +1,6 @@
 #!/bin/sh
 # Drives the dev build's window for end-to-end checks. Needs Accessibility permission for the
-# app this runs under (Terminal.app on the Mac mini).
+# app this runs under (for example Terminal.app).
 #
 #   script/pazedo/ui key <key code> [modifiers]   # e.g. `ui key 53` (Escape), `ui key 36` (Return)
 #   script/pazedo/ui type <text>                  # types text into the focused field

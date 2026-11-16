@@ -35,7 +35,7 @@ done; record decisions where the code or docs that implement them live.
   (`unsubscribe_terminal_request` names the terminal, not the slot).
 - Split and restore-on-restart are unsupported (both would start a local shell).
 
-## Later (from the brief)
+## Later
 
 - Remote workspaces without SSH: source code through the Paseo daemon instead of SSH. Would
   need a new Zed remote transport (today SSH, WSL, Docker) carrying Zed's remote-server

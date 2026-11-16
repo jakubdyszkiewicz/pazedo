@@ -1,6 +1,15 @@
-# Developing pazedo on the Mac mini
+# Developing pazedo
 
-Machine: Mac mini M1, 8 cores, 16 GB RAM, 256 GB internal SSD, macOS 27.0.1.
+How to build, run and check pazedo, and how each feature was verified. The notes are dated and
+name the setup they were checked on:
+
+- the build machine: a Mac mini M1 (8 cores, 16 GB RAM, 256 GB internal SSD, macOS 27.0.1),
+  where every measurement here comes from;
+- the test daemon: a throwaway Paseo daemon with a mock agent provider (see "Paseo test daemon"
+  below), used for anything that starts, stops or changes agents;
+- the real daemon: a Paseo daemon on the build machine running real agents, only read from;
+- the dev box: a remote Linux x86_64 machine running another Paseo daemon, reached over
+  Tailscale and SSH, only read from.
 
 ## Toolchain
 
@@ -95,7 +104,7 @@ debug builds) or, with `ZED_BUILD_REMOTE_SERVER=false`, uses
 `~/.zed_server/zed-remote-server-dev-build` on the remote; the header of
 `script/pazedo/remote-server` has the commands to install one there.
 
-Measured 2026-11-15 on the Mac mini (M1, 8 cores, 16 GB): first build 12 min 10 s wall, 57 min
+Measured 2026-11-15 on the Mac mini M1: first build 12 min 10 s wall, 57 min
 user CPU, peak RSS 7.6 GB, `target/remote_server` 5.5 GB; the binary is 679 MB with debug info,
 90 MB stripped, 36 MB gzipped.
 
@@ -182,7 +191,7 @@ On connecting, Pazedo sends the saved password for the endpoint, else, for a dae
 machine (a Unix socket, `localhost`, a loopback address or an address of one of this machine's
 interfaces, such as its own Tailscale address), the daemon's local credential from
 `$PASEO_HOME/local-credential` (default `~/.paseo`), which the daemon accepts like its password,
-so Pazedo needs no password for the Mac mini's own daemon. Passwords never go to settings.json:
+so Pazedo needs no password for a daemon on the same machine. Passwords never go to settings.json:
 release builds keep them in the macOS Keychain under `paseo://<endpoint>`; debug builds use Zed's
 development credentials file (`<config dir>/development_credentials`), as Zed's own debug builds
 do, because every rebuild is signed differently and the Keychain would ask for access each
@@ -217,8 +226,8 @@ and path), and projects with the same key merge, unless one daemon has two proje
 key. The merged project takes its name from the first daemon in the settings. Once the listed
 projects span several daemons, each workspace row names its daemon. New Workspace on a project
 of several daemons first asks which machine the workspace goes on. Verified 2026-11-15 with a
-scratch clone of webapp (only its remote URL) on the test daemon, merged with the dev box's
-webapp, and a new workspace created through the machine menu on the test daemon.
+scratch clone of a repository (only its remote URL) on the test daemon, merged with the dev box's
+clone of it, and a new workspace created through the machine menu on the test daemon.
 
 ### Panel position
 
@@ -260,7 +269,7 @@ down, enter, escape) and in the `menu` context (left, right).
 
 cmd-shift-0 (`paseo_sidebar::RevealActiveWorkspace`, bound as `cmd-)` in the `Workspace` and
 `PaseoSidebar` contexts: macOS reports a shifted digit as its character, so a `cmd-shift-0`
-binding never matches, as the user's `cmd-!` for cmd-shift-1 shows) reveals the open workspace, like the project panel's reveal of the open file: it opens
+binding never matches, as a `cmd-!` binding for cmd-shift-1 shows) reveals the open workspace, like the project panel's reveal of the open file: it opens
 and focuses the sidebar (as `FocusWorkspaceSidebar` does, so escape goes back), expands the
 project or status section the workspace is under, selects its row and scrolls to it. The
 sidebar notes, while rendering, which collapsed section each hidden workspace is under, so
@@ -276,7 +285,7 @@ hands the selection to its header. Verified 2026-11-16 in a dev build with the r
 projects collapsed, and after cmd-g both status sections did.
 
 That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
-In the user's `keymap.json` (Pazedo.app's is `~/.config/pazedo/keymap.json`):
+In your `keymap.json` (Pazedo.app's is `~/.config/pazedo/keymap.json`):
 
 ```json
 [
@@ -464,10 +473,10 @@ store. A Zed workspace's panel shows the first daemon whose folders are on the w
 machine and that has a Paseo workspace for its folder. `PAZEDO_PASEO_ENDPOINT` replaces the whole
 list with one daemon.
 
-A daemon on the machine Pazedo runs on needs no `ssh`. Run on another Mac (e.g. the MacBook),
-the Mac mini's daemon is remote too: its folders are on the mini, so it needs
-`"ssh": "me@my-mac"`; the app uploads its macOS remote server there. The mini
-needs Remote Login (System Settings, General, Sharing) and the MacBook's key in
+A daemon on the machine Pazedo runs on needs no `ssh`. For Pazedo on a laptop and a daemon on a
+desktop Mac, the daemon is remote: its folders are on the desktop, so it needs
+`"ssh": "me@desktop-mac"`; the app uploads its macOS remote server there. The desktop Mac
+needs Remote Login (System Settings, General, Sharing) and the laptop's key in
 `~/.ssh/authorized_keys`.
 
 To try several daemons with a dev build without touching `~/.config/zed`, give it its own data

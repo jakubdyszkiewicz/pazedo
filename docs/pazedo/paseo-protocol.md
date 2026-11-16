@@ -8,8 +8,8 @@ observed against the isolated test daemon (see [development.md](./development.md
 
 ## Why the Rust types are hand-written
 
-The brief suggested generating Rust types from the Zod schemas (export JSON Schema, then
-`typify`). That needs executing the npm package's code, which was not done. More importantly,
+Generating Rust types from the Zod schemas (export JSON Schema, then
+`typify`) was considered. That needs executing the npm package's code, which was not done. More importantly,
 the protocol has about 220 inbound and 240 outbound message types, nearly all irrelevant to
 pazedo, and it changes often. `crates/paseo_client/src/protocol.rs` models only what pazedo
 uses, leniently: unknown fields are ignored, enums have an `Unknown` variant, unmodelled or
@@ -298,9 +298,8 @@ then `usage.list_reports.response {requestId, error}`. A report entry has `id`, 
 caches each report for five minutes; the Paseo app reads every five minutes while visible and
 shows the percent left. The older `provider.usage.list.request` (feature `providerUsageList`,
 marked for removal after 2027-03-26) answers the same in one response. The daemon config's
-`usage.enabled` turns the feature off. Both daemons report Claude (Max 5x) and Codex (plus); the
-Mac mini adds OpenCode Go and the dev box GitHub Copilot, neither with summary windows. The
-test daemon on the Mac mini reports the same accounts as the real one.
+`usage.enabled` turns the feature off. Accounts without summary windows (seen: OpenCode Go, GitHub Copilot) report balances or
+details only. A test daemon on the same machine reports the same accounts as the real one.
 
 `Client::request_with_updates` sends a `StreamingRequest` and collects its updates: an update
 with the request's `requestId` and the request's `UPDATE_TYPE` goes to the request rather than

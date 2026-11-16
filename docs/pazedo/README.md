@@ -2,12 +2,11 @@
 
 pazedo is a fork of [Zed](https://github.com/zed-industries/zed) that uses a
 [Paseo](https://paseo.sh) daemon for workspaces, agent sessions and terminals, while Zed keeps
-doing editing, files, language servers, git and search. The full brief (goal, research,
-milestones) lives outside the repo in `~/dev/BRIEF.md` on the Mac mini.
+doing editing, files, language servers, git and search.
 
 Docs in this folder:
 
-- [development.md](./development.md): building on the Mac mini, measurements, screenshots,
+- [development.md](./development.md): building, measurements, screenshots,
   the Paseo test daemon.
 - [paseo-protocol.md](./paseo-protocol.md): the daemon protocol as `crates/paseo_client` uses
   it, with what was verified against a real daemon.
@@ -80,8 +79,10 @@ makes syncing tractable.
 | `crates/title_bar/src/title_bar.rs` | An `extra_items` field, `TitleBar::add_item` and `TitleBar::workspace`, and the extra items rendered before the sign-in button and user menu | The AI usage indicator (`paseo_ui::usage`) is added to each title bar from outside, through `cx.observe_new::<TitleBar>`, and picks its daemon from the title bar's workspace. Marked `// Pazedo:`. |
 | `crates/zed/src/main.rs` (init) | `paseo_ui::init(cx)` after `project_panel::init` | Registers the title bar observer and the window-wide sidebar actions before the first window opens. |
 | `crates/agent_ui/src/conversation_view/thread_view.rs` | In `render_tool_call`, the header of a collapsible tool call without a location or card gets an id and an `on_click` that toggles its output; in `render_tool_call_label`, a tool call whose `_meta` has `pazedo_icon: "terminal"` gets the terminal icon (both `// Pazedo:`) | Finished Paseo commands are collapsible rows; the chevron alone did not take clicks, and the whole row is the bigger target, as a thinking block's header is. |
-| `assets/settings/default.json` | `title_bar.show_sign_in` defaults to `false`; `project_panel.open_files_on_click` defaults to `when_selected` (Zed's behaviour is `always`) | Pazedo doesn't use a Zed account, so the title bar's Sign In button is hidden; `"title_bar": { "show_sign_in": true }` brings it back. |
+| `assets/settings/default.json` | `title_bar.show_sign_in` defaults to `false`; `project_panel.open_files_on_click` defaults to `when_selected` (Zed's behaviour is `always`); `telemetry.diagnostics` and `telemetry.metrics` default to `false` | Pazedo doesn't use a Zed account, so the title bar's Sign In button is hidden; `"title_bar": { "show_sign_in": true }` brings it back. Telemetry is off so that a fork's crash reports and usage data don't go to Zed's servers under Zed's name. |
 | `assets/keymaps/default-macos.json` | Entries at the end: `ProjectPanel && type_ahead` (backspace and space `null`, enter `project_panel::OpenPermanent`) for type-to-find, and bindings of cmd-n to `paseo_sidebar::NewWorkspace`, cmd-g to `paseo_sidebar::ToggleGrouping` and `cmd-)` (cmd-shift-0) to `paseo_sidebar::RevealActiveWorkspace` in `PaseoSidebar` and `Workspace`, and `cmd-_` (cmd-shift-minus) to `paseo_sidebar::CollapseAll` in `PaseoSidebar`, and to `paseo_panel::NewAgentOrTerminal` in `PaseoPanel`, `PaseoPanel > AcpThread` and `PaseoPanel > Terminal` | Agent and terminal tabs bind cmd-n themselves (new thread, new local terminal); an entry that matches as deep and comes later wins, which a binding registered in code cannot do (Zed clears those when it reloads the keymap). Keep them at the end of the file when merging. |
 | `README.md` | Replaced with Pazedo's README; the two `> [!IMPORTANT]` lines stay at the top | Zed's README described Zed. The two lines are required by `.rules` whenever an agent modifies source files: a reminder that a human must review the change. Only a human removes them. On merges, keep Pazedo's README. |
 | `.rules` (also `AGENTS.md` and `CLAUDE.md`, symlinks to it) | A Pazedo section at the top (what the fork is, where code goes, which daemons are safe to touch, building and verifying, traps, commits) and a short rules-hygiene note at the end; Zed's sections on pull requests, Sentry crash investigation and rules hygiene removed | Agents read this file first. Zed's Rust, GPUI and test-timer guidance is kept word for word: take upstream changes to it on merges, and drop changes to the removed sections. |
+| `.github/` | Deleted | Zed's workflows, issue and discussion templates, pull request template and `FUNDING.yml` (a Sponsor button for Zed Industries) don't apply to the fork. On merges, keep it deleted (`git rm` the files upstream changed). Zed's `tooling/xtask` still generates workflows when run; don't run it. |
+| `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` | Replaced with Pazedo's | Zed's pointed to Zed's processes and code of conduct. On merges, keep Pazedo's. |
 
