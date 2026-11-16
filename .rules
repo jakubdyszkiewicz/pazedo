@@ -1,3 +1,69 @@
+# Pazedo
+
+This repository is Pazedo, a fork of Zed that is a client for Paseo (https://paseo.sh): Paseo's
+daemon owns workspaces, agents and terminals, and Pazedo shows them in Zed. Start with
+`README.md`, then `docs/pazedo/README.md` (fork layout, upstream sync, every change to Zed's own
+code) and `docs/pazedo/development.md` (building, running, every feature and how it was
+verified). Open work is in `docs/pazedo/todo.md`.
+
+## Where code goes
+
+* Fork code lives in its own crates: `crates/paseo_client` (the daemon protocol, no gpui),
+  `crates/paseo_ui` (sidebar, panel, agent and terminal tabs, usage indicator) and
+  `crates/type_ahead`. Fork tooling lives in `script/pazedo/`.
+* Change Zed's own crates only where there is no seam, keep the change small, mark it with a
+  `// Pazedo:` comment, and add it to "Upstream touch points" in `docs/pazedo/README.md`. Prefer a
+  hook in Zed (as `TitleBar::add_item` or `Item::tab_extra_context_menu_actions`) over copying a
+  Zed component.
+* The protocol's source of truth is the Zod schemas of `@getpaseo/protocol` (the version is
+  `PASEO_PROTOCOL_PACKAGE_VERSION` in `crates/paseo_client/src/protocol.rs`) and Paseo's own
+  source. Record what you verify against a daemon in `docs/pazedo/paseo-protocol.md`.
+* Pazedo's default settings and keybindings go in `assets/settings/default.json` and at the end
+  of `assets/keymaps/default-macos.json`.
+
+## Paseo daemons: what is safe
+
+* The user's own daemons run their real agents. Never stop or restart them, and never message,
+  cancel, answer permissions for, archive or close their agents or terminals. Closing an agent
+  tab in Pazedo archives the agent, and closing a terminal tab kills the terminal. Read-only
+  requests are fine.
+* Experiment on the test daemon instead: `script/pazedo/paseo-test` runs Paseo's CLI against
+  an isolated daemon (127.0.0.1:6868, home `~/.paseo-pazedo-test`) with the `mock` provider.
+  See "Paseo test daemon" in `docs/pazedo/development.md`. Check the port with `lsof` before
+  signalling any daemon process.
+
+## Building and verifying
+
+* Iterate with debug builds (`cargo build -p zed`). Make release builds
+  (`script/pazedo/bundle`, about 30 minutes) only when asked.
+* `script/pazedo/run-dev` starts the dev build against the test daemon, with its own data
+  directory. Never start a dev build without a separate data directory while Pazedo.app runs:
+  they would share settings and databases.
+* Check UI changes in the running dev build, not only in tests: `script/pazedo/screenshot`
+  captures the window, and `script/pazedo/ui` clicks, types and presses keys. Do not answer
+  macOS system or permission dialogs.
+* Run `cargo test -p paseo_ui -p paseo_client` and `./script/clippy` on the crates you changed.
+* Document each feature in `docs/pazedo/development.md` when it lands, including what was
+  verified, how, and when. Say plainly what was not verified.
+
+## Traps
+
+* macOS reports a shifted key as its character: cmd-shift-0 arrives as `cmd-)` and
+  cmd-shift-minus as `cmd-_`. A binding written as `cmd-shift-0` never matches.
+* Keybindings registered in code are dropped when Zed reloads the keymap. Put them in
+  `assets/keymaps/default-macos.json`.
+* An action from a tab's context menu does not reach an inactive tab, because Zed doesn't
+  render inactive tabs. Put the target's id in the action and handle it app-wide with
+  `cx.on_action`.
+* The daemon sends no update for a closed agent. After it accepts a change (such as a rename),
+  update the store yourself.
+
+## Commits
+
+* Work on `main`; commit finished, tested work. Write commit titles as imperative sentences,
+  optionally prefixed with the crate (`paseo_ui: Show …`).
+* Merge upstream Zed, don't rebase on it (see `docs/pazedo/README.md`).
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
@@ -136,55 +202,8 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 - Use `./script/clippy` instead of `cargo clippy`
 
-# Pull request hygiene
+# Rules hygiene
 
-When an agent opens or updates a pull request, it must:
-
-- Use a clear, correctly capitalized, imperative PR title (for example, `Fix crash in project panel`).
-- Avoid conventional commit prefixes in PR titles (`fix:`, `feat:`, `docs:`, etc.).
-- Avoid trailing punctuation in PR titles.
-- Optionally prefix the title with a crate name when one crate is the clear scope (for example, `git_ui: Add history view`).
-- Include a `Release Notes:` section as the final section in the PR body.
-- Use one bullet under `Release Notes:`:
-  - `- Added ...`, `- Fixed ...`, or `- Improved ...` for user-facing changes, or
-  - `- N/A` for docs-only and other non-user-facing changes.
-- Changes to `gpui` (including its benchmark and test harnesses) must have a bullet prefixed with `[GPUI]` describing the improvement even when nothing is user-facing in Zed itself, since GPUI is consumed as a library (CI enforces this), for example `- [GPUI] Improved benchmarks to report retired CPU instructions alongside wall time on Linux`.
-- Format release notes exactly with a blank line after the heading, for example:
-
-```
-Release Notes:
-
-- N/A
-```
-
-# Crash Investigation
-
-## Sentry Integration
-- Crash investigation prompts: `.factory/prompts/crash/investigate.md`
-- Crash fix prompts: `.factory/prompts/crash/fix.md`
-- Fetch crash reports: `script/sentry-fetch <issue-id>`
-- Generate investigation prompt from crash: `script/crash-to-prompt <issue-id>`
-
-# Rules Hygiene
-
-These `.rules` files are read by every agent session. Keep them high-signal.
-
-## After any agentic session
-If you discover a non-obvious pattern that would help future sessions, include a **"Suggested .rules additions"** heading in your PR description with the proposed text. Do **not** edit `.rules` inline during normal feature/fix work. Reviewers decide what gets merged.
-
-## High bar for new rules
-Editing or clarifying existing rules is always welcome. New rules must meet **all three** criteria:
-1. **Non-obvious** — someone familiar with the codebase would still get it wrong without the rule.
-2. **Repeatedly encountered** — it came up more than once (multiple hits in one session counts).
-3. **Specific enough to act on** — a concrete instruction, not a vague principle.
-
-Rules that apply to a single crate belong in that crate's own `.rules` file, not the repo root.
-
-## What NOT to put in `.rules`
-Avoid architectural descriptions of a crate (module layout, data flow, key types). These go stale fast and the agent can gather them by reading the code. Rules should be **traps to avoid**, not **maps to follow**.
-
-## No drive-by additions
-Rules emerge from validated patterns, not one-off observations. The workflow is:
-1. Agent notes a pattern during a session.
-2. Team validates the pattern in code review.
-3. A dedicated commit adds the rule with context on *why* it exists.
+Keep this file high-signal: traps to avoid and rules that are easy to get wrong, not
+descriptions of the code, which go stale (those belong in `docs/pazedo/`). Zed's guidance
+above comes from upstream; when merging upstream changes to it, take them.
