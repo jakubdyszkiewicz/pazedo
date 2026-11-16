@@ -1,4 +1,5 @@
 pub mod project_panel_settings;
+mod type_to_find;
 mod undo;
 mod utils;
 
@@ -138,6 +139,8 @@ impl State {
 
 pub struct ProjectPanel {
     project: Entity<Project>,
+    // Pazedo: type-to-find.
+    type_to_find: type_to_find::TypeToFind,
     fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
@@ -897,6 +900,7 @@ impl ProjectPanel {
                 drag_target_entry: None,
                 marked_entries: Default::default(),
                 selection: None,
+                type_to_find: Default::default(),
                 context_menu: None,
                 filename_editor,
                 clipboard: None,
@@ -1976,6 +1980,8 @@ impl ProjectPanel {
     }
 
     fn open_permanent(&mut self, _: &OpenPermanent, window: &mut Window, cx: &mut Context<Self>) {
+        // Pazedo: enter opens a type-to-find match (see the keymap), which ends the search.
+        self.type_to_find.end();
         self.open_internal(false, true, None, window, cx);
     }
 
@@ -2409,6 +2415,11 @@ impl ProjectPanel {
     }
 
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        // Pazedo: escape first ends a type-to-find search.
+        if self.type_to_find.end() {
+            cx.notify();
+            return;
+        }
         if cx.stop_active_drag(window) {
             self.clear_drag_state(cx);
             return;
@@ -7246,6 +7257,10 @@ impl ProjectPanel {
         };
 
         dispatch_context.add(identifier);
+        // Pazedo: the keymap gives keys to a type-to-find search.
+        if self.type_to_find.is_active() {
+            dispatch_context.add("type_ahead");
+        }
         dispatch_context
     }
 
@@ -7530,6 +7545,7 @@ impl Render for ProjectPanel {
         if !cx.has_active_drag() {
             self.clear_drag_state(cx);
         }
+        self.end_moved_type_to_find(window);
 
         let has_worktree = !self.state.visible_entries.is_empty();
         let project = self.project.read(cx);
@@ -7655,6 +7671,7 @@ impl Render for ProjectPanel {
                     },
                 ))
                 .key_context(self.dispatch_context(window, cx))
+                .on_key_down(cx.listener(Self::type_to_find_key))
                 .on_action(cx.listener(Self::scroll_up))
                 .on_action(cx.listener(Self::scroll_down))
                 .on_action(cx.listener(Self::scroll_cursor_center))
@@ -8116,6 +8133,7 @@ impl Render for ProjectPanel {
                                     ))
                                 }),
                         )
+                        .children(self.render_type_to_find(cx))
                         .size_full(),
                 )
                 .custom_scrollbars(

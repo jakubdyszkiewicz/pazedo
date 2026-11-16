@@ -12634,6 +12634,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "title_bar",
+ "type_ahead",
  "ui",
  "util",
  "uuid",
@@ -14177,6 +14178,7 @@ dependencies = [
  "tempfile",
  "theme",
  "theme_settings",
+ "type_ahead",
  "ui",
  "util",
  "workspace",
@@ -19307,6 +19309,14 @@ dependencies = [
  "sha1",
  "thiserror 2.0.21",
  "utf-8",
+]
+
+[[package]]
+name = "type_ahead"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "ui",
 ]
 
 [[package]]

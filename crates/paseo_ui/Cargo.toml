@@ -52,6 +52,7 @@ terminal.workspace = true
 terminal_view.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
+type_ahead.workspace = true
 ui.workspace = true
 util.workspace = true
 uuid = { workspace = true, features = ["v4"] }

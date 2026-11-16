@@ -1855,4 +1855,15 @@
       "cmd-n": "paseo_panel::NewAgentOrTerminal",
     },
   },
+  // Pazedo: while typing to find in the project panel, backspace and space edit the search
+  // (`null` leaves them to it rather than trash or open the entry) and enter opens the match.
+  {
+    "context": "ProjectPanel && type_ahead",
+    "use_key_equivalents": true,
+    "bindings": {
+      "backspace": null,
+      "space": null,
+      "enter": "project_panel::OpenPermanent",
+    },
+  },
 ]

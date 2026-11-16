@@ -229,6 +229,7 @@ members = [
     "crates/time_format",
     "crates/title_bar",
     "crates/toolchain_selector",
+    "crates/type_ahead",
     "crates/ui",
     "crates/ui_input",
     "crates/ui_macros",
@@ -505,6 +506,7 @@ theme_settings = { path = "crates/theme_settings" }
 time_format = { path = "crates/time_format" }
 title_bar = { path = "crates/title_bar" }
 toolchain_selector = { path = "crates/toolchain_selector" }
+type_ahead = { path = "crates/type_ahead" }
 ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }

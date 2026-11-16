@@ -243,7 +243,8 @@ titles (letters in order, ignoring case; runs of letters, word starts and early 
 higher) and selects the best match without hiding the others, scrolling to it. The typed
 letters show at the bottom of the sidebar, red when nothing matches; backspace takes one back,
 enter opens the selected workspace, escape ends the search, and up and down end it and move on
-from the found row. Verified 2026-11-15 in a dev build. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
+from the found row. Verified 2026-11-15 in a dev build. The search itself (matching, the
+query, the strip) is the `type_ahead` crate, shared with the project panel. Focusing the sidebar with `multi_workspace::FocusWorkspaceSidebar`
 (cmd-alt-; by default) selects the open workspace's row. The Paseo panel has the key context
 `PaseoPanel`. Focusing it (`paseo_panel::ToggleFocus`, or switching to an agent tab) puts the
 cursor in the agent's message box, as activating a thread does in Zed's agent panel. Cmd-n
@@ -276,6 +277,19 @@ The first block needs the `Workspace` context: Zed binds cmd-1 to cmd-9 there
 outside the `Workspace` element, hence its own context. Verified 2026-11-15 in a dev build with
 this keymap: cmd-2 focused the sidebar on the open workspace, the arrows moved, collapsed and
 expanded, cmd-2 in the sidebar hid it, cmd-3 focused the panel and cmd-3 in it closed the dock.
+
+### Project panel
+
+Typing in the focused project panel finds an entry the same way: it selects the visible entry
+(the expanded part of the tree) whose name matches best, shows the typed letters at the panel's
+bottom, and leaves the tree as it is. Backspace takes a letter back and space types one (the
+keymap's `ProjectPanel && type_ahead` entry unbinds trash and open while a search is on), enter
+opens the match (`project_panel::OpenPermanent`: a file in a tab of its own, with the focus; a
+folder opens or closes), escape ends the search, and moving the selection (arrows, a click) or
+leaving the panel ends it. The code is in `crates/project_panel/src/type_to_find.rs`, hooked into
+`project_panel.rs` in a few places. Verified 2026-11-16 in a dev build: "rea" selected
+README.md, backspace shortened the search without trashing the file, and "ma" then enter opened
+main.rs.
 
 ### Several daemons
 
