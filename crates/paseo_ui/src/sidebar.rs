@@ -55,9 +55,46 @@ gpui::actions!(
         /// like the project's + button.
         NewWorkspace,
         /// Switches the sidebar between grouping workspaces by project and by status.
-        ToggleGrouping
+        ToggleGrouping,
+        /// Shows the open workspace in the sidebar: opens and focuses the sidebar, expands the
+        /// workspace's project or status section and selects its row, like the project panel's
+        /// reveal of the open file.
+        RevealActiveWorkspace
     ]
 );
+
+/// Lets [`RevealActiveWorkspace`] work from anywhere in a window, not only in the sidebar.
+pub(crate) fn init(cx: &mut App) {
+    cx.observe_new(|workspace: &mut workspace::Workspace, _window, _cx| {
+        workspace.register_action(|workspace, _: &RevealActiveWorkspace, window, cx| {
+            let Some(multi_workspace) = workspace.multi_workspace().and_then(WeakEntity::upgrade)
+            else {
+                return;
+            };
+            // Opening the sidebar updates every workspace, this one included.
+            window.defer(cx, move |window, cx| {
+                multi_workspace.update(cx, |multi_workspace, cx| {
+                    let sidebar_is_focused = multi_workspace.sidebar_open()
+                        && multi_workspace.sidebar().is_some_and(|sidebar| {
+                            sidebar.focus_handle(cx).contains_focused(window, cx)
+                        });
+                    // Opens and focuses it, remembering the focus for escape to go back to.
+                    if !sidebar_is_focused {
+                        multi_workspace.focus_sidebar(window, cx);
+                    }
+                });
+                let sidebar = multi_workspace
+                    .read(cx)
+                    .sidebar()
+                    .and_then(|sidebar| sidebar.to_any().downcast::<PaseoSidebar>().ok());
+                if let Some(sidebar) = sidebar {
+                    sidebar.update(cx, |sidebar, cx| sidebar.reveal_active_workspace(cx));
+                }
+            });
+        });
+    })
+    .detach();
+}
 
 enum RenameTarget {
     Workspace(Entity<PaseoStore>, String),
@@ -96,6 +133,8 @@ struct SelectableRow {
 struct SidebarRows {
     elements: Vec<AnyElement>,
     selectable: Vec<SelectableRow>,
+    /// The workspaces of collapsed projects and status sections, with the one they are under.
+    hidden: HashMap<DaemonItemKey, SidebarEntry>,
 }
 
 impl SidebarRows {
@@ -220,6 +259,11 @@ pub struct PaseoSidebar {
     selectable_rows: Vec<SelectableRow>,
     /// Letters typed in the focused sidebar, which select the best-matching workspace.
     type_ahead: TypeAhead,
+    /// The workspaces of collapsed projects and status sections, as last rendered, with the one
+    /// they are under.
+    hidden_workspaces: HashMap<DaemonItemKey, SidebarEntry>,
+    /// Scroll to the selected row once rendered: its section was just expanded.
+    scroll_to_selection: bool,
     /// The machine menus of projects on several daemons, so the keyboard can open them too.
     new_workspace_menus: std::cell::RefCell<HashMap<DaemonItemKey, PopoverMenuHandle<ContextMenu>>>,
     rename_editor: Entity<Editor>,
@@ -277,6 +321,8 @@ impl PaseoSidebar {
             shows_selection: false,
             selectable_rows: Vec::new(),
             type_ahead: TypeAhead::default(),
+            hidden_workspaces: HashMap::default(),
+            scroll_to_selection: false,
             new_workspace_menus: Default::default(),
             rename_editor,
             renaming: None,
@@ -590,6 +636,28 @@ impl PaseoSidebar {
             return;
         }
         window.dispatch_action(Box::new(FocusWorkspaceSidebar), cx);
+    }
+
+    /// Selects the open workspace's row, expanding the project or status section it is under,
+    /// and scrolls to it.
+    fn reveal_active_workspace(&mut self, cx: &mut Context<Self>) {
+        self.type_ahead.end();
+        let Some((store, workspace_id)) = self.highlighted_workspace(cx) else {
+            return;
+        };
+        let key = DaemonItemKey::new(&store, &workspace_id);
+        match self.hidden_workspaces.get(&key) {
+            Some(SidebarEntry::Project(project)) => {
+                self.collapsed_projects.remove(project);
+            }
+            Some(SidebarEntry::StatusSection(bucket)) => {
+                self.collapsed_buckets.remove(bucket);
+            }
+            Some(SidebarEntry::Workspace(_)) | None => {}
+        }
+        self.selected_entry = Some(SidebarEntry::Workspace(key));
+        self.scroll_to_selection = true;
+        cx.notify();
     }
 
     fn toggle_grouping(
@@ -1467,6 +1535,12 @@ impl PaseoSidebar {
             rows_out.push_selectable(section.clone(), None, header.into_any_element());
             is_first = false;
             if is_collapsed {
+                for (store, _, entry) in bucket_rows {
+                    rows_out.hidden.insert(
+                        DaemonItemKey::new(&store, &entry.workspace.id),
+                        section.clone(),
+                    );
+                }
                 continue;
             }
             for (store, project, entry) in bucket_rows {
@@ -1622,6 +1696,12 @@ impl PaseoSidebar {
             .child(header);
         rows_out.push_selectable(entry.clone(), None, header.into_any_element());
         if is_collapsed {
+            for (store, workspace) in rows {
+                rows_out.hidden.insert(
+                    DaemonItemKey::new(&store, &workspace.workspace.id),
+                    entry.clone(),
+                );
+            }
             return;
         }
         if rows.is_empty() {
@@ -2352,6 +2432,14 @@ impl Render for PaseoSidebar {
             }
         }
         self.selectable_rows = rows.selectable;
+        self.hidden_workspaces = rows.hidden;
+        if std::mem::take(&mut self.scroll_to_selection)
+            && let Some(row) = self
+                .selected_position()
+                .and_then(|position| self.selectable_rows.get(position))
+        {
+            self.scroll_handle.scroll_to_item(row.index);
+        }
         let type_ahead = self.render_type_ahead(cx);
         let mut key_context = gpui::KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("PaseoSidebar");
@@ -2373,6 +2461,9 @@ impl Render for PaseoSidebar {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::new_workspace_for_selection))
             .on_action(cx.listener(Self::toggle_grouping))
+            .on_action(cx.listener(|this, _: &RevealActiveWorkspace, _window, cx| {
+                this.reveal_active_workspace(cx)
+            }))
             .on_key_down(cx.listener(Self::type_ahead_key))
             .font(ui_font)
             .map(|this| match window.window_decorations() {

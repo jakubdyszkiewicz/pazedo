@@ -30,7 +30,9 @@ pub use store::{
 };
 pub use terminal_item::PaseoTerminalItem;
 
-/// Shows the AI subscriptions' usage in every window's title bar. Call before windows open.
+/// Registers the workspace sidebar's window actions and shows the AI subscriptions' usage in
+/// every window's title bar. Call before windows open.
 pub fn init(cx: &mut gpui::App) {
+    sidebar::init(cx);
     usage::init(cx);
 }

@@ -497,6 +497,81 @@ async fn test_keyboard_navigation_in_the_sidebar(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_revealing_the_open_workspace_expands_its_project(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(crate::sidebar::init);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/sandbox"), json!({ "main.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/sandbox").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let (sidebar, _store) = sidebar_with_directory(&multi_workspace, cx);
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.register_sidebar(sidebar.clone(), cx);
+    });
+    cx.run_until_parked();
+    let selected =
+        |cx: &mut VisualTestContext| sidebar.read_with(cx, |sidebar, _| sidebar.selected_row());
+    let press = |action: &dyn gpui::Action, cx: &mut VisualTestContext| {
+        let action = action.boxed_clone();
+        cx.update(|window, cx| window.dispatch_action(action, cx));
+        cx.run_until_parked();
+    };
+    let sidebar_is_focused = |cx: &mut VisualTestContext| {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.focus_handle(cx).contains_focused(window, cx)
+        })
+    };
+    let focus_editor_pane = |cx: &mut VisualTestContext| {
+        multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+            let pane = multi_workspace.workspace().read(cx).active_pane().clone();
+            window.focus(&pane.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+    };
+
+    // Collapse the open workspace's project, then leave and close the sidebar.
+    focus_editor_pane(cx);
+    press(&workspace::FocusWorkspaceSidebar, cx);
+    press(&menu::SelectParent, cx);
+    press(&menu::SelectParent, cx);
+    press(&menu::SelectNext, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("project prj_sandbox"),
+        "collapsed"
+    );
+    press(&menu::Cancel, cx);
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.close_sidebar(window, cx);
+    });
+    focus_editor_pane(cx);
+
+    press(&crate::sidebar::RevealActiveWorkspace, cx);
+    assert!(
+        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.sidebar_open()),
+        "revealing opens the sidebar"
+    );
+    assert!(sidebar_is_focused(cx));
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_second"),
+        "the open workspace's row is selected"
+    );
+    press(&menu::SelectNext, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_first"),
+        "its project was expanded"
+    );
+
+    press(&crate::sidebar::RevealActiveWorkspace, cx);
+    assert!(sidebar_is_focused(cx), "revealing again keeps the focus");
+    assert_eq!(selected(cx).as_deref(), Some("workspace wks_second"));
+}
+
+#[gpui::test]
 async fn test_typing_in_the_sidebar_selects_a_matching_workspace(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());

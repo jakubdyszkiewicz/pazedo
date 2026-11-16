@@ -258,6 +258,16 @@ the panel cmd-n still makes a new file. Verified 2026-11-15 in a dev build: cmd-
 message box opened the menu, and escape returned to the message box. Neither needs changes to Zed's keymaps: the list keys are bound globally (up,
 down, enter, escape) and in the `menu` context (left, right).
 
+cmd-shift-0 (`paseo_sidebar::RevealActiveWorkspace`, bound in the `Workspace` and `PaseoSidebar`
+contexts) reveals the open workspace, like the project panel's reveal of the open file: it opens
+and focuses the sidebar (as `FocusWorkspaceSidebar` does, so escape goes back), expands the
+project or status section the workspace is under, selects its row and scrolls to it. The
+sidebar notes, while rendering, which collapsed section each hidden workspace is under, so
+expanding follows the same grouping as the list. The window-wide handler is registered on every
+Zed workspace by `paseo_ui::init` and waits for the workspace's update to end (opening the
+sidebar updates every workspace). Covered by
+`test_revealing_the_open_workspace_expands_its_project`; not yet tried in a running build.
+
 That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
 In the user's `keymap.json` (Pazedo.app's is `~/.config/pazedo/keymap.json`):
 
