@@ -14,6 +14,7 @@ use acp_thread::{
 use action_log::ActionLog;
 use agent_client_protocol::{schema::MaybeUndefined, v2::schema as acp_v2};
 use agent_servers::{AgentServer, AgentServerDelegate};
+use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow, bail};
 use collections::{HashMap, HashSet};
 use gpui::{
@@ -34,6 +35,7 @@ use paseo_client::{
 use project::{AgentId, Project};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use settings::Settings as _;
 use std::{
     any::Any,
     cell::RefCell,
@@ -975,6 +977,7 @@ fn replay_history(
         .borrow()
         .get(agent_id)
         .and_then(|session| session.stream.cwd.clone());
+    let collapse_running_commands = !AgentSettings::get_global(cx).expand_terminal_card;
     let mut updates = Vec::new();
     let mut last_key = None;
     let cache_dir = agent_images::cache_dir();
@@ -987,7 +990,12 @@ fn replay_history(
             TimelineItem::Reasoning { .. } => Some((MessageKind::Thought, key.clone())),
             _ => None,
         };
-        updates.extend(history_updates(&item, &key, cwd.as_deref()));
+        updates.extend(history_updates(
+            &item,
+            &key,
+            cwd.as_deref(),
+            collapse_running_commands,
+        ));
     }
     agent_images::fetch_images(store, images, cx);
     if let Some(session) = sessions.borrow().get(agent_id) {
@@ -1074,6 +1082,8 @@ fn apply_stream(
         let Some(thread) = session.thread.upgrade() else {
             return;
         };
+        session.stream.collapse_running_commands =
+            !AgentSettings::get_global(cx).expand_terminal_card;
         let mut updates = session.stream.updates(&event);
         restore_sent_images(&mut updates, &session.sent_images);
         log::debug!("  -> {updates:?}");
@@ -1268,6 +1278,8 @@ fn apply_updates(thread: &Entity<AcpThread>, updates: Vec<ThreadUpdate>, cx: &mu
 struct StreamState {
     /// The agent's directory, which relative tool-call paths are resolved against.
     cwd: Option<PathBuf>,
+    /// See `history_updates`.
+    collapse_running_commands: bool,
     turn: Option<String>,
     /// Paseo can announce `turn_completed` before `permission_resolved`, so resolving a
     /// permission only means "running again" while a turn is still active.
@@ -1361,14 +1373,26 @@ impl StreamState {
                 self.assistant = None;
                 self.thought = None;
                 let key = self.new_key("item");
-                history_updates(other, &key, self.cwd.as_deref())
+                history_updates(
+                    other,
+                    &key,
+                    self.cwd.as_deref(),
+                    self.collapse_running_commands,
+                )
             }
         }
     }
 }
 
 /// Updates for one complete timeline item. `key` identifies it when the item has no id.
-fn history_updates(item: &TimelineItem, key: &str, cwd: Option<&Path>) -> Vec<ThreadUpdate> {
+/// `collapse_running_commands` (from `agent.expand_terminal_card` being off) shows running shell
+/// commands as collapsed rows too, rather than Zed's command card.
+fn history_updates(
+    item: &TimelineItem,
+    key: &str,
+    cwd: Option<&Path>,
+    collapse_running_commands: bool,
+) -> Vec<ThreadUpdate> {
     match item {
         TimelineItem::UserMessage { text, message_id } => vec![ThreadUpdate::User(wire(json!({
             "messageId": message_id.as_deref().unwrap_or(key),
@@ -1401,7 +1425,11 @@ fn history_updates(item: &TimelineItem, key: &str, cwd: Option<&Path>) -> Vec<Th
             ))],
         })))],
         TimelineItem::ToolCall(tool_call) => {
-            vec![ThreadUpdate::ToolCall(tool_call_update(tool_call, cwd))]
+            vec![ThreadUpdate::ToolCall(tool_call_update(
+                tool_call,
+                cwd,
+                collapse_running_commands,
+            ))]
         }
         TimelineItem::Todo { items } => vec![ThreadUpdate::Plan(plan(items))],
         TimelineItem::Error { message } => vec![ThreadUpdate::Assistant(wire(json!({
@@ -1418,7 +1446,11 @@ fn history_updates(item: &TimelineItem, key: &str, cwd: Option<&Path>) -> Vec<Th
     }
 }
 
-fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCallUpdate {
+fn tool_call_update(
+    tool_call: &ToolCall,
+    cwd: Option<&Path>,
+    collapse_running_commands: bool,
+) -> acp_v2::ToolCallUpdate {
     let detail = tool_call.detail();
     let diff = edit_diff(&detail, cwd);
     let (title, kind, body) = match (&tool_call.agent_message, &detail) {
@@ -1454,7 +1486,7 @@ fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCal
                 command,
                 output.as_deref(),
                 *exit_code,
-                matches!(tool_call.status, ToolCallStatus::Running),
+                matches!(tool_call.status, ToolCallStatus::Running) && !collapse_running_commands,
             ),
             ToolCallDetail::Read { file_path, .. } => (format!("Read {file_path}"), "read", None),
             ToolCallDetail::Edit {
@@ -1863,7 +1895,7 @@ mod tests {
             }))
         };
 
-        let prompt = history_updates(&agent_message("message"), "k", None);
+        let prompt = history_updates(&agent_message("message"), "k", None, false);
         let [ThreadUpdate::User(message)] = prompt.as_slice() else {
             panic!("expected a user message, got {:?}", keys(&prompt));
         };
@@ -1874,7 +1906,7 @@ mod tests {
         );
 
         let ThreadUpdate::ToolCall(finished) =
-            history_updates(&agent_message("finished"), "k", None).remove(0)
+            history_updates(&agent_message("finished"), "k", None, false).remove(0)
         else {
             panic!("expected a tool call");
         };
@@ -1893,6 +1925,7 @@ mod tests {
                 })),
                 "k",
                 Some(Path::new("/repo")),
+                false,
             )
             .remove(0) else {
                 panic!("expected a tool call");
@@ -1922,6 +1955,23 @@ mod tests {
         );
         assert_eq!(running["title"], "cargo test");
         assert_eq!(running["kind"], "execute");
+
+        // Unless terminal cards are off, then it is a collapsed row from the start.
+        let ThreadUpdate::ToolCall(collapsed) = history_updates(
+            &TimelineItem::from_value(&json!({
+                "type": "tool_call", "callId": "c", "name": "bash", "status": "running",
+                "error": null, "detail": {"type": "shell", "command": "cargo test"},
+            })),
+            "k",
+            None,
+            true,
+        )
+        .remove(0) else {
+            panic!("expected a tool call");
+        };
+        let collapsed = serde_json::to_value(collapsed).unwrap();
+        assert_eq!(collapsed["kind"], "other");
+        assert_eq!(collapsed["title"], "`cargo test`");
 
         // A long or multi-line command shows its first line and expands to the whole of it.
         let script = tool_call(
@@ -2164,6 +2214,7 @@ mod tests {
             },
             "k",
             None,
+            false,
         );
         let sent_images = HashMap::from_iter([("m1".to_string(), vec![image])]);
         restore_sent_images(&mut updates, &sent_images);

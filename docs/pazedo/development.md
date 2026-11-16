@@ -355,7 +355,10 @@ renders as a collapsible row; its `_meta` has `pazedo_icon: "terminal"`, for whi
 the card's terminal icon instead of the generic tool icon (a change to `agent_ui`). Its chevron did not take clicks in
 Pazedo (synthetic clicks reached a thinking block's chevron but never a tool call's; not
 explained), so the whole header row of a collapsible tool call now toggles its output, as a
-thinking block's header does (a change to `agent_ui`, see docs/pazedo/README.md). Verified
+thinking block's header does (a change to `agent_ui`, see docs/pazedo/README.md). With Zed's
+`"agent": { "expand_terminal_card": false }` running commands are collapsed rows too, so commands
+open only on demand; `"thinking_display": "always_collapsed"` does the same for thinking blocks
+(Zed's own setting, which Paseo threads follow). Verified
 2026-11-16 in a dev build with a mock agent: replayed and new commands showed as one line, and a
 click on the line showed the command and its output.
 
