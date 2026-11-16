@@ -345,6 +345,19 @@ there is no ring. On the real daemon a running Claude agent reported 644k of 1M 
 cost mid-turn. Verified 2026-11-16 in a dev build with a mock agent ("emit 50 agent stream
 updates", which reports 50 of 128k tokens): the ring showed "Context 0% • 50 / 128k".
 
+### Commands in agent threads
+
+A finished shell command is one line, the command's first line in code style, that expands to
+the whole command (as raw input) and its output, as a finished thinking block collapses; while
+it runs it is Zed's command card. Zed's card (the `execute` tool kind) cannot be collapsed and
+never shows the output, so a finished command is sent as the `other` kind instead, which Zed
+renders as a collapsible row (with its generic tool icon). Its chevron did not take clicks in
+Pazedo (synthetic clicks reached a thinking block's chevron but never a tool call's; not
+explained), so the whole header row of a collapsible tool call now toggles its output, as a
+thinking block's header does (a change to `agent_ui`, see docs/pazedo/README.md). Verified
+2026-11-16 in a dev build with a mock agent: replayed and new commands showed as one line, and a
+click on the line showed the command and its output.
+
 ### Sending images
 
 Images pasted or attached in an agent's message box go to Paseo with the message

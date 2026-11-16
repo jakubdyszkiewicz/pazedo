@@ -10054,10 +10054,27 @@ impl ThreadView {
                 } else {
                     this.child(
                         h_flex()
+                            .id(("tool-call-header", entry_ix))
                             .group(&card_header_id)
                             .relative()
                             .w_full()
                             .justify_between()
+                            // Pazedo: the whole header toggles the output, as a thinking block's
+                            // does; the chevron alone is a small target. A header with a location
+                            // opens it instead.
+                            .when(is_collapsible && !use_card_layout && !has_location, |this| {
+                                this.cursor_pointer().on_click(cx.listener({
+                                    let id = tool_call.id.clone();
+                                    move |this: &mut Self, _, window, cx: &mut Context<Self>| {
+                                        this.entry_view_state.update(cx, |state, _cx| {
+                                            state.toggle_tool_call_expansion(&id);
+                                        });
+                                        this.materialize_tool_call_views(entry_ix, window, cx);
+                                        this.refresh_thread_search(window, cx);
+                                        cx.notify();
+                                    }
+                                }))
+                            })
                             .when(use_card_layout, |this| {
                                 this.p_0p5()
                                     .rounded_t(rems_from_px(5_f32))

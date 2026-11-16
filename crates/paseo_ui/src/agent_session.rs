@@ -1450,17 +1450,11 @@ fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCal
                 output,
                 exit_code,
                 ..
-            } => (
-                // Zed renders an execute tool call's title as the command, in code style.
-                command.clone(),
-                "execute",
-                output.as_deref().map(|output| {
-                    let mut body = format!("```\n{}\n```", truncate(output));
-                    if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
-                        body.push_str(&format!("\nExit code {exit_code}"));
-                    }
-                    body
-                }),
+            } => shell_tool_call(
+                command,
+                output.as_deref(),
+                *exit_code,
+                matches!(tool_call.status, ToolCallStatus::Running),
             ),
             ToolCallDetail::Read { file_path, .. } => (format!("Read {file_path}"), "read", None),
             ToolCallDetail::Edit {
@@ -1526,6 +1520,11 @@ fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCal
         "kind": kind,
         "status": status,
     });
+    if let ToolCallDetail::Shell { command, .. } = &detail
+        && kind != "execute"
+    {
+        update["rawInput"] = shell_raw_input(command);
+    }
     let mut content = Vec::new();
     if let Some(diff) = diff {
         content.push(diff);
@@ -1661,6 +1660,60 @@ fn plan(items: &[TodoItem]) -> acp_v2::PlanItems {
         })
         .collect();
     wire(json!({"planId": "paseo-todo", "entries": entries}))
+}
+
+/// A shell command's title, kind and body. While it runs it is Zed's command card (the
+/// `execute` kind, titled with the command). Once it has finished it is one line with the command
+/// that expands to its output, as finished thinking collapses: Zed's command card cannot be
+/// collapsed, and a thread of commands is long. The whole command is its raw input then (see
+/// `shell_raw_input`).
+fn shell_tool_call(
+    command: &str,
+    output: Option<&str>,
+    exit_code: Option<i64>,
+    running: bool,
+) -> (String, &'static str, Option<String>) {
+    let output = output.filter(|output| !output.trim().is_empty());
+    let exit_line = exit_code
+        .filter(|code| *code != 0)
+        .map(|code| format!("Exit code {code}"));
+    if running {
+        let body = output.map(|output| {
+            let mut body = format!("```\n{}\n```", truncate(output));
+            if let Some(exit_line) = &exit_line {
+                body.push('\n');
+                body.push_str(exit_line);
+            }
+            body
+        });
+        return (command.to_string(), "execute", body);
+    }
+    const TITLE_LIMIT: usize = 120;
+    let first_line = command.lines().next().unwrap_or_default();
+    let shortened = command.lines().nth(1).is_some() || first_line.chars().count() > TITLE_LIMIT;
+    let summary: String = first_line
+        .chars()
+        .take(TITLE_LIMIT)
+        .collect::<String>()
+        .replace('`', "'");
+    let title = if shortened {
+        format!("`{summary}` …")
+    } else {
+        format!("`{summary}`")
+    };
+    let mut parts = Vec::new();
+    if let Some(output) = output {
+        parts.push(format!("```\n{}\n```", truncate(output)));
+    }
+    parts.extend(exit_line);
+    let body = (!parts.is_empty()).then(|| parts.join("\n\n"));
+    (title, "other", body)
+}
+
+/// A finished command, shown above its output when it is expanded. A string raw input is shown
+/// as markdown.
+fn shell_raw_input(command: &str) -> Value {
+    Value::String(format!("```sh\n{}\n```", truncate(command)))
 }
 
 fn truncate(text: &str) -> &str {
@@ -1850,13 +1903,34 @@ mod tests {
             "failed",
             json!("tests failed"),
         );
-        assert_eq!(shell["title"], "cargo test");
-        assert_eq!(shell["kind"], "execute");
+        // A finished command is one line that expands to its output.
+        assert_eq!(shell["title"], "`cargo test`");
+        assert_eq!(shell["kind"], "other");
         assert_eq!(shell["status"], "failed");
         assert_eq!(
             shell["content"][0]["content"]["text"],
-            "```\nok\n```\nExit code 1\n\n**Error:** tests failed"
+            "```\nok\n```\n\nExit code 1\n\n**Error:** tests failed"
         );
+
+        // A running one is Zed's command card.
+        let running = tool_call(
+            json!({"type": "shell", "command": "cargo test"}),
+            "running",
+            json!(null),
+        );
+        assert_eq!(running["title"], "cargo test");
+        assert_eq!(running["kind"], "execute");
+
+        // A long or multi-line command shows its first line and expands to the whole of it.
+        let script = tool_call(
+            json!({"type": "shell", "command": "cat <<'EOF'\nhello\nEOF", "output": "hello"}),
+            "completed",
+            json!(null),
+        );
+        assert_eq!(script["title"], "`cat <<'EOF'` …");
+        assert_eq!(script["rawInput"], "```sh\ncat <<'EOF'\nhello\nEOF\n```");
+        assert_eq!(script["content"][0]["content"]["text"], "```\nhello\n```");
+        assert_eq!(running.get("rawInput"), None);
 
         let edit = tool_call(
             json!({"type": "edit", "filePath": "src/main.rs", "unifiedDiff": "@@ -1 +1 @@\n-a\n+b"}),
