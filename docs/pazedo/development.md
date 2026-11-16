@@ -351,7 +351,8 @@ A finished shell command is one line, the command's first line in code style, th
 the whole command (as raw input) and its output, as a finished thinking block collapses; while
 it runs it is Zed's command card. Zed's card (the `execute` tool kind) cannot be collapsed and
 never shows the output, so a finished command is sent as the `other` kind instead, which Zed
-renders as a collapsible row (with its generic tool icon). Its chevron did not take clicks in
+renders as a collapsible row; its `_meta` has `pazedo_icon: "terminal"`, for which the row keeps
+the card's terminal icon instead of the generic tool icon (a change to `agent_ui`). Its chevron did not take clicks in
 Pazedo (synthetic clicks reached a thinking block's chevron but never a tool call's; not
 explained), so the whole header row of a collapsible tool call now toggles its output, as a
 thinking block's header does (a change to `agent_ui`, see docs/pazedo/README.md). Verified

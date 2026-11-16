@@ -1524,6 +1524,8 @@ fn tool_call_update(tool_call: &ToolCall, cwd: Option<&Path>) -> acp_v2::ToolCal
         && kind != "execute"
     {
         update["rawInput"] = shell_raw_input(command);
+        // Zed's terminal icon for the row (see `render_tool_call_label` in agent_ui).
+        update["_meta"] = json!({"pazedo_icon": "terminal"});
     }
     let mut content = Vec::new();
     if let Some(diff) = diff {
@@ -1931,6 +1933,7 @@ mod tests {
         assert_eq!(script["rawInput"], "```sh\ncat <<'EOF'\nhello\nEOF\n```");
         assert_eq!(script["content"][0]["content"]["text"], "```\nhello\n```");
         assert_eq!(running.get("rawInput"), None);
+        assert_eq!(script["_meta"]["pazedo_icon"], "terminal");
 
         let edit = tool_call(
             json!({"type": "edit", "filePath": "src/main.rs", "unifiedDiff": "@@ -1 +1 @@\n-a\n+b"}),

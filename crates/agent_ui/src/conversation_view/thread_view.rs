@@ -11665,7 +11665,16 @@ impl ThreadView {
                 .color(Color::Muted)
                 .into_any_element()
         } else {
+            // Pazedo: a finished Paseo command is a collapsible row rather than Zed's command
+            // card, and keeps the card's icon.
+            let is_command = tool_call
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("pazedo_icon"))
+                .and_then(|icon| icon.as_str())
+                == Some("terminal");
             Icon::new(match tool_call.kind() {
+                _ if is_command => IconName::ToolTerminal,
                 acp_v2::ToolKind::Read => IconName::ToolSearch,
                 acp_v2::ToolKind::Edit => IconName::ToolPencil,
                 acp_v2::ToolKind::Delete => IconName::ToolDeleteFile,
