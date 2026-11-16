@@ -17,9 +17,9 @@ use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, ContextMenu, IconPosition, Indicator, PopoverMenu, PopoverMenuHandle, Tab,
-    ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*, right_click_menu,
-    utils::platform_title_bar_height,
+    AgentThreadStatus, ContextMenu, ContextMenuEntry, IconPosition, Indicator, PopoverMenu,
+    PopoverMenuHandle, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*,
+    right_click_menu, utils::platform_title_bar_height,
 };
 use util::ResultExt as _;
 use util::path_list::PathList;
@@ -33,9 +33,7 @@ use crate::{
     daemon_auth::PasswordPrompt,
     new_workspace::{NewWorkspaceChoice, open_new_workspace_picker},
     panel::PaseoPanel,
-    store::{
-        ConnectionStatus, ENDPOINT_ENV_VAR, PaseoDaemons, PaseoStore, ProjectGroup, WorkspaceEntry,
-    },
+    store::{ConnectionStatus, PaseoDaemons, PaseoStore, ProjectGroup, WorkspaceEntry},
 };
 
 /// How the sidebar groups workspaces, as Paseo's app offers: by project, or by what needs the
@@ -60,8 +58,6 @@ gpui::actions!(
 
 enum RenameTarget {
     Workspace(Entity<PaseoStore>, String),
-    /// The daemon's name in the sidebar, kept in settings.json.
-    Daemon(Entity<PaseoStore>),
 }
 
 /// Where a row came from, shown when rows of several projects and daemons are mixed.
@@ -852,13 +848,7 @@ impl PaseoSidebar {
             Tab::container_height(cx)
         };
 
-        // With a single daemon its status and Add Project sit in the header, as before there
-        // could be several; with more, each daemon's section has its own.
         let stores = self.stores(cx);
-        let single_daemon = match stores.as_slice() {
-            [store] => Some(store.clone()),
-            _ => None,
-        };
 
         h_flex()
             .h(header_height)
@@ -897,16 +887,9 @@ impl PaseoSidebar {
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .child(Label::new("Paseo").size(LabelSize::Small))
-            .when_some(single_daemon.clone(), |this, store| {
-                this.group("paseo-sidebar-header")
-                    .child(self.render_daemon_status(&store, Color::Muted, cx))
-                    .children(self.render_daemon_rename_button(
-                        &store,
-                        "paseo-sidebar-header".into(),
-                        cx,
-                    ))
-            })
+            .children(self.render_connection_summary(&stores, cx))
             .child(div().flex_1())
+            .children(self.render_add_project_button(&stores, cx))
             .child(self.render_grouping_menu(cx))
             .child(
                 IconButton::new("paseo-manage-daemons", IconName::Settings)
@@ -916,9 +899,6 @@ impl PaseoSidebar {
                         cx.listener(|this, _, window, cx| this.open_daemons_dialog(window, cx)),
                     ),
             )
-            .when_some(single_daemon, |this, store| {
-                this.children(self.render_add_project_button(&store, cx))
-            })
             .when(right_window_controls, |this| {
                 this.children(platform_title_bar::render_right_window_controls(
                     cx.button_layout(),
@@ -929,132 +909,107 @@ impl PaseoSidebar {
             .into_any_element()
     }
 
-    /// The daemon's connection dot and name, with the connection's details on hover, a
-    /// right-click menu to rename it, and the name editor while renaming.
-    fn render_daemon_status(
+    /// How many daemons are connected, e.g. "All online" or "2/3 online", with each daemon's
+    /// status on hover. A click opens the Paseo Daemons dialog, which lists them.
+    fn render_connection_summary(
         &self,
-        store: &Entity<PaseoStore>,
-        name_color: Color,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let store_ref = store.read(cx);
-        let (indicator_color, status_text): (Color, SharedString) = match store_ref.status() {
-            ConnectionStatus::Connected(_) => (Color::Success, store_ref.display_name()),
-            ConnectionStatus::Connecting(_) => (
-                Color::Warning,
-                format!("{} · Connecting…", store_ref.display_name()).into(),
-            ),
-            ConnectionStatus::Disconnected(_) => (
-                Color::Error,
-                format!("{} · Disconnected", store_ref.display_name()).into(),
-            ),
-            ConnectionStatus::PasswordRequired { .. } => (
-                Color::Warning,
-                format!("{} · Password required", store_ref.display_name()).into(),
-            ),
-            ConnectionStatus::NotConfigured | ConnectionStatus::InvalidEndpoint(_) => {
-                (Color::Muted, "Not connected".into())
-            }
-        };
-        let daemon = store.entity_id();
-        let is_renaming =
-            matches!(&self.renaming, Some(RenameTarget::Daemon(renaming)) if renaming == store);
-        if is_renaming {
-            return h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(Indicator::dot().color(indicator_color))
-                .child(self.render_rename_editor(cx))
-                .into_any_element();
-        }
-        let tooltip = connection_tooltip(store_ref);
-        let status = h_flex()
-            .id(SharedString::from(format!(
-                "paseo-connection-status-{daemon}"
-            )))
-            .min_w_0()
-            .gap_1()
-            .child(Indicator::dot().color(indicator_color))
-            .child(
-                Label::new(status_text)
-                    .size(LabelSize::Small)
-                    .color(name_color)
-                    .truncate(),
-            )
-            .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx));
-        let sidebar = cx.weak_entity();
-        let store = store.clone();
-        right_click_menu(SharedString::from(format!("paseo-daemon-menu-{daemon}")))
-            .trigger(move |_, _, _| status)
-            .menu(move |window, cx| {
-                let sidebar = sidebar.clone();
-                let store = store.clone();
-                ContextMenu::build(window, cx, move |menu, _, _| {
-                    menu.entry("Rename…", None, move |window, cx| {
-                        sidebar
-                            .update(cx, |sidebar, cx| {
-                                sidebar.start_daemon_rename(&store, window, cx)
-                            })
-                            .ok();
-                    })
-                })
-            })
-            .into_any_element()
-    }
-
-    /// A pencil shown while the daemon's row is hovered.
-    fn render_daemon_rename_button(
-        &self,
-        store: &Entity<PaseoStore>,
-        group: SharedString,
+        stores: &[Entity<PaseoStore>],
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if matches!(&self.renaming, Some(RenameTarget::Daemon(renaming)) if renaming == store) {
-            return None;
-        }
+        let statuses: Vec<(SharedString, &ConnectionStatus)> = stores
+            .iter()
+            .map(|store| {
+                let store = store.read(cx);
+                (store.display_name(), store.status())
+            })
+            .collect();
+        let (color, text) = connection_summary(statuses.iter().map(|(_, status)| *status))?;
+        let tooltip: SharedString = statuses
+            .iter()
+            .map(|(name, status)| format!("{name}: {}", status_label(status)))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into();
         Some(
-            IconButton::new(
-                SharedString::from(format!("paseo-rename-daemon-{}", store.entity_id())),
-                IconName::Pencil,
-            )
-            .icon_size(IconSize::Small)
-            .tooltip(Tooltip::text("Rename"))
-            .visible_on_hover(group)
-            .on_click(cx.listener({
-                let store = store.clone();
-                move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.start_daemon_rename(&store, window, cx)
-                }
-            }))
-            .into_any_element(),
+            h_flex()
+                .id("paseo-connection-summary")
+                .min_w_0()
+                .gap_1()
+                .cursor_pointer()
+                .child(Indicator::dot().color(color))
+                .child(
+                    Label::new(text)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate(),
+                )
+                .tooltip(Tooltip::text(tooltip))
+                .on_click(cx.listener(|this, _, window, cx| this.open_daemons_dialog(window, cx)))
+                .into_any_element(),
         )
     }
 
+    /// Add Project, on the one daemon, or on the daemon picked from a menu when there are
+    /// several. Shown once a daemon is connected.
     fn render_add_project_button(
         &self,
-        store: &Entity<PaseoStore>,
+        stores: &[Entity<PaseoStore>],
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !matches!(store.read(cx).status(), ConnectionStatus::Connected(_)) {
+        let is_connected = |store: &Entity<PaseoStore>, cx: &App| {
+            matches!(store.read(cx).status(), ConnectionStatus::Connected(_))
+        };
+        if !stores.iter().any(|store| is_connected(store, cx)) {
             return None;
         }
+        let button =
+            IconButton::new("paseo-add-project", IconName::Plus).icon_size(IconSize::Small);
+        if let [store] = stores {
+            return Some(
+                button
+                    .tooltip(Tooltip::text("Add Project…"))
+                    .on_click(cx.listener({
+                        let store = store.clone();
+                        move |this, _, window, cx| this.add_project(&store, window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let sidebar = cx.weak_entity();
+        let daemons: Vec<_> = stores
+            .iter()
+            .map(|store| {
+                let name = store.read(cx).display_name();
+                (store.clone(), name, is_connected(store, cx))
+            })
+            .collect();
         Some(
-            IconButton::new(
-                SharedString::from(format!("paseo-add-project-{}", store.entity_id())),
-                IconName::Plus,
-            )
-            .icon_size(IconSize::Small)
-            .tooltip(Tooltip::text("Add Project…"))
-            .on_click(cx.listener({
-                let store = store.clone();
-                move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.add_project(&store, window, cx)
-                }
-            }))
-            .into_any_element(),
+            PopoverMenu::new("paseo-add-project-menu")
+                .trigger_with_tooltip(button, Tooltip::text("Add Project…"))
+                .anchor(gpui::Anchor::TopRight)
+                .menu(move |window, cx| {
+                    let sidebar = sidebar.clone();
+                    let daemons = daemons.clone();
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        menu = menu.header("Add Project On");
+                        for (store, name, is_connected) in daemons {
+                            let sidebar = sidebar.clone();
+                            menu = menu.item(
+                                ContextMenuEntry::new(name).disabled(!is_connected).handler(
+                                    move |window, cx| {
+                                        sidebar
+                                            .update(cx, |sidebar, cx| {
+                                                sidebar.add_project(&store, window, cx)
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element(),
         )
     }
 
@@ -1165,16 +1120,6 @@ impl PaseoSidebar {
         );
     }
 
-    fn start_daemon_rename(
-        &mut self,
-        store: &Entity<PaseoStore>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = store.read(cx).display_name().to_string();
-        self.begin_rename(RenameTarget::Daemon(store.clone()), name, window, cx);
-    }
-
     fn begin_rename(
         &mut self,
         target: RenameTarget,
@@ -1195,8 +1140,7 @@ impl PaseoSidebar {
     }
 
     /// Ends renaming in place, saving the edited name unless `save` is false. Like Paseo, an
-    /// empty or unchanged name leaves a workspace as it was; an empty daemon name goes back to
-    /// the daemon's host name.
+    /// empty or unchanged name leaves a workspace as it was.
     fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.renaming.take() else {
             return;
@@ -1209,23 +1153,7 @@ impl PaseoSidebar {
             return;
         }
         let title = self.rename_editor.read(cx).text(cx).trim().to_string();
-        let (store, workspace_id) = match target {
-            RenameTarget::Workspace(store, workspace_id) => (store, workspace_id),
-            RenameTarget::Daemon(store) => {
-                if store.read(cx).display_name() == title {
-                    return;
-                }
-                if let Err(error) = store.read(cx).rename(Some(title), cx) {
-                    Task::<anyhow::Result<()>>::ready(Err(error)).detach_and_prompt_err(
-                        "Could not rename the daemon",
-                        window,
-                        cx,
-                        |error, _, _| Some(format!("{error:#}")),
-                    );
-                }
-                return;
-            }
-        };
+        let RenameTarget::Workspace(store, workspace_id) = target;
         let unchanged = store
             .read(cx)
             .workspace(&workspace_id)
@@ -1386,7 +1314,13 @@ impl PaseoSidebar {
         });
     }
 
-    fn render_message(&self, store: &PaseoStore, cx: &App) -> Option<AnyElement> {
+    /// The daemon's problem, if any, named after the daemon when there are several.
+    fn render_message(
+        &self,
+        store: &PaseoStore,
+        several_daemons: bool,
+        cx: &App,
+    ) -> Option<AnyElement> {
         let (icon, message): (IconName, SharedString) = match store.status() {
             ConnectionStatus::NotConfigured => (
                 IconName::Info,
@@ -1407,6 +1341,11 @@ impl PaseoSidebar {
                     format!("Failed to load workspaces: {error}").into(),
                 )
             }
+        };
+        let message = if several_daemons {
+            format!("{}: {message}", store.display_name()).into()
+        } else {
+            message
         };
         Some(render_notice(icon, message, cx))
     }
@@ -1483,48 +1422,19 @@ impl PaseoSidebar {
         });
     }
 
-    /// A daemon's problems (not connected, errors) and, with several daemons, its row with the
-    /// daemon's status, name and Add Project. Its workspaces are listed under projects or
-    /// statuses, mixed with other daemons'.
-    fn render_daemon(
+    /// A daemon's problem (not connected, a password needed, an error), above the workspaces.
+    fn render_daemon_notice(
         &self,
         store: &Entity<PaseoStore>,
-        with_header: bool,
-        is_first: bool,
+        several_daemons: bool,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let daemon = store.entity_id();
-        let message = match store.read(cx).status() {
+    ) -> Option<AnyElement> {
+        match store.read(cx).status() {
             ConnectionStatus::PasswordRequired { rejected } => {
                 Some(self.render_password_notice(store, *rejected, cx))
             }
-            _ => self.render_message(store.read(cx), cx),
-        };
-        let colors = cx.theme().colors();
-        let (panel_background, border) = (colors.panel_background, colors.border);
-        let header = with_header.then(|| {
-            let row_group = SharedString::from(format!("paseo-daemon-row-{daemon}"));
-            h_flex()
-                .id(SharedString::from(format!("paseo-daemon-{daemon}")))
-                .group(row_group.clone())
-                .h(Tab::container_height(cx))
-                .w_full()
-                .px_2()
-                .gap_1()
-                .bg(panel_background)
-                .when(!is_first, |this| this.border_t_1())
-                .border_b_1()
-                .border_color(border)
-                .child(self.render_daemon_status(store, Color::Default, cx))
-                .child(div().flex_1())
-                .children(self.render_daemon_rename_button(store, row_group, cx))
-                .children(self.render_add_project_button(store, cx))
-        });
-        v_flex()
-            .w_full()
-            .children(header)
-            .children(message)
-            .into_any_element()
+            _ => self.render_message(store.read(cx), several_daemons, cx),
+        }
     }
 
     fn render_status_groups(
@@ -2139,29 +2049,45 @@ fn render_notice(icon: IconName, message: SharedString, cx: &App) -> AnyElement 
         .into_any_element()
 }
 
-fn connection_tooltip(store: &PaseoStore) -> SharedString {
-    match store.status() {
-        ConnectionStatus::Connected(server_info) => format!(
-            "Connected to {} (Paseo {})",
-            server_info.server_id,
-            server_info.version.as_deref().unwrap_or("unknown version")
+/// The header's dot and text for the daemons' statuses: green when all are connected, red when
+/// none is and none is on its way, orange otherwise. `None` without daemons.
+fn connection_summary<'a>(
+    statuses: impl IntoIterator<Item = &'a ConnectionStatus>,
+) -> Option<(Color, SharedString)> {
+    let statuses: Vec<_> = statuses.into_iter().collect();
+    let connected = statuses
+        .iter()
+        .filter(|status| matches!(status, ConnectionStatus::Connected(_)))
+        .count();
+    let connecting = statuses.iter().any(|status| {
+        matches!(
+            status,
+            ConnectionStatus::Connecting(_) | ConnectionStatus::PasswordRequired { .. }
         )
-        .into(),
-        ConnectionStatus::Connecting(endpoint) => format!("Connecting to {endpoint}").into(),
-        ConnectionStatus::Disconnected(reason) => {
-            format!("{reason}. Reconnecting automatically.").into()
-        }
-        ConnectionStatus::NotConfigured => format!(
-            "Set paseo.endpoint in settings.json (or {ENDPOINT_ENV_VAR}) to connect to a Paseo daemon"
-        )
-        .into(),
-        ConnectionStatus::InvalidEndpoint(error) => error.clone(),
-        ConnectionStatus::PasswordRequired { rejected: true } => {
-            "The daemon rejected the password".into()
-        }
-        ConnectionStatus::PasswordRequired { rejected: false } => {
-            "The daemon needs a password".into()
-        }
+    });
+    let color = if connected == statuses.len() {
+        Color::Success
+    } else if connected == 0 && !connecting {
+        Color::Error
+    } else {
+        Color::Warning
+    };
+    let text: SharedString = match statuses.as_slice() {
+        [] => return None,
+        [status] => status_label(status).into(),
+        _ if connected == statuses.len() => "All online".into(),
+        _ => format!("{connected}/{} online", statuses.len()).into(),
+    };
+    Some((color, text))
+}
+
+fn status_label(status: &ConnectionStatus) -> &'static str {
+    match status {
+        ConnectionStatus::Connected(_) => "Online",
+        ConnectionStatus::Connecting(_) => "Connecting…",
+        ConnectionStatus::Disconnected(_) => "Offline",
+        ConnectionStatus::PasswordRequired { .. } => "Password required",
+        ConnectionStatus::NotConfigured | ConnectionStatus::InvalidEndpoint(_) => "Not connected",
     }
 }
 
@@ -2440,11 +2366,11 @@ impl Render for PaseoSidebar {
         if stores.is_empty() {
             rows.push(self.render_not_configured(cx));
         } else {
-            // The daemons' status rows (or only their problems, with one daemon), then every
-            // daemon's workspaces by status or by project.
-            for (index, store) in stores.iter().enumerate() {
-                let row = self.render_daemon(store, several_daemons, index == 0, cx);
-                rows.push(row);
+            // The daemons' problems, then every daemon's workspaces by status or by project.
+            for store in &stores {
+                if let Some(notice) = self.render_daemon_notice(store, several_daemons, cx) {
+                    rows.push(notice);
+                }
             }
             match self.grouping {
                 Grouping::Status => self.render_status_groups(
@@ -2564,6 +2490,7 @@ impl Render for PaseoSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paseo_client::protocol::ServerInfo;
 
     fn project(id: &str, key: Option<&str>, name: &str) -> ProjectGroup {
         ProjectGroup {
@@ -2656,6 +2583,47 @@ mod tests {
             type_ahead_score("SAY", "say hello"),
             type_ahead_score("say", "Say hello"),
             "case does not matter"
+        );
+    }
+
+    #[test]
+    fn summarizes_the_daemons_connections() {
+        let connected = ConnectionStatus::Connected(std::sync::Arc::new(ServerInfo {
+            protocol_version: None,
+            server_id: "mini".into(),
+            hostname: None,
+            version: None,
+            permissions: Vec::new(),
+            features: Default::default(),
+        }));
+        let offline = ConnectionStatus::Disconnected("connection refused".into());
+        let password = ConnectionStatus::PasswordRequired { rejected: false };
+        let summary = |statuses: &[&ConnectionStatus]| {
+            connection_summary(statuses.iter().copied())
+                .map(|(color, text)| (color, text.to_string()))
+        };
+
+        assert_eq!(summary(&[]), None);
+        assert_eq!(
+            summary(&[&connected]),
+            Some((Color::Success, "Online".into()))
+        );
+        assert_eq!(summary(&[&offline]), Some((Color::Error, "Offline".into())));
+        assert_eq!(
+            summary(&[&connected, &connected]),
+            Some((Color::Success, "All online".into()))
+        );
+        assert_eq!(
+            summary(&[&connected, &offline, &connected]),
+            Some((Color::Warning, "2/3 online".into()))
+        );
+        assert_eq!(
+            summary(&[&offline, &offline]),
+            Some((Color::Error, "0/2 online".into()))
+        );
+        assert_eq!(
+            summary(&[&offline, &password]),
+            Some((Color::Warning, "0/2 online".into()))
         );
     }
 

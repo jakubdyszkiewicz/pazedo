@@ -279,10 +279,17 @@ expanded, cmd-2 in the sidebar hid it, cmd-3 focused the panel and cmd-3 in it c
 
 ### Several daemons
 
-`daemons` lists several daemons, each with a row at the top of the sidebar with its connection
-status, name and Add Project; their workspaces are listed together below (see "Grouping"). With
-a single daemon the sidebar looks as before (status and Add Project in its header). `endpoint` and `ssh` at the top level are
-shorthand for one more daemon, listed first:
+`daemons` lists several daemons; their workspaces are listed together (see "Grouping"). The
+sidebar header says how many are connected: "Paseo" with a dot and "All online" (green), "2/3
+online" (orange; red when none is connected or connecting), or with a single daemon its status
+("Online", "Offline", …). Hovering it lists each daemon's status, and clicking it opens the Paseo
+Daemons dialog. A daemon's problems (offline, a password needed, failed loading) show above the
+workspaces, named after the daemon when there are several. The header's + adds a project: on the
+one daemon, or with several on the one picked from its "Add Project On" menu (offline daemons
+greyed out). Verified 2026-11-16 in a dev build: "Online" with the test daemon, "All online"
+with it and the dev box, "2/3 online" with an unreachable third daemon, and + → dev box opened
+the dev box's folder picker. `endpoint` and `ssh` at the top level are shorthand for one more
+daemon, listed first:
 
 ```json
 "paseo": {
@@ -302,9 +309,8 @@ daemon also deletes its saved password. With `PAZEDO_PASEO_ENDPOINT` set it says
 variable wins. Verified 2026-11-15 in a dev build: a duplicate endpoint was refused, a daemon was
 added, edited and removed, and settings.json ended as it started.
 
-`name` defaults to the daemon's host name. The pencil on a daemon's row (or its right-click
-menu) renames it in place and writes `name` to settings.json; an empty name removes it. The
-top-level shorthand takes a `name` too. Each daemon has its own `PaseoStore` and
+`name` defaults to the daemon's host name; the dialog's Name field sets it. The top-level
+shorthand takes a `name` too. Each daemon has its own `PaseoStore` and
 `PaseoConnection`; `PaseoDaemons` keeps the list in step with the settings, keeping a daemon's
 store (and connection) while its endpoint stays. Agent and terminal tabs hold their daemon's
 store. A Zed workspace's panel shows the first daemon whose folders are on the workspace's
