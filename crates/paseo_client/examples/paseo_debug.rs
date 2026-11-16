@@ -97,6 +97,7 @@ fn main() -> Result<()> {
                         text,
                         message_id: args.get(3).cloned(),
                         active_turn_behavior: None,
+                        images: Vec::new(),
                     })
                     .await?;
                 println!("{response:?}");

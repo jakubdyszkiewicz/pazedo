@@ -12,7 +12,7 @@ use acp_thread::{
     ReceiptSessionSubmissions, ReceiptSubmission, SubmissionDisconnected,
 };
 use action_log::ActionLog;
-use agent_client_protocol::v2::schema as acp_v2;
+use agent_client_protocol::{schema::MaybeUndefined, v2::schema as acp_v2};
 use agent_servers::{AgentServer, AgentServerDelegate};
 use anyhow::{Context as _, Result, anyhow, bail};
 use collections::{HashMap, HashSet};
@@ -25,10 +25,10 @@ use paseo_client::{
     protocol::{
         AgentMessage, AgentMessageEvent, AgentSessionConfig, AgentStatus, AgentStream,
         AgentStreamEvent, CancelAgent, CreateAgent, FetchAgentTimeline, FetchAgentTimelineResponse,
-        PermissionBehavior, PermissionRequest, PermissionResponse, ReleaseSubscription,
-        RespondToPermission, SendAgentMessage, SetAgentMode, SetAgentModel, SetAgentThinking,
-        SetAgentTimelineSubscription, TimelineDirection, TimelineItem, TimelineProjection,
-        TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
+        ImageAttachment, PermissionBehavior, PermissionRequest, PermissionResponse,
+        ReleaseSubscription, RespondToPermission, SendAgentMessage, SetAgentMode, SetAgentModel,
+        SetAgentThinking, SetAgentTimelineSubscription, TimelineDirection, TimelineItem,
+        TimelineProjection, TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
     },
 };
 use project::{AgentId, Project};
@@ -151,6 +151,9 @@ struct Session {
     timeline_subscription: Option<String>,
     /// Paseo permission request id → the prompt shown in the thread.
     permissions: HashMap<String, PermissionRequestId>,
+    /// The images of messages sent from this thread, by message id. Paseo's echo of a message
+    /// has only its text, and the echo replaces the message in the thread.
+    sent_images: HashMap<String, Vec<acp_v2::ContentBlock>>,
     _release_subscription: Subscription,
 }
 
@@ -255,7 +258,11 @@ impl PaseoConnection {
                 project,
                 action_log,
                 acp_v2::SessionId::new(agent_id.clone()),
-                watch::Receiver::constant(acp_v2::PromptCapabilities::default()),
+                // Paseo takes images with a message, for every provider; the message box only
+                // accepts pasted or attached images when the agent advertises them.
+                watch::Receiver::constant(
+                    acp_v2::PromptCapabilities::new().image(acp_v2::PromptImageCapabilities::new()),
+                ),
                 cx,
             )
         });
@@ -308,6 +315,7 @@ impl PaseoConnection {
                 last_seq: None,
                 timeline_subscription: None,
                 permissions: HashMap::default(),
+                sent_images: HashMap::default(),
                 _release_subscription: release_subscription,
             },
         );
@@ -738,9 +746,18 @@ impl ReceiptSessionSubmissions for PaseoSubmissions {
         // matches the echo to this submission.
         let message_id = uuid::Uuid::new_v4().to_string();
         let text = prompt_text(&content);
+        let images = prompt_images(&content);
 
         if let Some(session) = self.sessions.borrow_mut().get_mut(&agent_id) {
             session.holds += 1;
+            let images: Vec<_> = content
+                .iter()
+                .filter(|block| matches!(block, acp_v2::ContentBlock::Image(_)))
+                .cloned()
+                .collect();
+            if !images.is_empty() {
+                session.sent_images.insert(message_id.clone(), images);
+            }
         }
         let (applied_tx, applied_rx) = futures::channel::oneshot::channel::<bool>();
         cx.spawn({
@@ -767,6 +784,7 @@ impl ReceiptSessionSubmissions for PaseoSubmissions {
                     text,
                     message_id: Some(message_id.clone()),
                     active_turn_behavior: None,
+                    images,
                 })
                 .await
                 .map_err(|error| {
@@ -859,6 +877,35 @@ fn prompt_text(content: &[acp_v2::ContentBlock]) -> String {
         .join("\n")
 }
 
+/// Puts the images of messages sent from this thread back into Paseo's echoes of them.
+fn restore_sent_images(
+    updates: &mut [ThreadUpdate],
+    sent_images: &HashMap<String, Vec<acp_v2::ContentBlock>>,
+) {
+    for update in updates {
+        if let ThreadUpdate::User(message) = update
+            && let Some(images) = sent_images.get(&message.message_id.to_string())
+            && let MaybeUndefined::Value(content) = &mut message.content
+        {
+            content.extend(images.iter().cloned());
+        }
+    }
+}
+
+/// The prompt's images, which Paseo takes alongside the text.
+fn prompt_images(content: &[acp_v2::ContentBlock]) -> Vec<ImageAttachment> {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            acp_v2::ContentBlock::Image(image) => Some(ImageAttachment {
+                data: image.data.clone(),
+                mime_type: image.mime_type.to_string(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 fn handle_store_event(
     sessions: &Sessions,
     store: &Entity<PaseoStore>,
@@ -943,6 +990,9 @@ fn replay_history(
         updates.extend(history_updates(&item, &key, cwd.as_deref()));
     }
     agent_images::fetch_images(store, images, cx);
+    if let Some(session) = sessions.borrow().get(agent_id) {
+        restore_sent_images(&mut updates, &session.sent_images);
+    }
 
     let agent = history
         .agent
@@ -1024,7 +1074,8 @@ fn apply_stream(
         let Some(thread) = session.thread.upgrade() else {
             return;
         };
-        let updates = session.stream.updates(&event);
+        let mut updates = session.stream.updates(&event);
+        restore_sent_images(&mut updates, &session.sent_images);
         log::debug!("  -> {updates:?}");
         (thread, updates)
     };
@@ -1998,6 +2049,57 @@ mod tests {
             serde_json::to_value(&options[0]).unwrap()["currentValue"],
             "custom"
         );
+    }
+
+    #[test]
+    fn images_are_sent_and_kept_in_the_echo() {
+        let image = wire::<acp_v2::ContentBlock>(
+            json!({"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}),
+        );
+        let content = vec![wire(text_block("What is this?")), image.clone()];
+        assert_eq!(prompt_text(&content), "What is this?");
+        let images = prompt_images(&content);
+        assert_eq!(
+            images,
+            [ImageAttachment {
+                data: "iVBORw0KGgo=".into(),
+                mime_type: "image/png".into()
+            }]
+        );
+        let request = serde_json::to_value(SendAgentMessage {
+            agent_id: "a1".into(),
+            text: "What is this?".into(),
+            message_id: None,
+            active_turn_behavior: None,
+            images,
+        })
+        .unwrap();
+        assert_eq!(
+            request["images"],
+            json!([{"data": "iVBORw0KGgo=", "mimeType": "image/png"}])
+        );
+
+        // Paseo's echo has the text only; the thread's message keeps the image.
+        let mut updates = history_updates(
+            &TimelineItem::UserMessage {
+                text: "What is this?".into(),
+                message_id: Some("m1".into()),
+            },
+            "k",
+            None,
+        );
+        let sent_images = HashMap::from_iter([("m1".to_string(), vec![image])]);
+        restore_sent_images(&mut updates, &sent_images);
+        let ThreadUpdate::User(message) = &updates[0] else {
+            panic!("expected the user message, got {updates:?}");
+        };
+        let MaybeUndefined::Value(content) = &message.content else {
+            panic!("the message has no content");
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [_, acp_v2::ContentBlock::Image(_)]
+        ));
     }
 
     #[test]

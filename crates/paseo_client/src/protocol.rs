@@ -719,6 +719,18 @@ pub struct SendAgentMessage {
     pub message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_turn_behavior: Option<ActiveTurnBehavior>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+/// An image sent with a message.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+    /// Base64-encoded.
+    pub data: String,
+    /// e.g. "image/png".
+    pub mime_type: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

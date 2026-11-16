@@ -345,6 +345,19 @@ there is no ring. On the real daemon a running Claude agent reported 644k of 1M 
 cost mid-turn. Verified 2026-11-16 in a dev build with a mock agent ("emit 50 agent stream
 updates", which reports 50 of 128k tokens): the ring showed "Context 0% • 50 / 128k".
 
+### Sending images
+
+Images pasted or attached in an agent's message box go to Paseo with the message
+(`send_agent_message_request`'s `images: [{data, mimeType}]`, base64), as the Paseo app sends
+them, for any provider. Zed's message box only accepts images when the agent's prompt
+capabilities include images, which Paseo sessions now advertise; before, a pasted image was
+silently refused. Paseo's echo of the message has its text only and replaces the message in
+the thread, so the session keeps the images it sent, by message id, and adds them back to the
+echo (they are gone after reloading the agent; the daemon does not return them). Verified
+2026-11-16 in a dev build with a mock agent: a pasted PNG showed as an Image chip, the daemon
+accepted the message, and the chip stayed after the echo. The mock provider ignores images, so a
+real agent seeing the image is not verified yet.
+
 ### Images in agent messages
 
 Zed's agent view shows markdown images from absolute paths and `http(s)` URLs, not `file://`

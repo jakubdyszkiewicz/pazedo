@@ -453,6 +453,7 @@ mod screenshots {
                         text: message,
                         message_id: None,
                         active_turn_behavior: None,
+                        images: Vec::new(),
                     })
                     .await
             });
