@@ -19,8 +19,8 @@ This folder is outside `docs/src/`, so Zed's mdBook and docs automation ignore i
 
 ## Repository layout and remotes
 
-- Local only for now: there is no GitHub fork yet. The clone's remote for Zed is named
-  `upstream` (not `origin`) so that a fork can be added as `origin` later without renaming.
+- The fork is https://github.com/jakubdyszkiewicz/pazedo (`origin`); Zed is the `upstream`
+  remote.
 - Fork code goes into new crates and fork tooling into `script/pazedo/`. Crates so far:
   `crates/paseo_client` (daemon protocol client; no gpui dependency) and `crates/paseo_ui`
   (the Paseo workspace sidebar, the store behind it, Paseo agent sessions shown with Zed's

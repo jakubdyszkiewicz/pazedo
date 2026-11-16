@@ -1,50 +1,136 @@
 > [!IMPORTANT]
 > Remove this line to confirm you've reviewed this PR before submitting.
-# Zed
+# Pazedo
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+**Paseo 🤝 Zed**
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+Pazedo is a fork of the [Zed](https://zed.dev) editor that works as a client for
+[Paseo](https://paseo.sh). Paseo runs your coding agents (Claude Code, Codex, OpenCode, …) and
+their terminals in a daemon, on your machine or on a remote box, and lets you follow them from
+its desktop, phone and CLI apps. Pazedo adds Zed to that list. Paseo's workspaces, agents and
+terminals show up in Zed, while Zed still does what it is good at: editing, language servers,
+git, search and remote projects over SSH.
 
----
+Agents belong to the daemon, not to the editor. An agent started from your phone gets a tab in
+Pazedo, an agent started in Pazedo keeps running when you quit it, and closing its tab archives
+it, as in Paseo's own apps.
 
-### Installation
+## Versions
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+| | |
+| --- | --- |
+| Paseo | 0.15.4 (protocol types follow `@getpaseo/protocol` 0.15.4; other versions may work but are untested) |
+| Zed | based on Zed `main` as of 2026-11-15 (`596dfdcf32`, 1.30.0-dev), merged regularly |
+| Platform | macOS on Apple silicon (the only one built and tested so far). Remote projects can be on Linux x86_64 or macOS arm64. |
 
-Other platforms are not yet available:
+## What Pazedo adds to Zed
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+### Paseo workspaces in the sidebar
 
-### Developing Zed
+- **All your Paseo workspaces** in Zed's sidebar, grouped by project or by status, as in
+  Paseo's app (Needs input, Failed, Ready to review, Working, Done). Press cmd-g to switch.
+- **Live status for each workspace:** its agents' state, branch, and its pull request with CI
+  checks and review state.
+- **Create workspaces** from a project's checkout or as a new git worktree. Rename and archive
+  them.
+- **Add projects** from a folder or by cloning from GitHub, and remove them.
+- **Several daemons at once,** for example your laptop and a dev box. The header says "All
+  online" or "2/3 online", and the same repository on several daemons is listed as one
+  project.
+- **Daemons on other machines** open as Zed remote projects over SSH. Pazedo uploads its own
+  remote server.
+- **Password-protected daemons:** the password is kept in the macOS Keychain. A daemon on the
+  same machine needs no password.
+- **Keyboard first:** arrow keys, type-to-find, cmd-n for a new workspace, cmd-shift-0 to reveal
+  the open workspace, cmd-shift-minus to collapse all.
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+### Agents in Zed's own thread UI
 
-### Contributing
+- **The Paseo panel** has a tab for each agent and terminal of the open workspace. It replaces
+  Zed's agent panel.
+- **Zed's thread view** shows the agents: streaming markdown, reasoning, tool calls, diffs,
+  plans, permission prompts, queued messages and the stop button.
+- **New agents** start on any provider the daemon offers. You can switch the model, thinking
+  level and mode from the message box.
+- **Zed's context ring** shows the agent's context window and session cost.
+- **Pasting images** into a message sends them to the agent. Images the agent produces are
+  shown in the thread, fetched through the daemon when it runs on another machine.
+- **Finished shell commands** collapse to one line that expands on click. With
+  `"agent": { "expand_terminal_card": false }`, running commands collapse too.
+- **Tab menus** on agent and terminal tabs have Rename and Copy ID. Each tab shows its
+  provider's icon (Claude, Codex, OpenCode, …).
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+### Paseo terminals
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+- **The daemon's shells** shown in Zed's terminal view: Zed does the selection, search, links
+  and themes, while the shell runs in the daemon and keeps running when you quit Pazedo.
+  Closing the tab ends it, as in Paseo's apps.
 
-### Licensing
+### Smaller additions
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+- **AI subscription usage in the title bar:** Claude, Codex and others, with their limits and
+  reset times, read from Paseo.
+- **Type-to-find in the Project Panel:** start typing to jump to a file.
+- **Opening files in the Project Panel:** a click selects a file, and a second click opens it
+  (`project_panel.open_files_on_click`).
+- **No Sign In button:** it is hidden by default (`title_bar.show_sign_in`).
 
-License information for third party dependencies must be correctly provided for CI to pass.
+Pazedo keeps its settings and data apart from an installed Zed, in `~/.config/pazedo` and
+`~/Library/Application Support/Pazedo`, so both can be installed side by side.
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+## Getting started
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+You need a running Paseo daemon; see [paseo.sh](https://paseo.sh). There are no prebuilt
+downloads yet, so build the app from source. That needs Rust and Xcode, as for
+[building Zed on macOS](./docs/src/development/macos.md):
 
-## Sponsorship
+```sh
+script/pazedo/bundle --install   # release build into ~/Applications/Pazedo.app (about 30 minutes)
+```
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+Then point Pazedo at your daemon in `~/.config/pazedo/settings.json`:
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+```json
+"paseo": { "endpoint": "127.0.0.1:6767" }
+```
+
+For a daemon on another machine, add the SSH host where its folders are. You can also list
+several daemons:
+
+```json
+"paseo": {
+  "daemons": [
+    { "endpoint": "127.0.0.1:6767" },
+    { "name": "dev box", "endpoint": "dev-box:6767", "ssh": "user@dev-box" }
+  ]
+}
+```
+
+Daemons can also be added and edited from the gear button in the sidebar header.
+
+## Documentation
+
+- [docs/pazedo/development.md](./docs/pazedo/development.md): building, settings and every
+  feature in detail, with how each one was verified.
+- [docs/pazedo/README.md](./docs/pazedo/README.md): how the fork is organized, syncing with
+  upstream Zed, and every place where Zed's own code was changed.
+- [docs/pazedo/paseo-protocol.md](./docs/pazedo/paseo-protocol.md): the parts of Paseo's daemon
+  protocol that Pazedo uses.
+- [docs/pazedo/agent-sessions.md](./docs/pazedo/agent-sessions.md) and
+  [docs/pazedo/terminals.md](./docs/pazedo/terminals.md): how agents and terminals are shown.
+- [docs/pazedo/todo.md](./docs/pazedo/todo.md): what is still missing.
+
+## How the fork is built
+
+Most of Pazedo is in its own crates: `paseo_client` (the daemon protocol, without UI) and
+`paseo_ui` (the sidebar, panel, agent and terminal tabs, usage indicator). Zed's own code is
+changed in only a few places, each listed in [docs/pazedo/README.md](./docs/pazedo/README.md),
+so that upstream Zed can be merged in often.
+
+## License
+
+Like Zed, Pazedo is licensed under GPL-3.0-or-later, with Apache-2.0 components where marked
+(see [LICENSE-GPL](./LICENSE-GPL) and [LICENSE-APACHE](./LICENSE-APACHE)).
+
+Pazedo is an independent project. It is not affiliated with or endorsed by Zed Industries or
+the Paseo project.
