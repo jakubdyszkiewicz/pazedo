@@ -82,6 +82,21 @@ mv ~/Library/Application\ Support/Pazedo/config/* ~/.config/pazedo/
 First launch asks whether to trust the opened project (Zed's restricted mode), because the
 data directory is new.
 
+### App icon
+
+The icon is the folded "P" in `docs/pazedo/design/`, a generated concept image on a pale
+backdrop. `swift script/pazedo/app-icon.swift` cuts its tile out and places it on macOS's icon
+grid (an 824px tile in a 1024px canvas, transparent around it, with a drop shadow), writing
+`crates/zed/resources/app-icon-dev@2x.png` and `app-icon-dev.png`: the dev channel's icons,
+which `bundle` and `run-dev` turn into `Pazedo.icns` and the About window embeds. Release and
+dev builds share it.
+
+Verified 2026-11-16: both PNGs are 1024 and 512 px with alpha, the tile's edges have no light
+rim on white or black, its size matches Zed's icon, the "P" reads at 16 to 256 px on light
+and dark backgrounds, and the `.icns` built as the scripts do reads back as 1024 px with alpha.
+Not verified yet: the icon in the Dock of a running `Pazedo.app` or `run-dev` build, and in the
+About window (which needs a rebuild, as the PNG is embedded).
+
 ## Remote server for SSH projects
 
 Opening a folder on another machine over SSH (Zed's remote development) needs Zed's remote
