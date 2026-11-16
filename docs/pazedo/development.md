@@ -310,6 +310,18 @@ on every click, as in Zed. Folders still open and close on the first click. Veri
 in a dev build: a click on main.rs only selected it, the next click opened it. Synthetic clicks
 need a click state of 1 (`script/pazedo/click.swift` sets it), or apps see a click count of 0.
 
+### Images in agent messages
+
+Zed's agent view shows markdown images from absolute paths and `http(s)` URLs, not `file://`
+URLs, which is what Paseo writes for a provider's images (see paseo-protocol.md), so they showed
+as their alt text ("Image"). `paseo_ui::agent_images` rewrites those links in assistant messages,
+live and replayed: to the file itself when it exists on this machine (a daemon on this Mac), else
+to a copy in `<cache>/paseo-images`, which it reads through the daemon (`ReadFile`) and then
+redraws the windows. Verified 2026-11-16 in a dev build with a mock agent on the test daemon
+(the image rendered from its local file); the copy through the daemon was checked against the
+real daemon with `paseo_debug raw` but has not run in a build against a daemon on another
+machine.
+
 ### AI usage in the title bar
 
 Every window's title bar shows the usage of the AI subscriptions on the right, as the Paseo app

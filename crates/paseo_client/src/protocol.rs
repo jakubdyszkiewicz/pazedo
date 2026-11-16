@@ -1912,6 +1912,57 @@ pub struct TerminalStreamExit {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------------------------
+
+/// Reads a file on the daemon's machine: `path` relative to `cwd`. Without `acceptBinary` the
+/// daemon answers in the JSON response, a binary file base64-encoded.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadFile {
+    pub cwd: String,
+    pub path: String,
+    /// Always "file"; "list" lists a directory.
+    pub mode: &'static str,
+}
+
+impl ReadFile {
+    pub fn new(cwd: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            path: path.into(),
+            mode: "file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadFileResponse {
+    #[serde(default)]
+    pub file: Option<ExplorerFile>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl Request for ReadFile {
+    const TYPE: &'static str = "file_explorer_request";
+    const RESPONSE_TYPE: &'static str = "file_explorer_response";
+    type Response = ReadFileResponse;
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplorerFile {
+    /// "text", "image" or "binary".
+    pub kind: String,
+    /// "utf-8", "base64" or "none".
+    pub encoding: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------------------------
 

@@ -253,6 +253,17 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   app offers it as "Reload agent". Mock agents that never received a prompt have no history
   either way.
 
+## Images in agent messages (verified 2026-11-16)
+
+Providers' images (e.g. a tool result's screenshot) arrive as an `assistant_message` of their
+own: `\n\n![Image](file:///<tmp>/paseo-attachments-<random>/<sha256>.<ext>)\n\n`, a file the
+daemon wrote on its machine (path segments percent-encoded, `)` escaped). The Paseo app reads it
+with `file_explorer_request {cwd, path, mode: "file"}`; `path` is relative to `cwd`, so the
+request names the file's folder and file name. Without `acceptBinary` the response carries
+`file: {kind: "image", encoding: "base64", content, mimeType, size}`. Verified against the real
+daemon with a 347 KB PNG. The mock provider emits such a message for the prompt "emit settled
+assistant image markdown: ![alt](url)".
+
 ## Usage (verified 2026-11-16, both daemons, Paseo 0.15.4)
 
 `usage.list_reports.request {requestId, forceRefresh?, reportIds?, agentId?}` (feature

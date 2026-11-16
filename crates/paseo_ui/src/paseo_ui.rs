@@ -3,6 +3,7 @@
 //! Zed's terminal view.
 
 mod add_project;
+mod agent_images;
 mod agent_item;
 mod agent_session;
 mod daemon_auth;

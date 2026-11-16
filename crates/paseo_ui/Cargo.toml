@@ -27,6 +27,7 @@ agent_servers.workspace = true
 agent_settings.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 collections.workspace = true
 credentials_provider.workspace = true
@@ -56,6 +57,7 @@ theme_settings.workspace = true
 title_bar.workspace = true
 type_ahead.workspace = true
 ui.workspace = true
+url.workspace = true
 util.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 watch.workspace = true

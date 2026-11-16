@@ -42,6 +42,7 @@ use std::{
 };
 use util::{ResultExt as _, path_list::PathList};
 
+use crate::agent_images;
 use crate::store::{PaseoStore, PaseoStoreEvent};
 
 pub const PASEO_AGENT_ID: &str = "paseo";
@@ -929,15 +930,19 @@ fn replay_history(
         .and_then(|session| session.stream.cwd.clone());
     let mut updates = Vec::new();
     let mut last_key = None;
+    let cache_dir = agent_images::cache_dir();
+    let mut images = Vec::new();
     for entry in &history.entries {
         let key = format!("history:{}", entry.seq_start);
-        last_key = match entry.item() {
+        let item = agent_images::localize_item(entry.item(), &cache_dir, &mut images);
+        last_key = match item {
             TimelineItem::AssistantMessage { .. } => Some((MessageKind::Assistant, key.clone())),
             TimelineItem::Reasoning { .. } => Some((MessageKind::Thought, key.clone())),
             _ => None,
         };
-        updates.extend(history_updates(&entry.item(), &key, cwd.as_deref()));
+        updates.extend(history_updates(&item, &key, cwd.as_deref()));
     }
+    agent_images::fetch_images(store, images, cx);
 
     let agent = history
         .agent
@@ -988,7 +993,9 @@ fn apply_stream(
     stream: &AgentStream,
     cx: &mut App,
 ) {
-    let event = stream.event();
+    let mut images = Vec::new();
+    let event =
+        agent_images::localize_event(stream.event(), &agent_images::cache_dir(), &mut images);
     log::debug!(
         "Paseo agent {} event seq={:?} {:?}",
         stream.agent_id,
@@ -1022,6 +1029,7 @@ fn apply_stream(
         (thread, updates)
     };
     apply_updates(&thread, updates, cx);
+    agent_images::fetch_images(store, images, cx);
 
     match event {
         AgentStreamEvent::PermissionRequested(request) => {
