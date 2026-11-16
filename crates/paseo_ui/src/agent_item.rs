@@ -17,7 +17,7 @@ use crate::{
     rename_prompt::RenamePrompt,
     store::ConnectionStatus,
 };
-use paseo_client::protocol::AgentStatus;
+use paseo_client::protocol::{AgentStatus, AgentUsage};
 
 /// Copies an agent's id, e.g. for the `paseo` CLI. From the tab's context menu.
 #[derive(Clone, PartialEq, Action)]
@@ -98,6 +98,8 @@ pub struct PaseoAgentItem {
     reload_when_connected: bool,
     /// The agent's title as the daemon last reported it.
     daemon_title: Option<String>,
+    /// The thread and usage last handed to it, which it shows as the context ring.
+    shown_usage: Option<(gpui::EntityId, Option<AgentUsage>)>,
     _conversation_subscription: Option<Subscription>,
     _store_subscriptions: [Subscription; 2],
 }
@@ -161,6 +163,7 @@ impl PaseoAgentItem {
                 .and_then(|agent_id| store.read(cx).agent(agent_id)?.title.clone());
             let renamed = title != this.daemon_title;
             this.daemon_title = title;
+            this.show_usage(cx);
             if renamed
                 || agent_id.is_some_and(|agent_id| store.read(cx).has_unseen_attention(&agent_id))
             {
@@ -196,6 +199,7 @@ impl PaseoAgentItem {
             reloading: None,
             reload_when_connected: false,
             daemon_title: None,
+            shown_usage: None,
             _conversation_subscription: None,
             _store_subscriptions: [store_subscription, events_subscription],
         }
@@ -418,6 +422,39 @@ fn build_conversation_view(
 }
 
 impl PaseoAgentItem {
+    /// Hands the agent's context window and cost to the thread, which shows them as Zed's
+    /// context ring next to the message box. Paseo reports them with every turn.
+    fn show_usage(&mut self, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.agent_id(cx) else {
+            return;
+        };
+        let Some(thread) = self.thread(cx) else {
+            return;
+        };
+        let usage = self
+            .store
+            .read(cx)
+            .agent(&agent_id)
+            .and_then(|agent| agent.last_usage.clone());
+        let shown = Some((thread.entity_id(), usage.clone()));
+        if shown == self.shown_usage {
+            return;
+        }
+        self.shown_usage = shown;
+        let Some(update) = usage.as_ref().and_then(usage_update) else {
+            return;
+        };
+        thread.update(cx, |thread, cx| thread.update_usage(update, cx));
+    }
+
+    fn thread(&self, cx: &App) -> Option<Entity<acp_thread::AcpThread>> {
+        self.conversation_view
+            .as_ref()?
+            .read(cx)
+            .active_thread()
+            .map(|thread| thread.read(cx).thread.clone())
+    }
+
     fn rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent_id) = self.agent_id(cx) else {
             return;
@@ -442,6 +479,19 @@ impl PaseoAgentItem {
             cx,
         );
     }
+}
+
+/// Paseo's usage as ACP's: tokens in the context window and its size, and the cost so far.
+fn usage_update(usage: &AgentUsage) -> Option<acp_v2::UsageUpdate> {
+    let used = usage.context_window_used_tokens?;
+    let size = usage.context_window_max_tokens.filter(|size| *size > 0.)?;
+    let mut update = serde_json::json!({"used": used as u64, "size": size as u64});
+    if let Some(cost) = usage.total_cost_usd {
+        update["cost"] = serde_json::json!({"amount": cost, "currency": "USD"});
+    }
+    serde_json::from_value(update)
+        .map_err(|error| log::error!("invalid ACP usage update: {error}"))
+        .ok()
 }
 
 impl Item for PaseoAgentItem {
@@ -555,6 +605,11 @@ impl Focusable for PaseoAgentItem {
 impl Render for PaseoAgentItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_conversation_view(window, cx);
+        // A thread that was just created gets the usage too.
+        let thread_id = self.thread(cx).map(|thread| thread.entity_id());
+        if thread_id.is_some() && thread_id != self.shown_usage.as_ref().map(|(id, _)| *id) {
+            cx.defer_in(window, |this, _, cx| this.show_usage(cx));
+        }
         let agent_id = self.agent_id(cx);
         // A tab that started an agent keeps its id, which the view forgets when its session
         // is lost and which reopening the agent needs.
@@ -633,5 +688,29 @@ mod tests {
         assert_eq!(provider_icon(&["opencode"]), IconName::AiOpenCode);
         assert_eq!(provider_icon(&["OpenCode Go"]), IconName::AiOpenCode);
         assert_eq!(provider_icon(&["mock"]), IconName::Sparkle);
+    }
+
+    #[test]
+    fn usage_becomes_the_context_ring() {
+        let usage =
+            |json: serde_json::Value| -> AgentUsage { serde_json::from_value(json).unwrap() };
+        let update = usage_update(&usage(serde_json::json!({
+            "contextWindowMaxTokens": 1000000,
+            "contextWindowUsedTokens": 644344,
+            "totalCostUsd": 284.28,
+        })))
+        .unwrap();
+        assert_eq!((update.used, update.size), (644_344, 1_000_000));
+        let cost = serde_json::to_value(&update).unwrap()["cost"].clone();
+        assert_eq!(cost["amount"], 284.28);
+        assert_eq!(cost["currency"], "USD");
+
+        assert!(
+            usage_update(&usage(
+                serde_json::json!({"inputTokens": 1, "outputTokens": 50})
+            ))
+            .is_none(),
+            "no context window, no ring"
+        );
     }
 }

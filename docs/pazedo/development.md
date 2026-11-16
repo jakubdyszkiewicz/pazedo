@@ -334,6 +334,17 @@ contains "claude", "codex" or "opencode" (so "Claude (Work)" counts), else a spa
 an inactive tab) put the ids on the clipboard, and both renames showed in the tabs at once. The
 icons are unit-tested only; the test daemon's agents are all `mock`.
 
+### Context ring
+
+An agent tab shows Zed's context ring next to the message box's model picker, with the context
+window used, its size and the session cost on hover, as the Paseo app's context meter does. Both
+read the agent's `lastUsage` (`contextWindowUsedTokens`, `contextWindowMaxTokens`,
+`totalCostUsd`), which the daemon updates with every turn; the tab hands it to the thread as an
+ACP usage update (`AcpThread::update_usage`) whenever it changes. Without a context window size
+there is no ring. On the real daemon a running Claude agent reported 644k of 1M tokens and no
+cost mid-turn. Verified 2026-11-16 in a dev build with a mock agent ("emit 50 agent stream
+updates", which reports 50 of 128k tokens): the ring showed "Context 0% • 50 / 128k".
+
 ### Images in agent messages
 
 Zed's agent view shows markdown images from absolute paths and `http(s)` URLs, not `file://`

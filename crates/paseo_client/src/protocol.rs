@@ -370,6 +370,24 @@ pub struct Agent {
     pub last_error: Option<String>,
     #[serde(default)]
     pub provider_unavailable: bool,
+    /// The context window and cost as of the latest turn.
+    #[serde(default)]
+    pub last_usage: Option<AgentUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsage {
+    #[serde(default)]
+    pub input_tokens: Option<f64>,
+    #[serde(default)]
+    pub output_tokens: Option<f64>,
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub context_window_max_tokens: Option<f64>,
+    #[serde(default)]
+    pub context_window_used_tokens: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
