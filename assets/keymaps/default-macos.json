@@ -1822,12 +1822,14 @@
       "escape": "tabular_data::ClearSelection",
     },
   },
-  // pazedo: cmd-n in the Paseo sidebar starts a new workspace in the selected row's project.
+  // pazedo: in the Paseo sidebar, cmd-n starts a new workspace in the selected row's project and
+  // cmd-g switches between grouping by project and by status.
   {
     "context": "PaseoSidebar",
     "use_key_equivalents": true,
     "bindings": {
       "cmd-n": "paseo_sidebar::NewWorkspace",
+      "cmd-g": "paseo_sidebar::ToggleGrouping",
     },
   },
   // pazedo: cmd-n in the Paseo panel opens its New Agent or Terminal menu. Agent tabs

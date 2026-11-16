@@ -200,12 +200,15 @@ never the password. The Keychain path of release builds was not exercised here.
 
 ### Grouping
 
-The sidebar header's group button (list-tree icon) switches between grouping by project (the
-default) and by status, as Paseo's app does: Needs input, Failed, Ready to review, Working,
+The sidebar header's group button (list-tree icon), or cmd-g in the focused sidebar
+(`paseo_sidebar::ToggleGrouping`), switches between grouping by project (the default) and by
+status, as Paseo's app does: Needs input, Failed, Ready to review, Working,
 Done, most recent status change first, across all daemons. Each status has the same
 collapsible header as a project. Status rows show their branch, project and (with several
 daemons) daemon. The choice is kept in Zed's key-value store
-(`pazedo_sidebar_grouping`), per data directory.
+(`pazedo_sidebar_grouping`), per data directory. cmd-g is bound only in the sidebar, as
+upstream's threads sidebar binds it; elsewhere it stays Find Next. Verified 2026-11-16 in a dev
+build: cmd-g in the focused sidebar switched to status groups and back.
 
 Grouping by project lists the projects of all daemons together, by name. As in Paseo's app, a
 repository on several daemons is one project: daemons give a project a `projectKey` from its

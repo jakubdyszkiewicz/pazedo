@@ -53,7 +53,9 @@ gpui::actions!(
     [
         /// Starts a new workspace in the project of the selected row (or of the open workspace),
         /// like the project's + button.
-        NewWorkspace
+        NewWorkspace,
+        /// Switches the sidebar between grouping workspaces by project and by status.
+        ToggleGrouping
     ]
 );
 
@@ -590,6 +592,24 @@ impl PaseoSidebar {
         window.dispatch_action(Box::new(FocusWorkspaceSidebar), cx);
     }
 
+    fn toggle_grouping(
+        &mut self,
+        _: &ToggleGrouping,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let grouping = match self.grouping {
+            Grouping::Project => Grouping::Status,
+            Grouping::Status => Grouping::Project,
+        };
+        self.set_grouping(grouping, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grouping(&self) -> Grouping {
+        self.grouping
+    }
+
     pub fn set_grouping(&mut self, grouping: Grouping, cx: &mut Context<Self>) {
         if self.grouping == grouping {
             return;
@@ -614,7 +634,11 @@ impl PaseoSidebar {
         PopoverMenu::new("paseo-grouping-menu")
             .trigger_with_tooltip(
                 IconButton::new("paseo-grouping", IconName::ListTree).icon_size(IconSize::Small),
-                Tooltip::text("Group Workspaces"),
+                Tooltip::for_action_title_in(
+                    "Group Workspaces",
+                    &ToggleGrouping,
+                    &self.focus_handle,
+                ),
             )
             .anchor(gpui::Anchor::TopRight)
             .menu(move |window, cx| {
@@ -2348,6 +2372,7 @@ impl Render for PaseoSidebar {
             .on_action(cx.listener(Self::select_child))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::new_workspace_for_selection))
+            .on_action(cx.listener(Self::toggle_grouping))
             .on_key_down(cx.listener(Self::type_ahead_key))
             .font(ui_font)
             .map(|this| match window.window_decorations() {

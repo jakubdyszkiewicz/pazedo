@@ -478,6 +478,13 @@ async fn test_keyboard_navigation_in_the_sidebar(cx: &mut TestAppContext) {
         );
     });
     press(&menu::Cancel, cx);
+    let grouping =
+        |cx: &mut VisualTestContext| sidebar.read_with(cx, |sidebar, _| sidebar.grouping());
+    assert_eq!(grouping(cx), crate::sidebar::Grouping::Project);
+    press(&crate::sidebar::ToggleGrouping, cx);
+    assert_eq!(grouping(cx), crate::sidebar::Grouping::Status);
+    press(&crate::sidebar::ToggleGrouping, cx);
+    assert_eq!(grouping(cx), crate::sidebar::Grouping::Project);
     press(&workspace::FocusWorkspaceSidebar, cx);
 
     press(&menu::Cancel, cx);
