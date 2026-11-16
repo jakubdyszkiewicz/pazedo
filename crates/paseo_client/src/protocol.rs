@@ -5,6 +5,8 @@
 //! deliberately lenient: unknown fields are ignored, enums have an `Unknown` fallback, and
 //! messages that are not modelled here are surfaced as raw JSON instead of failing.
 
+use std::time::Duration;
+
 use collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -20,6 +22,8 @@ pub trait Request: Serialize {
     const TYPE: &'static str;
     const RESPONSE_TYPE: &'static str;
     type Response: DeserializeOwned;
+    /// How long the response may take, when longer than the client's usual timeout.
+    const TIMEOUT: Option<Duration> = None;
 }
 
 /// A session request that the daemon answers with any number of `UPDATE_TYPE` messages carrying
@@ -1904,6 +1908,99 @@ impl Request for AddProject {
     const TYPE: &'static str = "project.add.request";
     const RESPONSE_TYPE: &'static str = "project.add.response";
     type Response = AddProjectResponse;
+}
+
+/// Removes a project from Paseo: archives its workspaces (their agents and terminals) and
+/// forgets the project. Files on disk, worktrees included, stay.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProject {
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProjectResponse {
+    pub accepted: bool,
+    #[serde(default)]
+    pub removed_workspace_ids: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl Request for RemoveProject {
+    const TYPE: &'static str = "project.remove.request";
+    const RESPONSE_TYPE: &'static str = "project.remove.response";
+    type Response = RemoveProjectResponse;
+    // The daemon archives every workspace of the project first.
+    const TIMEOUT: Option<Duration> = Some(Duration::from_secs(120));
+}
+
+/// The daemon machine's GitHub repositories matching `query`, through its `gh` CLI.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchGithubRepositories {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchGithubRepositoriesResponse {
+    /// `success`, or why there are no results: `unavailable` (no `gh`), `unauthenticated` or
+    /// `error`.
+    pub status: String,
+    #[serde(default)]
+    pub repositories: Vec<GithubRepository>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRepository {
+    pub name_with_owner: String,
+    pub description: Option<String>,
+    pub visibility: String,
+    pub clone_url: String,
+}
+
+impl Request for SearchGithubRepositories {
+    const TYPE: &'static str = "workspace.github.search_repositories.request";
+    const RESPONSE_TYPE: &'static str = "workspace.github.search_repositories.response";
+    type Response = SearchGithubRepositoriesResponse;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloneProtocol {
+    Https,
+    Ssh,
+}
+
+/// Clones a repository into `target_directory/<name>` on the daemon's machine and adds it as a
+/// project. `repo` is a clone URL, or `owner/name` with a `clone_protocol`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneGithubProject {
+    pub repo: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone_protocol: Option<CloneProtocol>,
+    pub target_directory: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneGithubProjectResponse {
+    pub checkout_path: Option<String>,
+    pub project: Option<ProjectSummary>,
+    pub error: Option<String>,
+}
+
+impl Request for CloneGithubProject {
+    const TYPE: &'static str = "project.github.clone.request";
+    const RESPONSE_TYPE: &'static str = "project.github.clone.response";
+    type Response = CloneGithubProjectResponse;
+    // The daemon gives `git clone` five minutes.
+    const TIMEOUT: Option<Duration> = Some(Duration::from_secs(330));
 }
 
 /// Closes agents and terminals the way closing their tabs in Paseo's apps does: agents are

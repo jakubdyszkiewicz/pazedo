@@ -241,6 +241,26 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   [{path, kind}], error}`. An absolute prefix (`/root/dev/`, `~` expanded) lists what is under
   it; a bare name matches fuzzily under the home directory; an empty query returns nothing
   (verified 2026-11-15, dev box). pazedo's Add Project uses it for a daemon on another machine.
+- `project.remove.request {projectId}` → `project.remove.response {projectId, accepted,
+  removedWorkspaceIds, error}` (feature `projectRemove`). The daemon archives each of the
+  project's workspaces (their agents and terminals, as `archive_workspace_request` does, but it
+  does not delete worktrees) and then forgets the project; nothing on disk changes (read from
+  Paseo's source, verified 2026-11-16, test daemon). It can take a while, so pazedo waits up to
+  two minutes rather than its usual 30 seconds.
+- `workspace.github.search_repositories.request {query, limit? (1-50)}` → `{status:
+  success|unavailable|unauthenticated|error, repositories: [{id, name, nameWithOwner,
+  description, visibility, updatedAt, cloneUrl}], available, error}` (feature
+  `workspaceGithubRepositorySearch`). Runs `gh` on the daemon's machine: `gh repo list` for an
+  empty query, `gh search repos` otherwise; `cloneUrl` follows `gh`'s configured git protocol.
+  Without `gh` the status is `unavailable` with "GitHub CLI (gh) is not installed or not in
+  PATH" (verified 2026-11-16, test daemon).
+- `project.github.clone.request {repo, cloneProtocol?: https|ssh, targetDirectory}` →
+  `project.github.clone.response {repo, checkoutPath, project, error}` (feature
+  `projectGithubClone`). `repo` is a clone URL, or `owner/name` with `cloneProtocol`. The daemon
+  clones into a temporary `.paseo-clone-*` folder in `targetDirectory` (created if missing),
+  renames it to the repository's name, and adds it as a project; an existing checkout path is an
+  error, and a failed clone leaves nothing behind. `git clone` gets five minutes, so pazedo waits
+  five and a half (verified 2026-11-16, test daemon).
 - `workspace.title.set.request {workspaceId, title}` renames a workspace; `null` or `""`
   reverts to the derived name: `workspace.title.set.response {requestId, workspaceId,
   accepted, title, error}`. Afterwards the workspace's `name` is the title and `title` mirrors

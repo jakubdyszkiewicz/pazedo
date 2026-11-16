@@ -411,9 +411,9 @@ sidebar header says how many are connected: "Paseo" with a dot and "All online" 
 online" (orange; red when none is connected or connecting), or with a single daemon its status
 ("Online", "Offline", …). Hovering it lists each daemon's status, and clicking it opens the Paseo
 Daemons dialog. A daemon's problems (offline, a password needed, failed loading) show above the
-workspaces, named after the daemon when there are several. The header's + adds a project: on the
-one daemon, or with several on the one picked from its "Add Project On" menu (offline daemons
-greyed out). Verified 2026-11-16 in a dev build: "Online" with the test daemon, "All online"
+workspaces, named after the daemon when there are several. The header's + adds a project with
+Open Folder… or Clone from GitHub…, under an "On <daemon>" heading per daemon when there are
+several (offline daemons greyed out). Verified 2026-11-16 in a dev build: "Online" with the test daemon, "All online"
 with it and the dev box, "2/3 online" with an unreachable third daemon, and + → dev box opened
 the dev box's folder picker. `endpoint` and `ssh` at the top level are shorthand for one more
 daemon, listed first:
@@ -426,6 +426,26 @@ daemon, listed first:
   ]
 }
 ```
+
+### Adding and removing projects
+
+Clone from GitHub… is a two-step picker. First the repository: an empty query lists your own
+repositories and typed text searches GitHub, both through `gh` on the daemon's machine; a typed
+`owner/repo` is offered over HTTPS and over SSH, and a typed clone URL as is (any host). Then the
+folder to clone into: the folder of the last clone, then the folders holding the daemon's
+projects, then the daemon's folder suggestions for a typed path; each row shows the final
+checkout path. While the daemon clones (up to five minutes), a "Cloning owner/repo…" row with a
+spinner sits at the top of the sidebar; afterwards the new project is selected, without
+workspaces. A failure (the folder exists, `gh` is missing, git fails) shows the daemon's error.
+
+A project's right-click menu has Remove Project…, which asks first and says how many workspaces
+are archived with it; files on disk, worktrees included, stay. A project on several daemons is
+removed from each.
+
+Verified 2026-11-16 in a dev build against the test daemon (which has no `gh`, so the search
+showed Paseo's "GitHub CLI (gh) is not installed" and the typed `octocat/Hello-World` was
+cloned): the clone, the Cloning row and the error of a clone that failed, and removing a project
+with a running agent (the agent was archived, the folder stayed) and one without workspaces.
 
 The Paseo Daemons dialog (the gear in the sidebar header, `paseo: manage daemons` in the
 command palette, or Add Daemon… when none is configured) lists the daemons of settings.json with

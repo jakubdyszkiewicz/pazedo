@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use type_ahead::TypeAhead;
 use ui::{
-    AgentThreadStatus, ContextMenu, ContextMenuEntry, IconPosition, Indicator, PopoverMenu,
-    PopoverMenuHandle, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind, prelude::*,
-    right_click_menu, utils::platform_title_bar_height,
+    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, IconPosition, Indicator,
+    PopoverMenu, PopoverMenuHandle, Tab, ThreadItem, ThreadItemWorktreeInfo, Tooltip, WorktreeKind,
+    prelude::*, right_click_menu, utils::platform_title_bar_height,
 };
 use util::ResultExt as _;
 use util::path_list::PathList;
@@ -30,7 +30,7 @@ use workspace::{
 };
 
 use crate::{
-    add_project::open_add_project_picker,
+    add_project::{open_add_project_picker, open_clone_project_picker},
     daemon_auth::PasswordPrompt,
     new_workspace::{NewWorkspaceChoice, open_new_workspace_picker},
     panel::PaseoPanel,
@@ -985,6 +985,8 @@ impl PaseoSidebar {
 
     /// Add Project, on the one daemon, or on the daemon picked from a menu when there are
     /// several. Shown once a daemon is connected.
+    /// The header's Add Project menu: open a folder or clone from GitHub, on each daemon when
+    /// there are several.
     fn render_add_project_button(
         &self,
         stores: &[Entity<PaseoStore>],
@@ -998,18 +1000,8 @@ impl PaseoSidebar {
         }
         let button =
             IconButton::new("paseo-add-project", IconName::Plus).icon_size(IconSize::Small);
-        if let [store] = stores {
-            return Some(
-                button
-                    .tooltip(Tooltip::text("Add Project…"))
-                    .on_click(cx.listener({
-                        let store = store.clone();
-                        move |this, _, window, cx| this.add_project(&store, window, cx)
-                    }))
-                    .into_any_element(),
-            );
-        }
         let sidebar = cx.weak_entity();
+        let several_daemons = stores.len() > 1;
         let daemons: Vec<_> = stores
             .iter()
             .map(|store| {
@@ -1025,20 +1017,48 @@ impl PaseoSidebar {
                     let sidebar = sidebar.clone();
                     let daemons = daemons.clone();
                     Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
-                        menu = menu.header("Add Project On");
-                        for (store, name, is_connected) in daemons {
-                            let sidebar = sidebar.clone();
-                            menu = menu.item(
-                                ContextMenuEntry::new(name).disabled(!is_connected).handler(
-                                    move |window, cx| {
-                                        sidebar
-                                            .update(cx, |sidebar, cx| {
-                                                sidebar.add_project(&store, window, cx)
-                                            })
-                                            .ok();
-                                    },
-                                ),
-                            );
+                        for (index, (store, name, is_connected)) in daemons.into_iter().enumerate()
+                        {
+                            if several_daemons {
+                                if index > 0 {
+                                    menu = menu.separator();
+                                }
+                                menu = menu.header(format!("On {name}"));
+                            }
+                            let open_folder = {
+                                let sidebar = sidebar.clone();
+                                let store = store.clone();
+                                move |window: &mut Window, cx: &mut App| {
+                                    sidebar
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.add_project(&store, window, cx)
+                                        })
+                                        .ok();
+                                }
+                            };
+                            let clone_repository = {
+                                let sidebar = sidebar.clone();
+                                move |window: &mut Window, cx: &mut App| {
+                                    sidebar
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.clone_project(&store, window, cx)
+                                        })
+                                        .ok();
+                                }
+                            };
+                            menu = menu
+                                .item(
+                                    ContextMenuEntry::new("Open Folder…")
+                                        .icon(IconName::Folder)
+                                        .disabled(!is_connected)
+                                        .handler(open_folder),
+                                )
+                                .item(
+                                    ContextMenuEntry::new("Clone from GitHub…")
+                                        .icon(IconName::Github)
+                                        .disabled(!is_connected)
+                                        .handler(clone_repository),
+                                );
                         }
                         menu
                     }))
@@ -1257,6 +1277,64 @@ impl PaseoSidebar {
         );
     }
 
+    /// Asks for confirmation, then removes the project from each daemon it is on. Its
+    /// workspaces are archived with it, so the question says how many.
+    fn remove_project(
+        &mut self,
+        name: &str,
+        removals: Vec<(Entity<PaseoStore>, String)>,
+        workspace_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut detail = match workspace_count {
+            0 => String::new(),
+            1 => "Its workspace is archived, with its agents and terminals. ".to_string(),
+            count => {
+                format!("Its {count} workspaces are archived, with their agents and terminals. ")
+            }
+        };
+        detail.push_str("Files on disk, worktrees included, are not changed.");
+        if removals.len() > 1 {
+            let daemons = removals
+                .iter()
+                .map(|(store, _)| store.read(cx).display_name().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            detail.push_str(&format!(" It is removed from {daemons}."));
+        }
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Remove “{name}” from Paseo?"),
+            Some(&detail),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            if answer.await? != 0 {
+                return Ok(());
+            }
+            let removed = cx.update(|_, cx| {
+                removals
+                    .into_iter()
+                    .map(|(store, project_id)| {
+                        store.update(cx, |store, cx| store.remove_project(project_id, cx))
+                    })
+                    .collect::<Vec<_>>()
+            })?;
+            for result in futures::future::join_all(removed).await {
+                result?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_prompt_err(
+            "Could not remove the project",
+            window,
+            cx,
+            |error, _, _| Some(format!("{error:#}")),
+        );
+    }
+
     fn render_rename_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .h_full()
@@ -1346,6 +1424,103 @@ impl PaseoSidebar {
         .detach_and_prompt_err("Could not add the project", window, cx, |error, _, _| {
             Some(format!("{error:#}"))
         });
+    }
+
+    /// Asks for a GitHub repository and a folder on the daemon's machine, clones it there as a
+    /// project, then selects the project.
+    fn clone_project(
+        &mut self,
+        store: &Entity<PaseoStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        let sidebar = cx.weak_entity();
+        let store = store.clone();
+        let host_name = store.read(cx).display_name();
+        workspace.update(cx, |workspace, cx| {
+            open_clone_project_picker(
+                workspace,
+                store.clone(),
+                host_name,
+                move |source, parent, window, cx| {
+                    let cloned = store.update(cx, |store, cx| {
+                        store.clone_github_project(
+                            source.repo.clone(),
+                            source.clone_protocol,
+                            parent,
+                            source.name_with_owner.clone().into(),
+                            cx,
+                        )
+                    });
+                    let sidebar = sidebar.clone();
+                    let store = store.clone();
+                    window
+                        .spawn(cx, async move |cx| {
+                            let project = cloned.await?;
+                            sidebar.update(cx, |sidebar, cx| {
+                                let key = DaemonItemKey::new(&store, &project.project_id);
+                                sidebar.collapsed_projects.remove(&key);
+                                sidebar.selected_entry = Some(SidebarEntry::Project(key));
+                                sidebar.scroll_to_selection = true;
+                                cx.notify();
+                            })
+                        })
+                        .detach_and_prompt_err(
+                            "Could not clone the repository",
+                            window,
+                            cx,
+                            |error, _, _| Some(format!("{error:#}")),
+                        );
+                },
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// A row for each repository the daemon is cloning.
+    fn render_clones(
+        &self,
+        store: &Entity<PaseoStore>,
+        several_daemons: bool,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let store = store.read(cx);
+        store
+            .cloning()
+            .iter()
+            .map(|repository| {
+                let message = if several_daemons {
+                    format!("Cloning {repository} on {}…", store.display_name())
+                } else {
+                    format!("Cloning {repository}…")
+                };
+                h_flex()
+                    .flex_none()
+                    .gap_1p5()
+                    .px_2()
+                    .py_1p5()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        Icon::new(IconName::ArrowCircle)
+                            .size(IconSize::Small)
+                            .color(Color::Muted)
+                            .with_rotate_animation(2),
+                    )
+                    .child(
+                        Label::new(message)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// The daemon's problem, if any, named after the daemon when there are several.
@@ -1667,6 +1842,11 @@ impl PaseoSidebar {
                 .join("\n")
                 .into(),
         };
+        let removals: Vec<(Entity<PaseoStore>, String)> = placements
+            .iter()
+            .map(|(store, project_id, _)| (store.clone(), project_id.clone()))
+            .collect();
+        let workspace_count = rows.len();
         let new_workspace_button =
             self.render_new_workspace_button(&project_key, &project.name, placements, cx);
         let color = cx.theme().colors();
@@ -1715,6 +1895,31 @@ impl PaseoSidebar {
                 }
             }));
 
+        let header = header.into_any_element();
+        let sidebar = cx.weak_entity();
+        let project_name = project.name.clone();
+        let header = right_click_menu(project_key.element_id("paseo-project-menu"))
+            .trigger(move |_, _, _| header)
+            .menu(move |window, cx| {
+                let sidebar = sidebar.clone();
+                let project_name = project_name.clone();
+                let removals = removals.clone();
+                ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.entry("Remove Project…", None, move |window, cx| {
+                        sidebar
+                            .update(cx, |sidebar, cx| {
+                                sidebar.remove_project(
+                                    &project_name,
+                                    removals.clone(),
+                                    workspace_count,
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .ok();
+                    })
+                })
+            });
         let header = div()
             .w_full()
             .when(!is_first, |this| {
@@ -2416,6 +2621,9 @@ impl Render for PaseoSidebar {
             for store in &stores {
                 if let Some(notice) = self.render_daemon_notice(store, several_daemons, cx) {
                     rows.push(notice);
+                }
+                for clone in self.render_clones(store, several_daemons, cx) {
+                    rows.push(clone);
                 }
             }
             match self.grouping {

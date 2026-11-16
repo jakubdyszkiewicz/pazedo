@@ -10,12 +10,13 @@ use paseo_client::{
     protocol::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
         AgentUpdate, ArchiveWorkspace, AttentionReason, BranchSuggestions, ClearAgentAttention,
-        CloseItems, CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents,
-        FetchWorkspaces, GetProvidersSnapshot, HelloAuth, ListProjects, ListUsageReports, Page,
-        ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, RenameAgent, RenameTerminal,
-        ServerInfo, ServerMessage, SetSessionEventSubscription, SetWorkspaceTitle, Subscribe,
-        SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged, UsageReportEntry,
-        Workspace, WorkspaceSource, WorkspaceUpdate,
+        CloneGithubProject, CloneProtocol, CloseItems, CreateTerminal, CreateWorkspace,
+        DirectorySuggestions, FetchAgents, FetchWorkspaces, GetProvidersSnapshot, GithubRepository,
+        HelloAuth, ListProjects, ListUsageReports, Page, ProjectSummary, ProjectUpdate,
+        ProviderEntry, RefreshAgent, RemoveProject, RenameAgent, RenameTerminal,
+        SearchGithubRepositories, ServerInfo, ServerMessage, SetSessionEventSubscription,
+        SetWorkspaceTitle, Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit,
+        TerminalsChanged, UsageReportEntry, Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
 use project::Project;
@@ -268,9 +269,13 @@ pub struct PaseoStore {
     /// The Paseo workspace last opened from the sidebar, per directory. Several Paseo workspaces
     /// can share a directory, and so one Zed workspace.
     selected_workspaces: HashMap<PathBuf, String>,
-    /// Agents and terminals closed from pazedo, until the daemon's update removes them; their
-    /// tabs must not come back in the meantime.
+    /// Agents, terminals, workspaces and projects closed from pazedo, until the daemon's update
+    /// removes them; their tabs and rows must not come back in the meantime.
     closing: HashSet<String>,
+    /// Repositories being cloned, shown in the sidebar until the clone ends.
+    cloning: Vec<SharedString>,
+    /// The folder the last clone went into, offered first for the next one.
+    last_clone_parent: Option<String>,
     /// Agents whose attention pazedo cleared, with the attention timestamp it cleared, so that
     /// re-rendering a viewed agent before the daemon's update arrives does not clear it again.
     cleared_attention: HashMap<String, Option<String>>,
@@ -367,6 +372,8 @@ impl PaseoStore {
             terminal_tasks: HashMap::default(),
             selected_workspaces: HashMap::default(),
             closing: HashSet::default(),
+            cloning: Vec::new(),
+            last_clone_parent: None,
             cleared_attention: HashMap::default(),
             _tasks: Vec::new(),
         };
@@ -735,6 +742,148 @@ impl PaseoStore {
                 cx.notify();
             })
         })
+    }
+
+    /// Removes a project from Paseo. The daemon archives its workspaces (their agents and
+    /// terminals) but leaves its files, worktrees included. The project is hidden until the daemon
+    /// answers.
+    pub fn remove_project(
+        &mut self,
+        project_id: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        self.closing.insert(project_id.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = client
+                .request(&RemoveProject {
+                    project_id: project_id.clone(),
+                })
+                .await
+                .and_then(|response| match response.error {
+                    Some(error) => anyhow::bail!("{error}"),
+                    None if !response.accepted => anyhow::bail!("Paseo did not remove the project"),
+                    None => Ok(response),
+                });
+            this.update(cx, |this, cx| {
+                this.closing.remove(&project_id);
+                // The daemon's updates may arrive later than the response.
+                if let Ok(response) = &result {
+                    this.projects.remove(&project_id);
+                    for workspace_id in &response.removed_workspace_ids {
+                        this.workspaces.remove(workspace_id);
+                    }
+                }
+                cx.notify();
+            })?;
+            result.map(|_| ())
+        })
+    }
+
+    /// The GitHub repositories matching `query` that the daemon machine's `gh` can see.
+    pub fn search_github_repositories(
+        &self,
+        query: String,
+        cx: &App,
+    ) -> Task<Result<Vec<GithubRepository>>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.background_spawn(async move {
+            let response = client
+                .request(&SearchGithubRepositories {
+                    query,
+                    limit: Some(30),
+                })
+                .await?;
+            if response.status != "success" {
+                anyhow::bail!(
+                    "{}",
+                    response
+                        .error
+                        .unwrap_or_else(|| format!("GitHub search is {}", response.status))
+                );
+            }
+            Ok(response.repositories)
+        })
+    }
+
+    /// Clones a repository into `parent_directory` on the daemon's machine and adds it as a
+    /// project. `name` labels the clone while it runs.
+    pub fn clone_github_project(
+        &mut self,
+        repo: String,
+        clone_protocol: Option<CloneProtocol>,
+        parent_directory: String,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ProjectSummary>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        self.cloning.push(name.clone());
+        self.last_clone_parent = Some(parent_directory.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = client
+                .request(&CloneGithubProject {
+                    repo: repo.clone(),
+                    clone_protocol,
+                    target_directory: parent_directory,
+                })
+                .await
+                .and_then(|response| {
+                    response.project.with_context(|| {
+                        format!(
+                            "Paseo did not clone {repo}: {}",
+                            response.error.as_deref().unwrap_or("no reason given")
+                        )
+                    })
+                });
+            this.update(cx, |this, cx| {
+                if let Some(index) = this.cloning.iter().position(|cloning| *cloning == name) {
+                    this.cloning.remove(index);
+                }
+                if let Ok(project) = &result {
+                    this.projects
+                        .insert(project.project_id.clone(), project.clone());
+                }
+                cx.notify();
+            })?;
+            result
+        })
+    }
+
+    pub fn cloning(&self) -> &[SharedString] {
+        &self.cloning
+    }
+
+    /// Where a clone may go: the folder of the last one, then the folders holding the most
+    /// projects.
+    pub fn clone_parent_suggestions(&self) -> Vec<String> {
+        let mut counts: HashMap<String, usize> = HashMap::default();
+        for project in self.projects.values() {
+            if let Some(parent) = Path::new(&project.project_root_path).parent() {
+                *counts
+                    .entry(parent.to_string_lossy().into_owned())
+                    .or_default() += 1;
+            }
+        }
+        let mut parents: Vec<(String, usize)> = counts.into_iter().collect();
+        parents.sort_by(|(a, a_count), (b, b_count)| b_count.cmp(a_count).then_with(|| a.cmp(b)));
+        let mut suggestions: Vec<String> = self.last_clone_parent.iter().cloned().collect();
+        for (parent, _) in parents {
+            if !suggestions.contains(&parent) {
+                suggestions.push(parent);
+            }
+        }
+        suggestions
     }
 
     /// Creates a workspace in a project, from its checkout or as a new worktree.
@@ -1170,6 +1319,7 @@ impl PaseoStore {
         let mut groups: BTreeMap<&str, ProjectGroup> = self
             .projects
             .values()
+            .filter(|project| !self.closing.contains(&project.project_id))
             .map(|project| {
                 (
                     project.project_id.as_str(),
@@ -1186,7 +1336,9 @@ impl PaseoStore {
 
         // A workspace being archived disappears at once, as in Paseo's apps.
         let listed = self.workspaces.values().filter(|workspace| {
-            workspace.archiving_at.is_none() && !self.closing.contains(&workspace.id)
+            workspace.archiving_at.is_none()
+                && !self.closing.contains(&workspace.id)
+                && !self.closing.contains(&workspace.project_id)
         });
         for workspace in listed {
             let mut agents: Vec<Agent> = agents_by_workspace

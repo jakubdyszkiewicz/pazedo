@@ -410,7 +410,9 @@ impl Client {
     pub async fn request<R: Request>(&self, request: &R) -> Result<R::Response> {
         let body = serde_json::to_value(request)
             .with_context(|| format!("failed to encode {}", R::TYPE))?;
-        let response = self.request_raw(R::TYPE, body).await?;
+        let response = self
+            .send_request(R::TYPE, body, None, None, R::TIMEOUT)
+            .await?;
         if response.message_type != R::RESPONSE_TYPE {
             bail!(
                 "unexpected response to {}: expected {}, got {}",
@@ -437,7 +439,7 @@ impl Client {
             .with_context(|| format!("failed to encode {}", SubscribeTerminal::TYPE))?;
         let (frames_tx, frames_rx) = mpsc::unbounded();
         let response = self
-            .send_request(SubscribeTerminal::TYPE, body, Some(frames_tx), None)
+            .send_request(SubscribeTerminal::TYPE, body, Some(frames_tx), None, None)
             .await?;
         let response: SubscribeTerminalResponse = serde_json::from_value(response.payload)
             .with_context(|| format!("failed to decode {}", SubscribeTerminal::RESPONSE_TYPE))?;
@@ -453,7 +455,8 @@ impl Client {
     /// Sends any session request and returns the correlated response untyped. For messages
     /// this crate does not model yet.
     pub async fn request_raw(&self, message_type: &str, body: Value) -> Result<RawMessage> {
-        self.send_request(message_type, body, None, None).await
+        self.send_request(message_type, body, None, None, None)
+            .await
     }
 
     /// Sends a request the daemon answers with updates before its response, and returns the
@@ -469,7 +472,9 @@ impl Client {
             message_type: R::UPDATE_TYPE,
             payloads: payloads_tx,
         };
-        let response = self.send_request(R::TYPE, body, None, Some(route)).await?;
+        let response = self
+            .send_request(R::TYPE, body, None, Some(route), R::TIMEOUT)
+            .await?;
         if response.message_type != R::RESPONSE_TYPE {
             bail!(
                 "unexpected response to {}: expected {}, got {}",
@@ -497,6 +502,7 @@ impl Client {
         body: Value,
         terminal_route: Option<mpsc::UnboundedSender<TerminalFrame>>,
         update_route: Option<UpdateRoute>,
+        timeout: Option<Duration>,
     ) -> Result<RawMessage> {
         let Value::Object(mut message) = body else {
             bail!("{message_type} body must be a JSON object");
@@ -534,15 +540,15 @@ impl Client {
             shared: &self.shared,
             request_id: &request_id,
         };
-        let mut timeout = (self.sleep)(self.request_timeout).fuse();
+        let request_timeout = timeout.unwrap_or(self.request_timeout);
+        let mut timeout = (self.sleep)(request_timeout).fuse();
         let mut response_rx = response_rx.fuse();
         let result = select_biased! {
             response = response_rx => response
                 .map_err(|_| anyhow!("{message_type} was dropped by the client"))
                 .and_then(|response| response),
             _ = timeout => Err(anyhow!(
-                "{message_type} timed out after {:?}",
-                self.request_timeout
+                "{message_type} timed out after {request_timeout:?}"
             )),
         };
         drop(pending);

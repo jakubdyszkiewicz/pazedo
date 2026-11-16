@@ -15,9 +15,7 @@ done; record decisions where the code or docs that implement them live.
 
 - The new-workspace picker only branches off existing branches; no "check out a branch" or
   pull request, and no custom branch name.
-- Adding a project uses the native folder dialog only; no GitHub clone
-  (`project.github.clone.request`) or "create a folder" (`project.create_directory.request`).
-- Remove projects from the sidebar.
+- Adding a project can't create a new folder (`project.create_directory.request`).
 
 - Opening an agent whose workspace is the pazedo repository itself switches the window to that
   repository; trust it only if rust-analyzer may build there.
