@@ -12,10 +12,10 @@ use paseo_client::{
         AgentUpdate, ArchiveWorkspace, AttentionReason, BranchSuggestions, ClearAgentAttention,
         CloseItems, CreateTerminal, CreateWorkspace, DirectorySuggestions, FetchAgents,
         FetchWorkspaces, GetProvidersSnapshot, HelloAuth, ListProjects, ListUsageReports, Page,
-        ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, ServerInfo, ServerMessage,
-        SetSessionEventSubscription, SetWorkspaceTitle, Subscribe, SubscribeTerminals,
-        TerminalInfo, TerminalStreamExit, TerminalsChanged, UsageReportEntry, Workspace,
-        WorkspaceSource, WorkspaceUpdate,
+        ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, RenameAgent, RenameTerminal,
+        ServerInfo, ServerMessage, SetSessionEventSubscription, SetWorkspaceTitle, Subscribe,
+        SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged, UsageReportEntry,
+        Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
 use project::Project;
@@ -617,6 +617,12 @@ impl PaseoStore {
                     match result {
                         Ok((response, updates)) => {
                             this.usage = updates.into_iter().map(|update| update.report).collect();
+                            // The daemon streams the reports as they come in; a fixed order keeps
+                            // the title bar from shuffling between reads.
+                            this.usage.sort_by(|a, b| {
+                                (&a.source_label, &a.account.label)
+                                    .cmp(&(&b.source_label, &b.account.label))
+                            });
                             this.usage_error = response.error.map(SharedString::from);
                         }
                         // Keeps the last reports, as the Paseo app does.
@@ -870,6 +876,74 @@ impl PaseoStore {
 
     /// Renames a workspace; `None` or an empty title reverts to the name Paseo derives from its
     /// branch or directory.
+    pub fn rename_agent(
+        &mut self,
+        agent_id: String,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.spawn(async move |this, cx| {
+            let response = client
+                .request(&RenameAgent {
+                    agent_id: agent_id.clone(),
+                    name: name.clone(),
+                })
+                .await?;
+            if !response.accepted {
+                anyhow::bail!(
+                    "Paseo did not rename the agent: {}",
+                    response.error.as_deref().unwrap_or("no reason given")
+                );
+            }
+            // The daemon sends no update for a closed agent, so the name is applied here.
+            this.update(cx, |this, cx| {
+                if let Some(agent) = this.agents.get_mut(&agent_id) {
+                    agent.title = Some(name);
+                    cx.notify();
+                }
+            })
+        })
+    }
+
+    pub fn rename_terminal(
+        &mut self,
+        terminal_id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let client = match self.connected_client() {
+            Ok(client) => client,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        cx.spawn(async move |this, cx| {
+            let response = client
+                .request(&RenameTerminal {
+                    terminal_id: terminal_id.clone(),
+                    title: title.clone(),
+                })
+                .await?;
+            if !response.success {
+                anyhow::bail!(
+                    "Paseo did not rename the terminal: {}",
+                    response.error.as_deref().unwrap_or("no reason given")
+                );
+            }
+            // Shown at once rather than with the next terminal list update.
+            this.update(cx, |this, cx| {
+                for terminal in this.terminals.values_mut().flatten() {
+                    if terminal.id == terminal_id {
+                        terminal.title = Some(title.clone());
+                        cx.notify();
+                    }
+                }
+            })
+        })
+    }
+
     pub fn set_workspace_title(
         &mut self,
         workspace_id: String,

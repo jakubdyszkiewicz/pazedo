@@ -1,22 +1,76 @@
 use agent_client_protocol::v2::schema as acp_v2;
 use agent_ui::{Agent, AgentConnectionStore, AgentThreadSource, ConversationView};
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Render,
-    SharedString, Subscription, Task, WeakEntity, Window,
+    Action, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Render, SharedString, Subscription, Task, WeakEntity, Window,
 };
 use project::{AgentId, Project};
 use std::{cell::Cell, rc::Rc};
 use ui::prelude::*;
 use util::path_list::PathList;
-use workspace::{Item, Workspace};
+use workspace::{Item, Workspace, notifications::DetachAndPromptErr as _};
 
 use crate::{
     PaseoStore, PaseoStoreEvent,
     agent_session::{NewAgent, PASEO_AGENT_ID, PaseoAgentServer, PaseoConnection},
     panel::PaseoPanel,
+    rename_prompt::RenamePrompt,
     store::ConnectionStatus,
 };
 use paseo_client::protocol::AgentStatus;
+
+/// Copies an agent's id, e.g. for the `paseo` CLI. From the tab's context menu.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = paseo_agent, no_json, no_register)]
+pub struct CopyAgentId {
+    pub agent_id: String,
+}
+
+/// Renames an agent. From the tab's context menu.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = paseo_agent, no_json, no_register)]
+pub struct RenameAgent {
+    pub agent_id: String,
+}
+
+/// The tab menu's actions are handled app-wide: the menu dispatches them to the tab, which is
+/// not rendered unless it is the active one, and they then reach only the window's root.
+pub(crate) fn init(cx: &mut App) {
+    cx.on_action(|action: &CopyAgentId, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(action.agent_id.clone()));
+    });
+    cx.on_action(|action: &RenameAgent, cx| {
+        let agent_id = action.agent_id.clone();
+        // The action arrives while its window is being updated.
+        cx.defer(move |cx| {
+            crate::rename_prompt::with_active_workspace(cx, |workspace, window, cx| {
+                if let Some(item) = PaseoAgentItem::find(workspace.read(cx), &agent_id, cx) {
+                    item.update(cx, |item, cx| item.rename(window, cx));
+                }
+            });
+        });
+    });
+}
+
+/// The icon of an agent's provider, from its id or label: "contains", not an exact match, so
+/// custom providers such as "Claude (Work)" get theirs too.
+pub(crate) fn provider_icon(names: &[&str]) -> IconName {
+    let names: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+    let mentions = |needle: &str| names.iter().any(|name| name.contains(needle));
+    if mentions("claude") || mentions("anthropic") {
+        IconName::AiClaude
+    } else if mentions("codex") || mentions("openai") {
+        IconName::AiOpenAi
+    } else if mentions("opencode") {
+        IconName::AiOpenCode
+    } else if mentions("copilot") {
+        IconName::Copilot
+    } else if mentions("gemini") {
+        IconName::AiGemini
+    } else {
+        IconName::Sparkle
+    }
+}
 
 /// A Paseo agent session in a tab of the Paseo panel, rendered by Zed's thread UI.
 pub struct PaseoAgentItem {
@@ -42,6 +96,8 @@ pub struct PaseoAgentItem {
     /// history). The view reloads once the daemon is connected again and the tab is shown,
     /// instead of waiting for the user to press Retry, e.g. after the laptop slept.
     reload_when_connected: bool,
+    /// The agent's title as the daemon last reported it.
+    daemon_title: Option<String>,
     _conversation_subscription: Option<Subscription>,
     _store_subscriptions: [Subscription; 2],
 }
@@ -97,10 +153,16 @@ impl PaseoAgentItem {
     ) -> Self {
         // Rendering marks the agent as seen; this re-renders a shown tab when its agent
         // finishes, so that it does not show up as unread while the user is looking at it.
+        // It also re-renders the tab when the agent is renamed.
         let store_subscription = cx.observe(&store, |this, store, cx| {
-            if this
-                .agent_id(cx)
-                .is_some_and(|agent_id| store.read(cx).has_unseen_attention(&agent_id))
+            let agent_id = this.agent_id(cx);
+            let title = agent_id
+                .as_ref()
+                .and_then(|agent_id| store.read(cx).agent(agent_id)?.title.clone());
+            let renamed = title != this.daemon_title;
+            this.daemon_title = title;
+            if renamed
+                || agent_id.is_some_and(|agent_id| store.read(cx).has_unseen_attention(&agent_id))
             {
                 cx.notify();
             }
@@ -133,6 +195,7 @@ impl PaseoAgentItem {
             detached: Cell::new(false),
             reloading: None,
             reload_when_connected: false,
+            daemon_title: None,
             _conversation_subscription: None,
             _store_subscriptions: [store_subscription, events_subscription],
         }
@@ -354,6 +417,33 @@ fn build_conversation_view(
     })
 }
 
+impl PaseoAgentItem {
+    fn rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent_id) = self.agent_id(cx) else {
+            return;
+        };
+        let current_name = self.tab_content_text(0, cx).to_string();
+        let store = self.store.clone();
+        RenamePrompt::open(
+            &self.workspace,
+            "Rename Agent",
+            current_name,
+            move |name, window, cx| {
+                store
+                    .update(cx, |store, cx| store.rename_agent(agent_id, name, cx))
+                    .detach_and_prompt_err(
+                        "Could not rename the agent",
+                        window,
+                        cx,
+                        |error, _, _| Some(format!("{error:#}")),
+                    );
+            },
+            window,
+            cx,
+        );
+    }
+}
+
 impl Item for PaseoAgentItem {
     type Event = ();
 
@@ -361,17 +451,55 @@ impl Item for PaseoAgentItem {
         false
     }
 
+    /// The daemon's title first: the thread only reads it when the session opens, so a
+    /// rename would not show otherwise.
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
-        self.conversation_view
-            .as_ref()
-            .and_then(|view| view.read(cx).active_thread())
-            .and_then(|thread| thread.read(cx).thread.read(cx).title())
+        self.agent_id(cx)
+            .and_then(|agent_id| self.store.read(cx).agent(&agent_id)?.title.clone())
+            .map(SharedString::from)
+            .or_else(|| {
+                self.conversation_view
+                    .as_ref()
+                    .and_then(|view| view.read(cx).active_thread())
+                    .and_then(|thread| thread.read(cx).thread.read(cx).title())
+            })
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| self.title.clone())
     }
 
-    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(IconName::Sparkle))
+    fn tab_icon(&self, _window: &Window, cx: &App) -> Option<Icon> {
+        let store = self.store.read(cx);
+        let provider = self
+            .agent_id(cx)
+            .and_then(|agent_id| Some(store.agent(&agent_id)?.provider.clone()))
+            .or_else(|| self.new_agent.as_ref().map(|agent| agent.provider.clone()))?;
+        let label = store
+            .providers()
+            .iter()
+            .find(|entry| entry.provider == provider)
+            .and_then(|entry| entry.label.clone());
+        let mut names = vec![provider.as_str()];
+        names.extend(label.as_deref());
+        Some(Icon::new(provider_icon(&names)))
+    }
+
+    fn tab_extra_context_menu_actions(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(SharedString, Box<dyn Action>)> {
+        let Some(agent_id) = self.agent_id(cx) else {
+            return Vec::new();
+        };
+        vec![
+            (
+                "Copy Agent ID".into(),
+                Box::new(CopyAgentId {
+                    agent_id: agent_id.clone(),
+                }),
+            ),
+            ("Rename…".into(), Box::new(RenameAgent { agent_id })),
+        ]
     }
 
     /// Closing the tab archives the agent, as in Paseo's apps. A tab dragged to another pane is
@@ -482,5 +610,28 @@ impl Render for PaseoAgentItem {
                 )
             })
             .children(self.conversation_view.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_icons_match_by_containing_the_name() {
+        assert_eq!(provider_icon(&["claude"]), IconName::AiClaude);
+        assert_eq!(
+            provider_icon(&["work-claude", "Claude (Work)"]),
+            IconName::AiClaude
+        );
+        assert_eq!(provider_icon(&["codex"]), IconName::AiOpenAi);
+        assert_eq!(
+            provider_icon(&["custom-1", "Codex (work)"]),
+            IconName::AiOpenAi,
+            "the label counts too"
+        );
+        assert_eq!(provider_icon(&["opencode"]), IconName::AiOpenCode);
+        assert_eq!(provider_icon(&["OpenCode Go"]), IconName::AiOpenCode);
+        assert_eq!(provider_icon(&["mock"]), IconName::Sparkle);
     }
 }

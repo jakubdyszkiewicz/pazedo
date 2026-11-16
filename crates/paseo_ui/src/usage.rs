@@ -172,20 +172,7 @@ fn percent_left(window: &UsageWindow) -> Option<f64> {
 }
 
 fn source_icon(source_id: &str) -> IconName {
-    let source_id = source_id.to_ascii_lowercase();
-    if source_id.contains("claude") || source_id.contains("anthropic") {
-        IconName::AiClaude
-    } else if source_id.contains("codex") || source_id.contains("openai") {
-        IconName::AiOpenAi
-    } else if source_id.contains("opencode") {
-        IconName::AiOpenCode
-    } else if source_id.contains("copilot") {
-        IconName::Copilot
-    } else if source_id.contains("gemini") {
-        IconName::AiGemini
-    } else {
-        IconName::Sparkle
-    }
+    crate::agent_item::provider_icon(&[source_id])
 }
 
 fn tone_color(tone: UsageTone) -> Color {

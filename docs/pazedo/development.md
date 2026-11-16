@@ -317,6 +317,23 @@ on every click, as in Zed. Folders still open and close on the first click. Veri
 in a dev build: a click on main.rs only selected it, the next click opened it. Synthetic clicks
 need a click state of 1 (`script/pazedo/click.swift` sets it), or apps see a click count of 0.
 
+### Agent and terminal tabs
+
+A right click on an agent tab in the Paseo panel adds Copy Agent ID and Rename… to Zed's tab
+menu; a terminal tab gets Copy Terminal ID and Rename… (`Item::tab_extra_context_menu_actions`).
+Zed's menu focuses the tab and dispatches the action to it, but a tab that is not the active one
+is not rendered, so the action would only reach the window's root; these actions carry the id
+and are handled app-wide (`cx.on_action`, registered by `paseo_ui::init`), Rename finding its tab
+in the active window. Rename opens a small prompt and sends `update_agent_request {agentId,
+name}` or `terminal.rename.request {terminalId, title}`. Tabs show the daemon's title first (a
+renamed terminal keeps its name; otherwise it follows the shell's title), and the store applies
+an accepted rename at once, since the daemon sends no update for a closed agent. An agent tab's
+icon is its provider's: Claude, OpenAI (Codex) or OpenCode when the provider's id or label
+contains "claude", "codex" or "opencode" (so "Claude (Work)" counts), else a sparkle. Verified
+2026-11-16 in a dev build against the test daemon: Copy Agent ID and Copy Terminal ID (also from
+an inactive tab) put the ids on the clipboard, and both renames showed in the tabs at once. The
+icons are unit-tested only; the test daemon's agents are all `mock`.
+
 ### Images in agent messages
 
 Zed's agent view shows markdown images from absolute paths and `http(s)` URLs, not `file://`

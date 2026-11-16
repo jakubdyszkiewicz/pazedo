@@ -1,7 +1,7 @@
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Render,
-    SharedString, Subscription, Task, WeakEntity, Window,
+    Action, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Render, SharedString, Subscription, Task, WeakEntity, Window,
 };
 use paseo_client::{
     Client,
@@ -19,12 +19,48 @@ use terminal::{ForwardedInput, Terminal, TerminalBounds, TerminalBuilder};
 use terminal_view::TerminalView;
 use ui::prelude::*;
 use util::{ResultExt as _, paths::PathStyle};
-use workspace::{Item, Workspace, WorkspaceId, item::ItemEvent, searchable::SearchableItemHandle};
+use workspace::{
+    Item, Workspace, WorkspaceId, item::ItemEvent, notifications::DetachAndPromptErr as _,
+    searchable::SearchableItemHandle,
+};
 
 use crate::{
     panel::PaseoPanel,
+    rename_prompt::RenamePrompt,
     store::{PaseoStore, PaseoStoreEvent},
 };
+
+/// Copies a terminal's id, e.g. for the `paseo` CLI. From the tab's context menu.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = paseo_terminal, no_json, no_register)]
+pub struct CopyTerminalId {
+    pub terminal_id: String,
+}
+
+/// Renames a terminal; the name then stays instead of following the shell's title. From the
+/// tab's context menu.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = paseo_terminal, no_json, no_register)]
+pub struct RenameTerminal {
+    pub terminal_id: String,
+}
+
+/// Handled app-wide, as the agent tab's menu actions are (see `agent_item::init`).
+pub(crate) fn init(cx: &mut App) {
+    cx.on_action(|action: &CopyTerminalId, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(action.terminal_id.clone()));
+    });
+    cx.on_action(|action: &RenameTerminal, cx| {
+        let terminal_id = action.terminal_id.clone();
+        cx.defer(move |cx| {
+            crate::rename_prompt::with_active_workspace(cx, |workspace, window, cx| {
+                if let Some(item) = PaseoTerminalItem::find(workspace.read(cx), &terminal_id, cx) {
+                    item.update(cx, |item, cx| item.rename(window, cx));
+                }
+            });
+        });
+    });
+}
 
 /// A terminal owned by the Paseo daemon in a tab of the Paseo panel, rendered by Zed's terminal
 /// view. Closing the tab kills the shell, as in Paseo's apps.
@@ -44,6 +80,8 @@ pub struct PaseoTerminalItem {
     size: Option<TerminalSize>,
     stream: Task<()>,
     _input: Task<()>,
+    /// The terminal's title as the daemon last reported it.
+    daemon_title: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -163,6 +201,16 @@ impl PaseoTerminalItem {
                     cx.emit(ItemEvent::UpdateTab);
                 }
             }),
+            cx.observe(&store, |this: &mut Self, store, cx| {
+                let title = store
+                    .read(cx)
+                    .terminal(&this.terminal_id)
+                    .and_then(|terminal| terminal.title.clone());
+                if title != this.daemon_title {
+                    this.daemon_title = title;
+                    cx.emit(ItemEvent::UpdateTab);
+                }
+            }),
         ];
 
         // Attaching waits for the view's first layout (see `forward_input`).
@@ -179,6 +227,7 @@ impl PaseoTerminalItem {
             size: None,
             stream: Task::ready(()),
             _input: input,
+            daemon_title: None,
             _subscriptions: subscriptions,
         }
     }
@@ -357,6 +406,33 @@ impl Drop for PaseoTerminalItem {
     }
 }
 
+impl PaseoTerminalItem {
+    fn rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current_name = self.tab_content_text(0, cx).to_string();
+        let terminal_id = self.terminal_id.clone();
+        let store = self.store.clone();
+        RenamePrompt::open(
+            &self.workspace,
+            "Rename Terminal",
+            current_name,
+            move |title, window, cx| {
+                store
+                    .update(cx, |store, cx| {
+                        store.rename_terminal(terminal_id, title, cx)
+                    })
+                    .detach_and_prompt_err(
+                        "Could not rename the terminal",
+                        window,
+                        cx,
+                        |error, _, _| Some(format!("{error:#}")),
+                    );
+            },
+            window,
+            cx,
+        );
+    }
+}
+
 impl Item for PaseoTerminalItem {
     type Event = ItemEvent;
 
@@ -364,18 +440,44 @@ impl Item for PaseoTerminalItem {
         false
     }
 
+    /// The daemon's title first: it follows the shell's title until the terminal is renamed,
+    /// then keeps the name.
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        let daemon_title = self
+            .store
+            .read(cx)
+            .terminal(&self.terminal_id)
+            .and_then(|terminal| terminal.title.clone())
+            .filter(|title| !title.trim().is_empty());
+        if let Some(title) = daemon_title {
+            return title.into();
+        }
         let shell_title = self.terminal.read(cx).breadcrumb_text.trim();
         if !shell_title.is_empty() {
             return shell_title.to_string().into();
         }
-        self.store
-            .read(cx)
-            .terminal(&self.terminal_id)
-            .and_then(|terminal| terminal.title.clone())
-            .filter(|title| !title.is_empty())
-            .map(SharedString::from)
-            .unwrap_or_else(|| self.name.clone())
+        self.name.clone()
+    }
+
+    fn tab_extra_context_menu_actions(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Vec<(SharedString, Box<dyn Action>)> {
+        vec![
+            (
+                "Copy Terminal ID".into(),
+                Box::new(CopyTerminalId {
+                    terminal_id: self.terminal_id.clone(),
+                }),
+            ),
+            (
+                "Rename…".into(),
+                Box::new(RenameTerminal {
+                    terminal_id: self.terminal_id.clone(),
+                }),
+            ),
+        ]
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {

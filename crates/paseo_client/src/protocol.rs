@@ -1715,6 +1715,42 @@ impl Request for SetWorkspaceTitle {
     type Response = SetWorkspaceTitleResponse;
 }
 
+/// Renames an agent.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameAgent {
+    pub agent_id: String,
+    pub name: String,
+}
+
+impl Request for RenameAgent {
+    const TYPE: &'static str = "update_agent_request";
+    const RESPONSE_TYPE: &'static str = "update_agent_response";
+    type Response = AgentActionResponse;
+}
+
+/// Renames a terminal. The title then stays until the next rename, instead of following the
+/// shell's.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameTerminal {
+    pub terminal_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenameTerminalResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl Request for RenameTerminal {
+    const TYPE: &'static str = "terminal.rename.request";
+    const RESPONSE_TYPE: &'static str = "terminal.rename.response";
+    type Response = RenameTerminalResponse;
+}
+
 /// Creates a workspace: always a new one, never a lookup by directory.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

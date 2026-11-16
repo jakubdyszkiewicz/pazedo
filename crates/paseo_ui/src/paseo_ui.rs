@@ -10,6 +10,7 @@ mod daemon_auth;
 mod daemon_settings;
 mod new_workspace;
 mod panel;
+mod rename_prompt;
 mod sidebar;
 mod store;
 mod terminal_item;
@@ -34,6 +35,8 @@ pub use terminal_item::PaseoTerminalItem;
 /// Registers the workspace sidebar's window actions and shows the AI subscriptions' usage in
 /// every window's title bar. Call before windows open.
 pub fn init(cx: &mut gpui::App) {
+    agent_item::init(cx);
+    terminal_item::init(cx);
     sidebar::init(cx);
     usage::init(cx);
 }
