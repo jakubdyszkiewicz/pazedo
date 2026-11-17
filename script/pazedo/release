@@ -38,6 +38,12 @@ commit=$(git rev-parse HEAD)
 authorization=$(mktemp)
 trap 'rm -f "$authorization"' EXIT
 printf 'Authorization: Bearer %s\n' "$token" > "$authorization"
+# git gets it through the environment, for the same reason.
+github_git() {
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader \
+    GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$token" | base64)" \
+    git "$@"
+}
 github() {
   method=$1
   url=$2
@@ -51,12 +57,12 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "the working tree has changes; commit and push them first" >&2
   exit 1
 fi
-git fetch --quiet origin main
+github_git fetch --quiet origin main
 if [ "$commit" != "$(git rev-parse origin/main)" ]; then
   echo "HEAD is not origin/main; push it (or check out origin/main) first" >&2
   exit 1
 fi
-if [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+if [ -n "$(github_git ls-remote --tags origin "refs/tags/$tag")" ]; then
   echo "$tag already exists; bump crates/zed/PAZEDO_VERSION" >&2
   exit 1
 fi
