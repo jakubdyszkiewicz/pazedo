@@ -82,6 +82,30 @@ mv ~/Library/Application\ Support/Pazedo/config/* ~/.config/pazedo/
 First launch asks whether to trust the opened project (Zed's restricted mode), because the
 data directory is new.
 
+### Versions and releases
+
+Pazedo has its own version, in `crates/zed/PAZEDO_VERSION` (semver, 0.x while it is early).
+`bundle` writes it to the app's `CFBundleShortVersionString`, and the About window shows it
+with the Zed version after it ("Pazedo 0.1.0 (Zed 1.30.0)"). Zed's own version in
+`crates/zed/Cargo.toml` stays as upstream has it: extensions and remote servers depend on it,
+and upstream merges update it.
+
+Releases are built on a Mac, not in GitHub Actions, which stay disabled for the repository.
+GitHub's free macOS runners are 3-core M1s with little disk, and Zed itself builds on larger
+runners from Namespace. To release:
+
+1. Bump `crates/zed/PAZEDO_VERSION`, commit and push.
+2. Run `GITHUB_TOKEN=… script/pazedo/release`. It refuses to run unless `HEAD` is
+   `origin/main` with a clean tree and the tag `pazedo-v<version>` is unused. It builds the
+   bundle, zips it with `ditto` (which keeps the signature), and uploads it to a new draft
+   release whose notes name the commit, Zed's version and the Paseo protocol version.
+   `--skip-build` reuses `target/release/Pazedo.app` if it was built from `HEAD`.
+3. Check the draft on GitHub and publish it there; publishing creates the tag.
+
+The app is ad-hoc signed and not notarized, so macOS quarantines the download. The README and
+the release notes tell users to run `xattr -dr com.apple.quarantine` on it. An app built from
+source is not quarantined.
+
 ### App icon
 
 The icon is the folded "P" in `docs/pazedo/design/`, a generated concept image on a pale

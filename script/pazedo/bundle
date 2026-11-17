@@ -88,7 +88,8 @@ else
   echo "no remote servers in $remote_servers; SSH projects will need one installed by hand" >&2
 fi
 
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)
+# Pazedo's own version, not Zed's, which extensions and remote servers depend on.
+version=$(tr -d '[:space:]' < crates/zed/PAZEDO_VERSION)
 {
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

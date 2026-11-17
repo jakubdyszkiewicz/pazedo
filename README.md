@@ -80,7 +80,13 @@ Pazedo keeps its settings and data apart from an installed Zed, in `~/.config/pa
 
 You need a running Paseo daemon; see [paseo.sh](https://paseo.sh).
 
-There are no prebuilt downloads yet, so build the app from source (see [Development](#development)).
+Building Pazedo from source is recommended (see [Development](#development)). Prebuilt apps for
+macOS on Apple silicon are on the [releases page](https://github.com/jakubdyszkiewicz/pazedo/releases).
+They are not notarized, so after moving Pazedo.app to Applications, lift macOS's quarantine:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Pazedo.app
+```
 
 ## Development
 
@@ -113,7 +119,8 @@ Daemons can also be added and edited from the gear button in the sidebar header.
 ### Updating
 
 Pazedo doesn't update itself: it builds Zed's dev channel, which has no update server, and the
-app never checks for new versions. To update, pull this repository and build again:
+app never checks for new versions. To update, download a newer release, or pull this repository
+and build again:
 
 ```sh
 git pull

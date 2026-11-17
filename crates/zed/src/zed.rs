@@ -1580,7 +1580,12 @@ fn open_about_window(cx: &mut App) {
             // Pazedo: the app's name rather than the channel's ("Zed Dev").
             let release_channel_name = paths::APP_NAME;
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            // Pazedo: Pazedo's own version, with the Zed version it is based on.
+            let version = format!(
+                "{} (Zed {})",
+                include_str!("../PAZEDO_VERSION").trim(),
+                env!("CARGO_PKG_VERSION")
+            );
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
