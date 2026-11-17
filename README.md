@@ -40,7 +40,7 @@ it, as in Paseo's own apps.
 - **Password-protected daemons:** the password is kept in the macOS Keychain. A daemon on the
   same machine needs no password.
 - **Keyboard first:** arrow keys, type-to-find, cmd-n for a new workspace, cmd-shift-0 to reveal
-  the open workspace, cmd-shift-minus to collapse all.
+  the open workspace, cmd-shift-minus and cmd-shift-= to collapse and expand all.
 
 ### Agents in Zed's own thread UI
 

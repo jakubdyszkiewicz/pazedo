@@ -308,7 +308,11 @@ bound `cmd-shift-0`, which did nothing.
 cmd-shift-minus (`paseo_sidebar::CollapseAll`, bound as `cmd-_` in `PaseoSidebar` only)
 collapses every project, or every status section when grouping by status; a selected workspace
 hands the selection to its header. Verified 2026-11-16 in a dev build with the real key: all four
-projects collapsed, and after cmd-g both status sections did.
+projects collapsed, and after cmd-g both status sections did. cmd-shift-= (`paseo_sidebar::ExpandAll`,
+bound as `cmd-+` in `PaseoSidebar` only, so cmd-+ elsewhere still increases the font size)
+expands them all again and keeps the selection in view. Verified 2026-11-17 in a dev build with
+the real keys: cmd-shift-minus collapsed all four projects and cmd-shift-= expanded them, with
+the selected project still selected.
 
 That allows JetBrains-style toggles, where one key focuses a panel and, pressed in it, hides it.
 In your `keymap.json` (Pazedo.app's is `~/.config/pazedo/keymap.json`):

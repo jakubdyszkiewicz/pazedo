@@ -547,6 +547,14 @@ async fn test_revealing_the_open_workspace_expands_its_project(cx: &mut TestAppC
         Some("project prj_sandbox"),
         "collapsed"
     );
+    press(&crate::sidebar::ExpandAll, cx);
+    press(&menu::SelectNext, cx);
+    assert_eq!(
+        selected(cx).as_deref(),
+        Some("workspace wks_second"),
+        "expanding all shows the project's workspaces again"
+    );
+    press(&crate::sidebar::CollapseAll, cx);
     press(&menu::Cancel, cx);
     multi_workspace.update_in(cx, |multi_workspace, window, cx| {
         multi_workspace.close_sidebar(window, cx);

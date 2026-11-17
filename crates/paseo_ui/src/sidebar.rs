@@ -61,7 +61,9 @@ gpui::actions!(
         /// reveal of the open file.
         RevealActiveWorkspace,
         /// Collapses every project, or every status section when grouping by status.
-        CollapseAll
+        CollapseAll,
+        /// Expands every project, or every status section when grouping by status.
+        ExpandAll
     ]
 );
 
@@ -662,6 +664,24 @@ impl PaseoSidebar {
                 SidebarEntry::Workspace(_) => {}
             }
         }
+        cx.notify();
+    }
+
+    /// Expands every project or status section listed, keeping the selection in view.
+    fn expand_all(&mut self, _: &ExpandAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.type_ahead.end();
+        for row in &self.selectable_rows {
+            match &row.entry {
+                SidebarEntry::Project(project) => {
+                    self.collapsed_projects.remove(project);
+                }
+                SidebarEntry::StatusSection(bucket) => {
+                    self.collapsed_buckets.remove(bucket);
+                }
+                SidebarEntry::Workspace(_) => {}
+            }
+        }
+        self.scroll_to_selection = true;
         cx.notify();
     }
 
@@ -2697,6 +2717,7 @@ impl Render for PaseoSidebar {
             .on_action(cx.listener(Self::new_workspace_for_selection))
             .on_action(cx.listener(Self::toggle_grouping))
             .on_action(cx.listener(Self::collapse_all))
+            .on_action(cx.listener(Self::expand_all))
             .on_action(cx.listener(|this, _: &RevealActiveWorkspace, _window, cx| {
                 this.reveal_active_workspace(cx)
             }))

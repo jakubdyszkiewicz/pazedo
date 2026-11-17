@@ -1826,7 +1826,8 @@
   // cmd-g switches between grouping by project and by status. cmd-shift-0 reveals the open
   // workspace in the sidebar, from anywhere in the window (the sidebar is outside `Workspace`).
   // macOS reports cmd-shift-0 as `cmd-)` (US layout); a `cmd-shift-0` binding never matches.
-  // cmd-_ (cmd-shift-minus) in the sidebar collapses every project or status section.
+  // cmd-_ (cmd-shift-minus) in the sidebar collapses every project or status section, and cmd-+
+  // (cmd-shift-=) expands them all; elsewhere cmd-+ still increases the font size.
   {
     "context": "PaseoSidebar",
     "use_key_equivalents": true,
@@ -1835,6 +1836,7 @@
       "cmd-g": "paseo_sidebar::ToggleGrouping",
       "cmd-)": "paseo_sidebar::RevealActiveWorkspace",
       "cmd-_": "paseo_sidebar::CollapseAll",
+      "cmd-+": "paseo_sidebar::ExpandAll",
     },
   },
   {
