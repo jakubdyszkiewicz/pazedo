@@ -106,6 +106,15 @@ The app is ad-hoc signed and not notarized, so macOS quarantines the download. T
 the release notes tell users to run `xattr -dr com.apple.quarantine` on it. An app built from
 source is not quarantined.
 
+Verified 2026-11-17 with the first release, 0.1.0 (draft, built from `b353665ac1`): the script
+passed its checks, built the app in 32 min wall, zipped it (193 MB) and created the draft. The
+upload step then failed, because `/bin/sh`'s `echo` expanded the `\n` escapes in GitHub's JSON
+reply (fixed: the script uses `printf`), so the zip was attached by hand with the same API call.
+The zip, unpacked with `ditto`, passes `codesign --verify --deep --strict`, reports version
+0.1.0 and holds both remote servers. The About window of a debug build reads "Pazedo 0.1.0 (Zed
+1.30.0) (debug)". Not verified: a full run of the fixed script, and downloading the release on
+another Mac and opening it after the `xattr` step.
+
 ### App icon
 
 The icon is the folded "P" in `docs/pazedo/design/`, a generated concept image on a pale

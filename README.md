@@ -1,3 +1,5 @@
+<img src="crates/zed/resources/app-icon-dev.png" alt="Pazedo's app icon" width="128">
+
 # Pazedo
 
 **Paseo 🤝 Zed**

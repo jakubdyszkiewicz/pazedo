@@ -96,8 +96,7 @@ Pazedo $version for macOS on Apple silicon, built from \`$(git rev-parse --short
 | Zed | $zed_version-dev |
 | Paseo protocol | $paseo_version |
 
-Building Pazedo yourself is recommended; see the README. To use this build instead, unzip it,
-move Pazedo.app to Applications, and lift macOS's quarantine, as the app is not notarized:
+Building Pazedo yourself is recommended; see the README. To use this build instead, unzip it, move Pazedo.app to Applications, and lift macOS's quarantine, as the app is not notarized:
 
 \`\`\`sh
 xattr -dr com.apple.quarantine /Applications/Pazedo.app
@@ -107,6 +106,7 @@ Pazedo doesn't update itself. Download a newer release to update.
 NOTES
 )
 
+# printf, not echo: /bin/sh's echo expands the \n escapes in GitHub's JSON.
 release=$(
   TAG="$tag" COMMIT="$commit" NAME="Pazedo $version" NOTES="$notes" python3 -c '
 import json, os
@@ -118,8 +118,8 @@ print(json.dumps({
     "draft": True,
 }))' | github POST "https://api.github.com/repos/$github_repo/releases" --data-binary @-
 )
-release_id=$(echo "$release" | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')
-release_url=$(echo "$release" | python3 -c 'import json, sys; print(json.load(sys.stdin)["html_url"])')
+release_id=$(printf '%s\n' "$release" | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')
+release_url=$(printf '%s\n' "$release" | python3 -c 'import json, sys; print(json.load(sys.stdin)["html_url"])')
 
 github POST "https://uploads.github.com/repos/$github_repo/releases/$release_id/assets?name=$(basename "$archive")" \
   -H "Content-Type: application/zip" --data-binary @"$archive" >/dev/null
