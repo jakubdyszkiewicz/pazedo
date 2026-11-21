@@ -377,6 +377,14 @@ pub struct Agent {
     /// The context window and cost as of the latest turn.
     #[serde(default)]
     pub last_usage: Option<AgentUsage>,
+    /// Since 0.16: how much of the agent's work runs in the background (shells, monitors).
+    #[serde(default)]
+    pub background_work: Option<BackgroundWorkCount>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct BackgroundWorkCount {
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1748,6 +1756,71 @@ impl Request for ListCommands {
     type Response = ListCommandsResponse;
 }
 
+/// Work an agent left running in the background, such as a shell or a monitor. Daemons with the
+/// `agentBackgroundWork` feature (0.16) report it; `agentBackgroundWorkStop` adds stopping it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundWorkItem {
+    pub id: String,
+    /// "shell" or "monitor" so far; the set is open.
+    pub kind: String,
+    pub description: Option<String>,
+    pub command: Option<String>,
+    pub started_at: String,
+    #[serde(default)]
+    pub can_stop: bool,
+    pub stop_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListBackgroundWork {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListBackgroundWorkResponse {
+    #[serde(default)]
+    pub items: Vec<BackgroundWorkItem>,
+    pub error: Option<String>,
+}
+
+impl Request for ListBackgroundWork {
+    const TYPE: &'static str = "agent.background_work.list.request";
+    const RESPONSE_TYPE: &'static str = "agent.background_work.list.response";
+    type Response = ListBackgroundWorkResponse;
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopBackgroundWork {
+    pub agent_id: String,
+    pub item_id: String,
+    pub stop_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopBackgroundWorkResponse {
+    pub error: Option<String>,
+}
+
+impl Request for StopBackgroundWork {
+    const TYPE: &'static str = "agent.background_work.stop.request";
+    const RESPONSE_TYPE: &'static str = "agent.background_work.stop.response";
+    type Response = StopBackgroundWorkResponse;
+}
+
+/// The `agent.background_work.update` session event: the agent's whole list, replacing the last.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundWorkUpdate {
+    pub agent_id: String,
+    #[serde(default)]
+    pub items: Vec<BackgroundWorkItem>,
+}
+
 /// Archives a workspace as Paseo's apps do: its agents are archived, its terminals killed, and a
 /// Paseo worktree no other workspace uses is deleted from disk.
 #[derive(Debug, Clone, Serialize)]
@@ -2371,6 +2444,7 @@ pub enum ServerMessage {
     AgentTimelineReplacement(AgentTimelineReplacement),
     TerminalsChanged(TerminalsChanged),
     TerminalStreamExit(TerminalStreamExit),
+    BackgroundWorkUpdate(BackgroundWorkUpdate),
     /// A `status` message other than `server_info`, for example `agent_created`.
     Status(Value),
     /// Any message type pazedo does not model yet, or one that failed to decode.
@@ -2418,6 +2492,9 @@ impl ServerMessage {
             }
             "terminals_changed" => decode_as(message_type, payload, Self::TerminalsChanged),
             "terminal_stream_exit" => decode_as(message_type, payload, Self::TerminalStreamExit),
+            "agent.background_work.update" => {
+                decode_as(message_type, payload, Self::BackgroundWorkUpdate)
+            }
             "status" => Self::Status(payload),
             _ => Self::Other {
                 message_type,

@@ -174,6 +174,10 @@ struct Session {
 }
 
 impl PaseoConnection {
+    pub(crate) fn store(&self) -> &Entity<PaseoStore> {
+        &self.store
+    }
+
     /// The connection of `store`'s daemon, shared by all of its agents' threads.
     pub fn for_store(store: &Entity<PaseoStore>, cx: &mut App) -> Rc<Self> {
         if let Some(connection) = cx

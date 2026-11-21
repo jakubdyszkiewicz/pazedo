@@ -16,6 +16,9 @@
 //! the sandbox workspace (or starts one), types a command into Zed's terminal view and renders
 //! `terminal-session.png` and `terminal-typed.png`. `PAZEDO_SCREENSHOT_TERMINAL=sidebar` opens
 //! nothing and only clicks `PAZEDO_SCREENSHOT_CLICK`, e.g. the sidebar's New Terminal entry.
+//!
+//! `PAZEDO_SCREENSHOT_BACKGROUND_WORK=1` gives the agent two background tasks before the capture,
+//! since the test daemon's mock provider starts none.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -123,6 +126,7 @@ mod screenshots {
             editor::init(cx);
             call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             title_bar::init(cx);
+            paseo_ui::init_background_work(cx);
             // The runner loads no keymap; this is the default binding for sending a message.
             cx.bind_keys([gpui::KeyBinding::new(
                 "enter",
@@ -394,6 +398,20 @@ mod screenshots {
                 )
             })
         };
+
+        if std::env::var("PAZEDO_SCREENSHOT_BACKGROUND_WORK").is_ok() {
+            let items = serde_json::from_value(serde_json::json!([
+                {"id": "bg-1", "kind": "shell", "description": "Run the dev server",
+                 "command": "npm run dev -- --port 5173", "startedAt": "2026-11-21T10:02:00Z",
+                 "canStop": true, "stopToken": "stop-1"},
+                {"id": "bg-2", "kind": "monitor", "description": null,
+                 "command": "tail -f logs/build.log", "startedAt": "2026-11-21T10:05:00Z",
+                 "canStop": false},
+            ]))?;
+            store.update(cx, |store, cx| {
+                store.set_background_work(agent_id, items, cx)
+            });
+        }
 
         let window = open_window(&directory, app_state, cx)?;
         window.update(cx, |multi_workspace, window, cx| {
@@ -750,11 +768,7 @@ mod screenshots {
         let projects = vec![
             project("pazedo", "pazedo", open_directory),
             project("website", "website", "/Users/me/dev/website"),
-            project(
-                "sandbox",
-                "pazedo-sandbox",
-                "/Users/me/dev/pazedo-sandbox",
-            ),
+            project("sandbox", "pazedo-sandbox", "/Users/me/dev/pazedo-sandbox"),
             project("empty", "notes", "/Users/me/notes"),
         ];
         let workspaces = vec![

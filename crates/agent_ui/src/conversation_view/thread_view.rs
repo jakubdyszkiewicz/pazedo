@@ -730,6 +730,15 @@ impl PermissionSelection {
     }
 }
 
+// Pazedo: a bar an embedder renders above a thread's message editor, for state its agents'
+// host knows and ACP does not carry (Paseo's background work). Registered as a global by
+// `paseo_ui`; it returns `None` for threads that are not its own.
+pub struct ThreadComposerBar(
+    pub std::rc::Rc<dyn Fn(&Entity<AcpThread>, &mut Window, &mut App) -> Option<AnyElement>>,
+);
+
+impl gpui::Global for ThreadComposerBar {}
+
 pub struct ThreadView {
     pub(crate) root_thread_id: ThreadId,
     pub session_id: acp_v2::SessionId,
@@ -14385,6 +14394,11 @@ impl Render for ThreadView {
             )
             .children(self.render_token_limit_callout(cx))
             .children(self.render_request_elicitations(cx))
+            .children(
+                cx.try_global::<ThreadComposerBar>()
+                    .map(|bar| bar.0.clone())
+                    .and_then(|render| render(&self.thread, window, cx)),
+            )
             .child(self.render_message_editor(window, cx))
     }
 }

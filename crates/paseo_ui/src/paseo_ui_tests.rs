@@ -187,6 +187,61 @@ fn test_updates_during_sync_apply_after_the_snapshot(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_background_work_follows_the_daemons_updates(cx: &mut TestAppContext) {
+    let store = new_store(cx);
+    store.update(cx, |store, cx| {
+        store.begin_sync();
+        store.finish_sync(Ok(snapshot(
+            vec![project("prj_a", "a", "/a")],
+            vec![workspace("wks_a", "prj_a", "/a", "2026-11-14T10:00:00Z")],
+            vec![
+                agent(
+                    "agt_busy",
+                    "wks_a",
+                    "idle",
+                    json!({"backgroundWork": {"count": 2}}),
+                ),
+                agent("agt_quiet", "wks_a", "idle", json!({})),
+            ],
+        )));
+        assert_eq!(store.background_work_count("agt_busy"), 2);
+        assert!(
+            store.background_work("agt_busy").is_none(),
+            "only the count is known until the list is loaded or pushed"
+        );
+        assert_eq!(store.background_work_count("agt_quiet"), 0);
+
+        let update = |items: Value| {
+            Event::Message(ServerMessage::BackgroundWorkUpdate(
+                serde_json::from_value(
+                    json!({"subscriptionId": "events-1", "agentId": "agt_busy", "items": items}),
+                )
+                .unwrap(),
+            ))
+        };
+        store.handle_event(
+            update(
+                json!([{"id": "b1", "kind": "shell", "description": "Dev server",
+                           "command": "npm run dev", "startedAt": "2026-11-21T10:00:00Z",
+                           "canStop": true, "stopToken": "s1"}]),
+            ),
+            cx,
+        );
+        let items = store.background_work("agt_busy").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].stop_token.as_deref(), Some("s1"));
+        assert_eq!(
+            store.background_work_count("agt_busy"),
+            1,
+            "the pushed list counts, not the snapshot's count"
+        );
+
+        store.handle_event(update(json!([])), cx);
+        assert_eq!(store.background_work_count("agt_busy"), 0);
+    });
+}
+
+#[gpui::test]
 fn test_groups_workspaces_and_agents(cx: &mut TestAppContext) {
     let store = new_store(cx);
     store.update(cx, |store, cx| {

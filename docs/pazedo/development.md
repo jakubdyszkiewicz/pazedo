@@ -457,6 +457,38 @@ settled. Not verified: the completion with a real Claude agent in a build (only 
 on the test daemon), and whether the list changes during a session (pazedo fetches it once per
 tab, as Paseo's app fetches it when the agent's panel shows).
 
+### Background tasks
+
+An agent tab shows the work its agent left running in the background (shells, monitors), as
+Paseo 0.16's apps do: a bar above the message box, "2 Background Tasks", that expands to one row
+per task with its description, its command, its kind and the time it started, and a Stop button
+for the tasks Paseo can stop. The bar goes away when the list is empty.
+
+- Daemons report it from 0.16, with the features `agentBackgroundWork` and
+  `agentBackgroundWorkStop`. Only then does pazedo add `agent.background_work.update` to its
+  session event subscription: the daemon rejects a subscription that names an event it does not
+  know, so a 0.15 daemon would fail the whole sync. Without the features there is no bar.
+- Agent snapshots carry `backgroundWork: {count}`. The store keeps each agent's list from
+  `agent.background_work.update` events (each replaces the agent's list) and loads it with
+  `agent.background_work.list.request` the first time a tab with a non-zero count renders. Stop
+  sends `agent.background_work.stop.request {agentId, itemId, stopToken}`; the row says
+  "Stopping…" until the next update removes the task, or shows Paseo's error.
+- The bar is rendered by Zed's thread view through a hook, `agent_ui::ThreadComposerBar` (an
+  upstream touch point, see README.md), so it sits with Zed's own bars above the message box.
+- The "finished" notification is not held back while background work runs: a dev server can run
+  for hours, and the user would never hear that the agent's turns ended.
+
+Verified 2026-11-21 with the screenshot runner against the 0.16.2 test daemon
+(`PAZEDO_SCREENSHOT_BACKGROUND_WORK=1` gives a mock agent two made-up tasks, since the mock
+provider starts none): the collapsed bar showed "2 Background Tasks" above the message box, a
+click expanded it to both rows with their commands and local start times and a Stop button only
+on the stoppable one, and Stop sent the request to the daemon, which refused the made-up task
+("Background work cannot be stopped"); the row showed that error. The dev build synced with the
+extended event subscription against 0.16.2 without errors, and the 0.16.2 daemon accepted it.
+Not verified: a real agent's background work (only mock agents run on the test daemon), a
+successful stop, and connecting to a 0.15 daemon with this build (the subscription is only
+extended when the feature is advertised, which 0.15.4 does not do).
+
 ### Commands in agent threads
 
 A finished shell command is one line, the command's first line in code style, that expands to

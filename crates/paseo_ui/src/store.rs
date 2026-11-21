@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use collections::HashSet;
 use collections::{BTreeMap, HashMap};
 use futures::{FutureExt as _, StreamExt as _};
@@ -9,14 +9,15 @@ use paseo_client::{
     Client, ConnectOptions, Endpoint, Event, Sleep,
     protocol::{
         AddProject, Agent, AgentScope, AgentStatus, AgentStream, AgentTimelineReplacement,
-        AgentUpdate, ArchiveWorkspace, AttentionReason, BranchSuggestions, ClearAgentAttention,
-        CloneGithubProject, CloneProtocol, CloseItems, CreateTerminal, CreateWorkspace,
-        DirectorySuggestions, FetchAgents, FetchWorkspaces, GetProvidersSnapshot, GithubRepository,
-        HelloAuth, ListProjects, ListUsageReports, Page, ProjectSummary, ProjectUpdate,
-        ProviderEntry, RefreshAgent, RemoveProject, RenameAgent, RenameTerminal,
-        SearchGithubRepositories, ServerInfo, ServerMessage, SetSessionEventSubscription,
-        SetWorkspaceTitle, Subscribe, SubscribeTerminals, TerminalInfo, TerminalStreamExit,
-        TerminalsChanged, UsageReportEntry, Workspace, WorkspaceSource, WorkspaceUpdate,
+        AgentUpdate, ArchiveWorkspace, AttentionReason, BackgroundWorkItem, BranchSuggestions,
+        ClearAgentAttention, CloneGithubProject, CloneProtocol, CloseItems, CreateTerminal,
+        CreateWorkspace, DirectorySuggestions, FetchAgents, FetchWorkspaces, GetProvidersSnapshot,
+        GithubRepository, HelloAuth, ListBackgroundWork, ListProjects, ListUsageReports, Page,
+        ProjectSummary, ProjectUpdate, ProviderEntry, RefreshAgent, RemoveProject, RenameAgent,
+        RenameTerminal, SearchGithubRepositories, ServerInfo, ServerMessage,
+        SetSessionEventSubscription, SetWorkspaceTitle, StopBackgroundWork, Subscribe,
+        SubscribeTerminals, TerminalInfo, TerminalStreamExit, TerminalsChanged, UsageReportEntry,
+        Workspace, WorkspaceSource, WorkspaceUpdate,
     },
 };
 use project::Project;
@@ -203,6 +204,9 @@ const SESSION_EVENTS: &[&str] = &[
     "agent_permission_request",
     "agent_permission_resolved",
 ];
+/// Only for daemons with the `agentBackgroundWork` feature: the daemon rejects a subscription
+/// that names an event it does not know.
+const BACKGROUND_WORK_EVENT: &str = "agent.background_work.update";
 
 #[derive(Clone, Debug)]
 pub enum ConnectionStatus {
@@ -279,6 +283,11 @@ pub struct PaseoStore {
     /// Agents whose attention pazedo cleared, with the attention timestamp it cleared, so that
     /// re-rendering a viewed agent before the daemon's update arrives does not clear it again.
     cleared_attention: HashMap<String, Option<String>>,
+    /// Background work by agent id, for agents whose list was loaded or pushed since connecting.
+    background_work: HashMap<String, Vec<BackgroundWorkItem>>,
+    /// Agents whose background work was requested since connecting, so a failed request is not
+    /// repeated on every render.
+    requested_background_work: HashSet<String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -375,6 +384,8 @@ impl PaseoStore {
             cloning: Vec::new(),
             last_clone_parent: None,
             cleared_attention: HashMap::default(),
+            background_work: HashMap::default(),
+            requested_background_work: HashSet::default(),
             _tasks: Vec::new(),
         };
         this.connect(endpoint, cx);
@@ -474,6 +485,8 @@ impl PaseoStore {
         self.selected_workspaces.clear();
         self.closing.clear();
         self.cleared_attention.clear();
+        self.background_work.clear();
+        self.requested_background_work.clear();
         cx.notify();
 
         let Some(endpoint) = endpoint else {
@@ -580,6 +593,101 @@ impl PaseoStore {
                 Err(error) => log::warn!("failed to load Paseo providers: {error:#}"),
             }
         }));
+    }
+
+    /// Whether the daemon reports agents' background work (Paseo 0.16 and later).
+    pub fn reports_background_work(&self) -> bool {
+        matches!(&self.status, ConnectionStatus::Connected(server_info)
+            if server_info.has_feature("agentBackgroundWork"))
+    }
+
+    pub fn stops_background_work(&self) -> bool {
+        matches!(&self.status, ConnectionStatus::Connected(server_info)
+            if server_info.has_feature("agentBackgroundWorkStop"))
+    }
+
+    /// The agent's background work, or `None` while it is not loaded.
+    pub fn background_work(&self, agent_id: &str) -> Option<&[BackgroundWorkItem]> {
+        self.background_work.get(agent_id).map(Vec::as_slice)
+    }
+
+    /// From the loaded list, else from the count on the agent's snapshot.
+    pub fn background_work_count(&self, agent_id: &str) -> usize {
+        match self.background_work.get(agent_id) {
+            Some(items) => items.len(),
+            None => self
+                .agents
+                .get(agent_id)
+                .and_then(|agent| agent.background_work)
+                .map_or(0, |work| work.count),
+        }
+    }
+
+    /// Loads the agent's background work once per connection; `agent.background_work.update`
+    /// events keep it current from then on.
+    pub fn load_background_work(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        if !self.reports_background_work()
+            || self.background_work.contains_key(agent_id)
+            || self.requested_background_work.contains(agent_id)
+        {
+            return;
+        }
+        let Some(client) = self.client.clone().filter(Client::is_connected) else {
+            return;
+        };
+        self.requested_background_work.insert(agent_id.to_string());
+        let agent_id = agent_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = client
+                .request(&ListBackgroundWork {
+                    agent_id: agent_id.clone(),
+                })
+                .await
+                .and_then(|response| match response.error {
+                    Some(error) => Err(anyhow!(error)),
+                    None => Ok(response.items),
+                });
+            this.update(cx, |this, cx| match result {
+                Ok(items) => {
+                    // An update that arrived meanwhile is newer.
+                    this.background_work.entry(agent_id).or_insert(items);
+                    cx.notify();
+                }
+                Err(error) => {
+                    log::error!(
+                        "failed to list the background work of Paseo agent {agent_id}: {error:#}"
+                    )
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Stops one background item; the agent's next `agent.background_work.update` removes it.
+    pub fn stop_background_work(
+        &self,
+        agent_id: &str,
+        item: &BackgroundWorkItem,
+        cx: &App,
+    ) -> Task<Result<()>> {
+        let Some(client) = self.client.clone().filter(Client::is_connected) else {
+            return Task::ready(Err(anyhow!("Not connected to Paseo")));
+        };
+        let Some(stop_token) = item.stop_token.clone() else {
+            return Task::ready(Err(anyhow!("Paseo cannot stop this")));
+        };
+        let request = StopBackgroundWork {
+            agent_id: agent_id.to_string(),
+            item_id: item.id.clone(),
+            stop_token,
+        };
+        cx.background_spawn(async move {
+            if let Some(error) = client.request(&request).await?.error {
+                bail!("Paseo could not stop it: {error}");
+            }
+            Ok(())
+        })
     }
 
     /// Whether the daemon reports usage (`usage.list_reports`, Paseo 0.14 and later).
@@ -1420,6 +1528,9 @@ impl PaseoStore {
                 for subscription in self.terminal_subscriptions.values_mut() {
                     *subscription = None;
                 }
+                // No updates arrive while disconnected, so the lists may be stale.
+                self.background_work.clear();
+                self.requested_background_work.clear();
                 cx.emit(PaseoStoreEvent::Disconnected);
             }
             Event::Rejected(_) => {
@@ -1455,8 +1566,9 @@ impl PaseoStore {
             return;
         };
         self.begin_sync();
+        let background_work = self.reports_background_work();
         self.sync_task = Some(cx.spawn(async move |this, cx| {
-            let result = fetch_directory(&client).await;
+            let result = fetch_directory(&client, background_work).await;
             this.update(cx, |this, cx| {
                 this.finish_sync(result);
                 this.resubscribe_terminals(cx);
@@ -1542,6 +1654,9 @@ impl PaseoStore {
 
     fn apply_message(&mut self, message: ServerMessage) {
         match message {
+            ServerMessage::BackgroundWorkUpdate(update) => {
+                self.background_work.insert(update.agent_id, update.items);
+            }
             ServerMessage::WorkspaceUpdate(WorkspaceUpdate::Upsert {
                 subscription_id,
                 workspace,
@@ -1601,6 +1716,17 @@ impl PaseoStore {
 /// Lets tests and the screenshot runner show a scripted directory without a daemon.
 #[cfg(any(test, feature = "test-support"))]
 impl PaseoStore {
+    /// As an `agent.background_work.update` would set it; the mock provider has none.
+    pub fn set_background_work(
+        &mut self,
+        agent_id: &str,
+        items: Vec<BackgroundWorkItem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.background_work.insert(agent_id.to_string(), items);
+        cx.notify();
+    }
+
     pub fn load_fixture(
         &mut self,
         status: ConnectionStatus,
@@ -1645,12 +1771,13 @@ impl PaseoStore {
 
 impl EventEmitter<PaseoStoreEvent> for PaseoStore {}
 
-async fn fetch_directory(client: &Client) -> Result<DirectorySnapshot> {
+async fn fetch_directory(client: &Client, background_work: bool) -> Result<DirectorySnapshot> {
     // Subscribe to project events first so a project created during the fetch is not missed.
     client
         .request(&SetSessionEventSubscription {
             events: SESSION_EVENTS
                 .iter()
+                .chain(background_work.then_some(&BACKGROUND_WORK_EVENT))
                 .map(|event| event.to_string())
                 .collect(),
             notifications: None,

@@ -6,6 +6,7 @@ mod add_project;
 mod agent_images;
 mod agent_item;
 mod agent_session;
+mod background_work;
 mod daemon_auth;
 mod daemon_settings;
 mod new_workspace;
@@ -36,7 +37,14 @@ pub use terminal_item::PaseoTerminalItem;
 /// every window's title bar. Call before windows open.
 pub fn init(cx: &mut gpui::App) {
     agent_item::init(cx);
+    background_work::init(cx);
     terminal_item::init(cx);
     sidebar::init(cx);
     usage::init(cx);
+}
+
+/// For the screenshot runner, which does not run `init`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn init_background_work(cx: &mut gpui::App) {
+    background_work::init(cx);
 }

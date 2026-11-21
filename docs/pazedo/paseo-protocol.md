@@ -142,6 +142,15 @@ command|skill}], error}`; names have no leading slash. A `user_message` timeline
 sender's id as `clientMessageId` (in 0.15.4 too), and usually the same value as `messageId`; the
 echo of a command the provider answers out of band (no turn) has only `clientMessageId`.
 
+Background work (0.16, verified 2026-11-21 on the 0.16.2 test daemon): features
+`agentBackgroundWork` and `agentBackgroundWorkStop`. `session.events.set_subscription.request`
+accepts `agent.background_work.update` (`{subscriptionId?, agentId, items}`, the whole list).
+`agent.background_work.list.request {agentId}` → `{agentId, items, error}`; for a mock agent the
+error is "Background work inventory is unavailable". Items are `{id, kind, description|null,
+command?, startedAt, canStop?, stopToken?}`. `agent.background_work.stop.request {agentId, itemId,
+stopToken}` → `{agentId, itemId, error}`; an unknown item gives "Background work cannot be
+stopped".
+
 ## Agent timeline
 
 - `fetch_agent_timeline_request {agentId, direction: tail|before|after, cursor?: {epoch, seq},
