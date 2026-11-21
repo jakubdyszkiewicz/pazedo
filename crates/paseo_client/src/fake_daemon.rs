@@ -24,7 +24,7 @@ pub fn default_server_info() -> Value {
         "protocolVersion": 1,
         "serverId": "srv_fake",
         "hostname": "fake daemon",
-        "version": "0.15.4",
+        "version": "0.16.2",
         "permissions": ["daemon.read", "workspace.read", "workspace.write"],
         "features": {
             "ownedSubscriptions": true,

@@ -87,7 +87,7 @@ fn hello_advertises_identity_and_capabilities() -> Result<()> {
         assert!(harness.client.is_connected());
         assert_eq!(
             harness.client.server_info().unwrap().version.as_deref(),
-            Some("0.15.4")
+            Some("0.16.2")
         );
         Ok(())
     })

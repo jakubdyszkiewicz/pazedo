@@ -693,7 +693,7 @@ fn terminals_changed(workspace_id: &str, subscription: &str, names: &[&str]) -> 
     Event::Message(ServerMessage::TerminalsChanged(TerminalsChanged {
         subscription_id: Some(subscription.into()),
         workspace_id: Some(workspace_id.into()),
-        cwd: path!("/sandbox").into(),
+        cwd: Some(path!("/sandbox").into()),
         terminals: names
             .iter()
             .map(|name| TerminalInfo {

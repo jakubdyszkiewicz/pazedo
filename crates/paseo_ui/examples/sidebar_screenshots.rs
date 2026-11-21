@@ -572,7 +572,7 @@ mod screenshots {
                 "status": "server_info",
                 "serverId": "srv_fixture",
                 "hostname": "My Mac",
-                "version": "0.15.4",
+                "version": "0.16.2",
             }))
             .expect("valid server info"),
         ))

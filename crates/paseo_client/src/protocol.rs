@@ -11,7 +11,7 @@ use collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-pub const PASEO_PROTOCOL_PACKAGE_VERSION: &str = "0.15.4";
+pub const PASEO_PROTOCOL_PACKAGE_VERSION: &str = "0.16.2";
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// A session request that the daemon answers with exactly one correlated response.
@@ -1493,7 +1493,8 @@ pub struct SubscribeTerminals {
 pub struct TerminalsChanged {
     pub subscription_id: Option<String>,
     pub workspace_id: Option<String>,
-    pub cwd: String,
+    /// Optional since 0.16; each terminal has its own `cwd`.
+    pub cwd: Option<String>,
     pub terminals: Vec<TerminalInfo>,
 }
 

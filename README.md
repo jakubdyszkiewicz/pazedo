@@ -46,7 +46,7 @@ Since Pazedo is just a Paseo client, you can still use the Paseo app simultaneou
 
 | | |
 | --- | --- |
-| Paseo | 0.15.4 (protocol types follow `@getpaseo/protocol` 0.15.4; other versions may work but are untested) |
+| Paseo | 0.16.2 (protocol types follow `@getpaseo/protocol` 0.16.2; other versions may work but are untested) |
 | Zed | based on Zed `main` as of 2026-11-15 (`596dfdcf32`, 1.30.0-dev) |
 | Platform | macOS on Apple silicon (the only one built and tested so far). Remote projects can be on Linux x86_64 or macOS arm64. |
 

@@ -1,10 +1,40 @@
 # Paseo daemon protocol notes
 
-What `crates/paseo_client` relies on, written against Paseo **0.15.4** (2026-11-14). Sources:
-the Zod schemas in npm `@getpaseo/protocol@0.15.4` (`dist/messages.js`), `@getpaseo/client`
-(`dist/daemon-client.js`), and the getpaseo/paseo repository at `42c7b7f`. "Verified" means
-observed against the isolated test daemon (see [development.md](./development.md)) with
-`paseo_debug` or the live tests; everything else is read from the sources.
+What `crates/paseo_client` relies on, written against Paseo **0.15.4** (2026-11-14) and
+checked against **0.16.2** (2026-11-21, see "Changes in 0.16" below). Sources: the Zod schemas
+in npm `@getpaseo/protocol` (`dist/messages.js`), `@getpaseo/client` (`dist/daemon-client.js`),
+and the getpaseo/paseo repository at `42c7b7f` (a 0.15 checkout). "Verified" means observed
+against the isolated test daemon (see [development.md](./development.md)) with `paseo_debug` or
+the live tests; everything else is read from the sources. Unless a section says otherwise,
+what was verified was verified on 0.15.4.
+
+## Changes in 0.16
+
+Compared from the 0.15.4 and 0.16.2 npm packages of `@getpaseo/protocol` and
+`@getpaseo/client`. `protocolVersion` in `hello` is still 1.
+
+- The only change that affected pazedo: `terminals_changed` and `list_terminals_response` have
+  an optional `cwd`, and each terminal its own optional `cwd`. `TerminalsChanged::cwd` is an
+  `Option` now. `list_terminals_request` and `subscribe_terminals_request` accept no `cwd`
+  (pazedo still sends one).
+- New, all optional or opt-in, none used by pazedo yet: `backgroundWork: {count}` on agent
+  snapshots and `agent.background_work.{list,stop}` requests with an
+  `agent.background_work.update` event; background agents (hidden from clients that do not
+  advertise the `background_agents` capability, which pazedo does not); provider option
+  `controls`/`options` on agents and `provider.controls.list`; `metadata` on agents and
+  workspaces with `agent.metadata.update`/`workspace.metadata.update`;
+  `workspace.base_branch.set`, `workspace.archive.undo`; `forgeWeb` and `parentWorkspaceId` on
+  workspaces; diff subscriptions (`diff.subscribe`, binary diff frames); plugin registry and
+  plugin RPC subscriptions; `createdAt` and `isScript` on terminals; timeline freshness checks.
+  New binary frame opcodes (diff, plugin) are only sent to clients that ask for them.
+- Workspace status (from `agent-state-bucket.js`): an agent with background work counts as
+  running, and only an unread error makes a workspace `failed` (a seen error no longer does).
+
+Verified 2026-11-21 on a 0.16.2 test daemon: the live tests pass; `paseo_debug watch` decoded
+the directory, agent updates and `agent_attention_required`; `paseo_debug timeline` decoded a
+turn, an interrupt (`turn_canceled` then `turn_started`) and the stream; and a dev build loaded
+the sidebar, showed an agent's history, sent a message, opened a terminal created from the CLI
+(`terminals_changed` push) and ran a command in it, with no Paseo warnings in its log.
 
 ## Why the Rust types are hand-written
 
@@ -197,7 +227,8 @@ turn with text, reasoning and tool calls for the model's duration (`ten-second-s
   returns `{terminal, error}`; without `workspaceId` the daemon picks a workspace of that
   directory. `subscribe_terminals_request {cwd, workspaceId}` lists only that workspace's
   terminals and answers with `terminals_changed` (with a `subscriptionId`); later
-  `terminals_changed` pushes carry the **full** list again. `cwd` is required in 0.15.4.
+  `terminals_changed` pushes carry the **full** list again. `cwd` is required in 0.15.4 and
+  optional since 0.16.
 - `subscribe_terminal_request {terminalId, restore: {mode: live|visible-snapshot|full-snapshot,
   scrollbackLines?, size?}}` returns `{terminalId, slot, subscriptionId, error}`. Slots are
   per connection and were not reused between attaches (0, then 1).

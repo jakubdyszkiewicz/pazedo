@@ -708,6 +708,19 @@ script/pazedo/paseo-test daemon status
 script/pazedo/paseo-test provider ls      # should list mock and mock-slow
 ```
 
+To run the test daemon on a newer Paseo than the installed `/Applications/Paseo.app` (which
+also runs the real daemon and must not be upgraded or restarted for this), unpack the release's
+`Paseo-<version>-arm64.zip` from GitHub somewhere else and point `PASEO_APP` at it when starting
+the daemon; the CLI commands below work against it without `PASEO_APP`. Since 2026-11-21 the
+test daemon runs 0.16.2 this way, from `~/dev/research/paseo-app-0.16.2/Paseo.app`; its 0.15.4
+home is backed up in `~/.paseo-pazedo-test-0.15.4-backup`, as 0.16.2 migrated it:
+
+```sh
+(cd ~/.paseo-pazedo-test && PASEO_APP=~/dev/research/paseo-app-0.16.2/Paseo.app \
+  nohup ~/dev/pazedo/script/pazedo/paseo-test daemon run \
+  > ~/.paseo-pazedo-test/foreground.log 2>&1 < /dev/null &)
+```
+
 Use it:
 
 ```sh
