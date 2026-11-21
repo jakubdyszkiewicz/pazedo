@@ -24,12 +24,13 @@ use gpui::{
 use paseo_client::{
     Client,
     protocol::{
-        AgentMessage, AgentMessageEvent, AgentSessionConfig, AgentStatus, AgentStream,
-        AgentStreamEvent, CancelAgent, CreateAgent, FetchAgentTimeline, FetchAgentTimelineResponse,
-        ImageAttachment, PermissionBehavior, PermissionRequest, PermissionResponse,
-        ReleaseSubscription, RespondToPermission, SendAgentMessage, SetAgentMode, SetAgentModel,
-        SetAgentThinking, SetAgentTimelineSubscription, TimelineDirection, TimelineItem,
-        TimelineProjection, TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
+        AgentMessage, AgentMessageEvent, AgentSessionConfig, AgentSlashCommand, AgentStatus,
+        AgentStream, AgentStreamEvent, CancelAgent, CreateAgent, FetchAgentTimeline,
+        FetchAgentTimelineResponse, ImageAttachment, ListCommands, PermissionBehavior,
+        PermissionRequest, PermissionResponse, ReleaseSubscription, RespondToPermission,
+        SendAgentMessage, SetAgentMode, SetAgentModel, SetAgentThinking,
+        SetAgentTimelineSubscription, TimelineDirection, TimelineItem, TimelineProjection,
+        TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
     },
 };
 use project::{AgentId, Project};
@@ -369,6 +370,7 @@ impl PaseoConnection {
                         session.history_truncated = history.has_older;
                     }
                     replay_history(&sessions, &store, &agent_id, &thread, history, cx);
+                    load_commands(client.clone(), agent_id.clone(), thread.downgrade(), cx);
                     Ok(thread)
                 }
                 Err(error) => {
@@ -981,6 +983,43 @@ fn handle_store_event(
         | PaseoStoreEvent::TerminalStreamExit(_)
         | PaseoStoreEvent::UsageChanged => {}
     }
+}
+
+/// Offers the agent's slash commands and skills in the message box's `/` completion.
+fn load_commands(client: Client, agent_id: String, thread: WeakEntity<AcpThread>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let response = client
+            .request(&ListCommands {
+                agent_id: agent_id.clone(),
+            })
+            .await?;
+        if let Some(error) = response.error {
+            bail!("Paseo could not list the commands of agent {agent_id}: {error}");
+        }
+        let commands = response
+            .commands
+            .into_iter()
+            .map(available_command)
+            .collect();
+        thread.update(cx, |thread, cx| {
+            thread.update_available_commands(commands, cx)
+        })?;
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
+}
+
+/// Skills too are plain commands: Paseo runs both from the message's text.
+fn available_command(command: AgentSlashCommand) -> acp_v2::AvailableCommand {
+    let mut command_value = json!({
+        "type": "command",
+        "name": command.name,
+        "description": command.description,
+    });
+    if !command.argument_hint.is_empty() {
+        command_value["input"] = json!({"type": "text", "hint": command.argument_hint});
+    }
+    wire(command_value)
 }
 
 fn replay_history(
@@ -1958,6 +1997,34 @@ mod tests {
                 "state requires_action",
                 "end turn end_turn"
             ]
+        );
+    }
+
+    #[test]
+    fn commands_keep_their_argument_hint() {
+        let command = |value: Value| {
+            serde_json::to_value(available_command(
+                serde_json::from_value::<AgentSlashCommand>(value).unwrap(),
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            command(json!({
+                "name": "compact", "description": "Free up context",
+                "argumentHint": "<optional custom summarization instructions>", "kind": "command",
+            })),
+            json!({
+                "type": "command", "name": "compact", "description": "Free up context",
+                "input": {"type": "text", "hint": "<optional custom summarization instructions>"},
+            })
+        );
+        assert_eq!(
+            command(json!({
+                "name": "advisor", "description": "Consult a stronger model", "argumentHint": "",
+                "kind": "skill",
+            })),
+            json!({"type": "command", "name": "advisor", "description": "Consult a stronger model"}),
+            "a skill is a command, and an empty hint is no input"
         );
     }
 

@@ -136,6 +136,12 @@ turn; `applyActiveTurnTerminal` in `agent-manager.ts`). From Paseo's source, not
 Claude ends a turn (`result`) before a steered message starts its own, and starts an autonomous
 turn when background work wakes it, so `turn_completed` is followed by `turn_started`.
 
+Slash commands (verified 2026-11-21): `list_commands_request {agentId, draftConfig?}` →
+`list_commands_response {agentId, commands: [{name, description, argumentHint, kind?:
+command|skill}], error}`; names have no leading slash. A `user_message` timeline item carries the
+sender's id as `clientMessageId` (in 0.15.4 too), and usually the same value as `messageId`; the
+echo of a command the provider answers out of band (no turn) has only `clientMessageId`.
+
 ## Agent timeline
 
 - `fetch_agent_timeline_request {agentId, direction: tail|before|after, cursor?: {epoch, seq},

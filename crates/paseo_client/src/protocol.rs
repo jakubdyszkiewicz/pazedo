@@ -849,6 +849,7 @@ impl Notification for RespondToPermission {
 pub enum TimelineItem {
     UserMessage {
         text: String,
+        /// The id the sender gave the message (`clientMessageId`), else Paseo's `messageId`.
         message_id: Option<String>,
     },
     AssistantMessage {
@@ -1044,6 +1045,7 @@ impl TimelineItem {
             UserMessage {
                 text: String,
                 message_id: Option<String>,
+                client_message_id: Option<String>,
             },
             AssistantMessage {
                 text: String,
@@ -1070,7 +1072,17 @@ impl TimelineItem {
             };
         }
         match serde_json::from_value::<Known>(value.clone()) {
-            Ok(Known::UserMessage { text, message_id }) => Self::UserMessage { text, message_id },
+            // Paseo repeats the sender's id as `messageId`, except on the echo of a command it
+            // answers without a turn (such as the mock provider's `/mock`), which has only
+            // `clientMessageId`.
+            Ok(Known::UserMessage {
+                text,
+                message_id,
+                client_message_id,
+            }) => Self::UserMessage {
+                text,
+                message_id: client_message_id.or(message_id),
+            },
             Ok(Known::AssistantMessage { text }) => Self::AssistantMessage { text },
             Ok(Known::Reasoning { text }) => Self::Reasoning { text },
             Ok(Known::Todo { items }) => Self::Todo { items },
@@ -1701,6 +1713,39 @@ impl Request for ClearAgentAttention {
     const TYPE: &'static str = "clear_agent_attention";
     const RESPONSE_TYPE: &'static str = "clear_agent_attention_response";
     type Response = ClearAgentAttentionResponse;
+}
+
+/// The slash commands and skills an agent's provider offers, which Paseo's message box
+/// completes. Sending one is sending its text as a message.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListCommands {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListCommandsResponse {
+    #[serde(default)]
+    pub commands: Vec<AgentSlashCommand>,
+    pub error: Option<String>,
+}
+
+/// `name` has no leading slash.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub argument_hint: String,
+}
+
+impl Request for ListCommands {
+    const TYPE: &'static str = "list_commands_request";
+    const RESPONSE_TYPE: &'static str = "list_commands_response";
+    type Response = ListCommandsResponse;
 }
 
 /// Archives a workspace as Paseo's apps do: its agents are archived, its terminals killed, and a
@@ -2537,6 +2582,28 @@ mod tests {
             .unwrap(),
             json!({"behavior": "allow", "selectedActionId": "approve"})
         );
+    }
+
+    #[test]
+    fn user_messages_keep_the_senders_id() {
+        // Shapes from a 0.16.2 daemon: a message, and a command answered without a turn.
+        let message = TimelineItem::from_value(&json!({
+            "type": "user_message", "text": "again",
+            "clientMessageId": "cf34513e", "messageId": "cf34513e",
+        }));
+        let command = TimelineItem::from_value(&json!({
+            "type": "user_message", "text": "/mock handled-command", "clientMessageId": "0fc5b29c",
+        }));
+        let prompt = TimelineItem::from_value(&json!({
+            "type": "user_message", "text": "say hello", "messageId": "2974c3c0",
+        }));
+        let id = |item: TimelineItem| match item {
+            TimelineItem::UserMessage { message_id, .. } => message_id,
+            other => panic!("expected a user message, got {other:?}"),
+        };
+        assert_eq!(id(message).as_deref(), Some("cf34513e"));
+        assert_eq!(id(command).as_deref(), Some("0fc5b29c"));
+        assert_eq!(id(prompt).as_deref(), Some("2974c3c0"));
     }
 
     #[test]

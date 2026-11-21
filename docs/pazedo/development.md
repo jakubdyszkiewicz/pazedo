@@ -437,6 +437,26 @@ The build without the fix showed the popup right after the first interrupt. Not 
 steered and background turns (the mock provider has neither; the behaviour is from Paseo's
 `providers/claude/agent.ts`) and how quickly Stop goes idle.
 
+### Slash commands and skills
+
+An agent tab offers the agent's slash commands and skills in the message box's `/` completion,
+as Paseo's message box does. When the tab opens, pazedo asks the daemon with
+`list_commands_request {agentId}` (`{commands: [{name, description, argumentHint, kind}]}`) and
+hands the list to the thread (`AcpThread::update_available_commands`), each as an ACP command
+whose argument hint is its text input. Skills are offered as commands too, since Paseo runs both
+from the message text; Zed's popup has no "Skill" badge. Picking one inserts `/name`, and sending
+sends that text. The echo of a command that Paseo answers without a turn (the mock's `/mock`) has
+only `clientMessageId`, not `messageId`, so pazedo now reads the sender's id from
+`clientMessageId` first; before, such a message stayed "Waiting…" under the message box.
+
+Verified 2026-11-21: `list_commands_request` for an idle Claude agent on the real daemon (read
+only) returned 69 commands and skills, among them `compact` and `autocompact`. In a dev build
+against the 0.16.2 test daemon, `/mo` in a mock agent's tab offered `mock` with its description;
+picking it and sending `/mock handled-command` got "Mock command handled", and the message
+settled. Not verified: the completion with a real Claude agent in a build (only mock agents run
+on the test daemon), and whether the list changes during a session (pazedo fetches it once per
+tab, as Paseo's app fetches it when the agent's panel shows).
+
 ### Commands in agent threads
 
 A finished shell command is one line, the command's first line in code style, that expands to
