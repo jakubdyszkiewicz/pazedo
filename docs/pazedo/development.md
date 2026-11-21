@@ -485,9 +485,13 @@ click expanded it to both rows with their commands and local start times and a S
 on the stoppable one, and Stop sent the request to the daemon, which refused the made-up task
 ("Background work cannot be stopped"); the row showed that error. The dev build synced with the
 extended event subscription against 0.16.2 without errors, and the 0.16.2 daemon accepted it.
-Not verified: a real agent's background work (only mock agents run on the test daemon), a
-successful stop, and connecting to a 0.15 daemon with this build (the subscription is only
-extended when the feature is advertised, which 0.15.4 does not do).
+The same day, with the user's approval, a Claude Haiku 5.5 agent on the 0.16.2 test daemon (in
+`~/dev/pazedo-sandbox`, archived afterwards) ran `sleep 600` in the background. Its tab, in the
+screenshot runner with nothing injected, showed "1 Background Task", expanded to "Sleep for 600
+seconds in background", `sleep 600`, "Shell · since 12:07" and Stop. Stop ended the process;
+the daemon's update removed the bar, the list request then returned no items, and the
+workspace's sidebar row stopped showing as running. The dev build also synced read-only with the
+user's 0.15.4 daemon without errors (no feature, so no extra subscription and no bar).
 
 ### Commands in agent threads
 
