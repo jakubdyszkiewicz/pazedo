@@ -1849,7 +1849,7 @@ impl PaseoSidebar {
         });
         let attention_count = rows
             .iter()
-            .filter(|(_, entry)| entry.workspace.status != WorkspaceStatus::Done)
+            .filter(|(_, entry)| needs_attention(entry.workspace.status))
             .count();
         let tooltip: SharedString = match placements.as_slice() {
             [(_, _, root_path)] => root_path.clone(),
@@ -2388,6 +2388,15 @@ const STATUS_BUCKETS: [WorkspaceStatus; 5] = [
     WorkspaceStatus::Done,
 ];
 
+/// Whether a workspace waits for the user: unread work, a failure or a question. A running
+/// workspace does not, until its agents stop.
+fn needs_attention(status: WorkspaceStatus) -> bool {
+    matches!(
+        status,
+        WorkspaceStatus::Attention | WorkspaceStatus::NeedsInput | WorkspaceStatus::Failed
+    )
+}
+
 fn status_bucket(status: WorkspaceStatus) -> WorkspaceStatus {
     match status {
         WorkspaceStatus::Unknown => WorkspaceStatus::Done,
@@ -2576,14 +2585,7 @@ impl Sidebar for PaseoSidebar {
                 .project_groups()
                 .iter()
                 .flat_map(|group| &group.workspaces)
-                .any(|entry| {
-                    matches!(
-                        entry.workspace.status,
-                        WorkspaceStatus::Attention
-                            | WorkspaceStatus::NeedsInput
-                            | WorkspaceStatus::Failed
-                    )
-                })
+                .any(|entry| needs_attention(entry.workspace.status))
         })
     }
 
@@ -2802,6 +2804,24 @@ mod tests {
                 (project.name.to_string(), placements)
             })
             .collect()
+    }
+
+    #[test]
+    fn only_waiting_workspaces_need_attention() {
+        let waiting: Vec<WorkspaceStatus> = STATUS_BUCKETS
+            .into_iter()
+            .chain([WorkspaceStatus::Unknown])
+            .filter(|status| needs_attention(*status))
+            .collect();
+        assert_eq!(
+            waiting,
+            [
+                WorkspaceStatus::NeedsInput,
+                WorkspaceStatus::Failed,
+                WorkspaceStatus::Attention,
+            ],
+            "a running workspace marks nothing until its agents stop"
+        );
     }
 
     #[test]
