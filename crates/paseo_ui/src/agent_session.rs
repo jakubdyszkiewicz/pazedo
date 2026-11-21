@@ -39,8 +39,10 @@ use settings::Settings as _;
 use std::{
     any::Any,
     cell::RefCell,
+    mem,
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 use util::{ResultExt as _, path_list::PathList};
 
@@ -58,6 +60,11 @@ const DEFAULT_PROVIDER: &str = "claude";
 const HISTORY_LIMIT: u32 = 2000;
 /// Long tool output is shortened in tool cards; the full output stays in Paseo.
 const TOOL_OUTPUT_LIMIT: usize = 4000;
+/// How long a thread stays running after its turn ends, in case another turn follows. Paseo
+/// ends a turn and starts the next when a message interrupts a running agent, and Claude ends
+/// its turn before taking a steered message or waking up after background work. Going idle in
+/// between would show Zed's "agent finished" notification while the agent is still working.
+const TURN_END_GRACE: Duration = Duration::from_secs(1);
 
 /// How many timeline entries a session loads at first. `PAZEDO_AGENT_HISTORY_LIMIT` overrides
 /// it, which makes truncated history easy to try.
@@ -153,6 +160,12 @@ struct Session {
     timeline_subscription: Option<String>,
     /// Paseo permission request id → the prompt shown in the thread.
     permissions: HashMap<String, PermissionRequestId>,
+    /// Counts changes to the thread's running state, so that an ended turn going idle after
+    /// `TURN_END_GRACE` knows whether something happened since.
+    state_generation: u64,
+    /// Whether the user stopped the agent from this thread, whose cancellation goes idle at
+    /// once: no turn follows it.
+    stopping: bool,
     /// The images of messages sent from this thread, by message id. Paseo's echo of a message
     /// has only its text, and the echo replaces the message in the thread.
     sent_images: HashMap<String, Vec<acp_v2::ContentBlock>>,
@@ -317,6 +330,8 @@ impl PaseoConnection {
                 last_seq: None,
                 timeline_subscription: None,
                 permissions: HashMap::default(),
+                state_generation: 0,
+                stopping: false,
                 sent_images: HashMap::default(),
                 _release_subscription: release_subscription,
             },
@@ -487,6 +502,9 @@ impl AgentConnection for PaseoConnection {
     fn cancel(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Result<()> {
         let client = self.client(cx)?;
         let agent_id = session_id.0.to_string();
+        if let Some(session) = self.sessions.borrow_mut().get_mut(&agent_id) {
+            session.stopping = true;
+        }
         cx.background_spawn(async move {
             let response = client.request(&CancelAgent { agent_id }).await?;
             if let Some(error) = response.error {
@@ -1030,6 +1048,9 @@ fn replay_history(
             return;
         };
         session.last_seq = history.end_cursor.as_ref().map(|cursor| cursor.seq);
+        session.state_generation += 1;
+        // The turn that is running now may have started while no events were applied.
+        session.stream.turn = None;
         session.stream.turn_active = running || !pending_permissions.is_empty();
         // A turn still running continues its last message instead of starting a new one.
         if running && let Some((kind, key)) = last_key {
@@ -1060,7 +1081,7 @@ fn apply_stream(
         stream.seq,
         stream.event_type()
     );
-    let (thread, updates) = {
+    let (thread, updates, deferred_end) = {
         let mut sessions = sessions.borrow_mut();
         let Some(session) = sessions.get_mut(&stream.agent_id) else {
             return;
@@ -1087,10 +1108,48 @@ fn apply_stream(
         let mut updates = session.stream.updates(&event);
         restore_sent_images(&mut updates, &session.sent_images);
         log::debug!("  -> {updates:?}");
-        (thread, updates)
+        let end_turn = updates
+            .iter()
+            .position(|update| matches!(update, ThreadUpdate::EndTurn(_)))
+            .map(|index| updates.remove(index));
+        if end_turn.is_some()
+            || updates
+                .iter()
+                .any(|update| matches!(update, ThreadUpdate::State(_)))
+        {
+            session.state_generation += 1;
+        }
+        let stopped = end_turn.is_some() && mem::take(&mut session.stopping);
+        let deferred_end = match end_turn {
+            Some(end_turn) if stopped && matches!(event, AgentStreamEvent::TurnCanceled { .. }) => {
+                updates.push(end_turn);
+                None
+            }
+            Some(end_turn) => Some((end_turn, session.state_generation)),
+            None => None,
+        };
+        (thread, updates, deferred_end)
     };
     apply_updates(&thread, updates, cx);
     agent_images::fetch_images(store, images, cx);
+    if let Some((end_turn, generation)) = deferred_end {
+        let sessions = sessions.clone();
+        let agent_id = stream.agent_id.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(TURN_END_GRACE).await;
+            cx.update(|cx| {
+                let thread = sessions
+                    .borrow()
+                    .get(&agent_id)
+                    .filter(|session| session.state_generation == generation)
+                    .and_then(|session| session.thread.upgrade());
+                if let Some(thread) = thread {
+                    apply_updates(&thread, vec![end_turn], cx);
+                }
+            });
+        })
+        .detach();
+    }
 
     match event {
         AgentStreamEvent::PermissionRequested(request) => {
@@ -1247,6 +1306,9 @@ enum ThreadUpdate {
     ToolCall(acp_v2::ToolCallUpdate),
     Plan(acp_v2::PlanItems),
     State(acp_v2::StateUpdate),
+    /// The turn ended with this stop reason: the thread goes idle, after `TURN_END_GRACE` when
+    /// it comes from the live stream.
+    EndTurn(&'static str),
 }
 
 fn apply_updates(thread: &Entity<AcpThread>, updates: Vec<ThreadUpdate>, cx: &mut App) {
@@ -1263,6 +1325,9 @@ fn apply_updates(thread: &Entity<AcpThread>, updates: Vec<ThreadUpdate>, cx: &mu
                     Ok(())
                 }
                 ThreadUpdate::State(state) => thread.update_session_state(state, cx),
+                ThreadUpdate::EndTurn(stop_reason) => {
+                    thread.update_session_state(state_idle(stop_reason), cx)
+                }
             };
             if let Err(error) = result {
                 log::warn!("could not apply a Paseo update: {error:#}");
@@ -1308,25 +1373,17 @@ impl StreamState {
                 self.thought = None;
                 vec![ThreadUpdate::State(state_running())]
             }
-            AgentStreamEvent::TurnCompleted { .. } => {
-                self.turn_active = false;
-                vec![ThreadUpdate::State(state_idle("end_turn"))]
-            }
-            AgentStreamEvent::TurnCanceled { .. } => {
-                self.turn_active = false;
-                vec![ThreadUpdate::State(state_idle("cancelled"))]
-            }
-            AgentStreamEvent::TurnFailed { error, .. } => {
-                self.turn_active = false;
+            AgentStreamEvent::TurnCompleted { turn_id } => self.end_turn(turn_id, "end_turn"),
+            AgentStreamEvent::TurnCanceled { turn_id, .. } => self.end_turn(turn_id, "cancelled"),
+            AgentStreamEvent::TurnFailed { turn_id, error } => {
                 self.assistant = None;
                 let key = self.new_key("error");
-                vec![
-                    ThreadUpdate::Assistant(wire(json!({
-                        "messageId": key,
-                        "content": [text_block(&format!("**The turn failed:** {error}"))],
-                    }))),
-                    ThreadUpdate::State(state_idle("end_turn")),
-                ]
+                let mut updates = vec![ThreadUpdate::Assistant(wire(json!({
+                    "messageId": key,
+                    "content": [text_block(&format!("**The turn failed:** {error}"))],
+                })))];
+                updates.extend(self.end_turn(turn_id, "end_turn"));
+                updates
             }
             AgentStreamEvent::Timeline { item, .. } => self.timeline_updates(item),
             AgentStreamEvent::PermissionRequested(_) => {
@@ -1338,6 +1395,22 @@ impl StreamState {
             AgentStreamEvent::PermissionResolved { .. } => Vec::new(),
             AgentStreamEvent::AttentionRequired { .. } | AgentStreamEvent::Other(_) => Vec::new(),
         }
+    }
+
+    /// Paseo still forwards the end of a turn that a newer turn replaced; that end leaves the
+    /// newer turn running.
+    fn end_turn(
+        &mut self,
+        turn_id: &Option<String>,
+        stop_reason: &'static str,
+    ) -> Vec<ThreadUpdate> {
+        let replaced =
+            self.turn_active && turn_id.is_some() && self.turn.is_some() && *turn_id != self.turn;
+        if replaced {
+            return Vec::new();
+        }
+        self.turn_active = false;
+        vec![ThreadUpdate::EndTurn(stop_reason)]
     }
 
     fn timeline_updates(&mut self, item: &TimelineItem) -> Vec<ThreadUpdate> {
@@ -1818,6 +1891,7 @@ mod tests {
                         .as_str()
                         .unwrap()
                 ),
+                ThreadUpdate::EndTurn(stop_reason) => format!("end turn {stop_reason}"),
             })
             .collect()
     }
@@ -1857,7 +1931,7 @@ mod tests {
                 "tool c1",
                 "Assistant chunk live:t1:assistant:4",
                 "user m-9",
-                "state idle",
+                "end turn end_turn",
             ]
         );
     }
@@ -1879,7 +1953,56 @@ mod tests {
         }
         assert_eq!(
             keys(&updates),
-            vec!["state running", "state requires_action", "state idle"]
+            vec![
+                "state running",
+                "state requires_action",
+                "end turn end_turn"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_replaced_turn_keeps_the_next_turn_running() {
+        let mut state = StreamState::default();
+        let event = |value: Value| AgentStreamEvent::from_value(&value);
+        let mut updates = Vec::new();
+        for value in [
+            json!({"type": "turn_started", "provider": "mock", "turnId": "t1"}),
+            // An interrupting message: Paseo cancels the turn and starts the next.
+            json!({"type": "turn_canceled", "provider": "mock", "turnId": "t1",
+                   "reason": "replaced"}),
+            json!({"type": "turn_started", "provider": "mock", "turnId": "t2"}),
+            // Claude ending its turn before taking a steered message.
+            json!({"type": "turn_completed", "provider": "claude", "turnId": "t2"}),
+            json!({"type": "turn_started", "provider": "claude", "turnId": "t3"}),
+            json!({"type": "turn_completed", "provider": "claude", "turnId": "t2"}),
+        ] {
+            updates.extend(state.updates(&event(value)));
+        }
+        assert_eq!(
+            keys(&updates),
+            vec![
+                "state running",
+                "end turn cancelled",
+                "state running",
+                "end turn end_turn",
+                "state running",
+            ],
+            "the late end of t2 is dropped while t3 runs"
+        );
+        assert!(state.turn_active);
+
+        let updates = state.updates(&event(
+            json!({"type": "turn_completed", "provider": "claude", "turnId": "t3"}),
+        ));
+        assert_eq!(keys(&updates), vec!["end turn end_turn"]);
+        let updates = state.updates(&event(
+            json!({"type": "turn_completed", "provider": "claude", "turnId": "t4"}),
+        ));
+        assert_eq!(
+            keys(&updates),
+            vec!["end turn end_turn"],
+            "with no turn running, an end from an unseen turn still ends it"
         );
     }
 

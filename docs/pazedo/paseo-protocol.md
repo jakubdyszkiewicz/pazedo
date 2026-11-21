@@ -98,6 +98,14 @@ sidebar shows the agent that most recently finished unseen. Not used yet:
 `workspace.clear_attention.request {workspaceId}` (Paseo's "Mark as read") and
 `workspace.mark_unread.request {workspaceId}`.
 
+Turn ends (verified 2026-11-21, test daemon, mock provider): an interrupting message
+(`send_agent_message` with `activeTurnBehavior: interrupt`) produces `turn_canceled` for the
+running turn and `turn_started` for the next in the same instant, both live with `seq: null`. The
+daemon forwards a terminal event even when it is stale (its `turnId` is no longer the active
+turn; `applyActiveTurnTerminal` in `agent-manager.ts`). From Paseo's source, not verified live:
+Claude ends a turn (`result`) before a steered message starts its own, and starts an autonomous
+turn when background work wakes it, so `turn_completed` is followed by `turn_started`.
+
 ## Agent timeline
 
 - `fetch_agent_timeline_request {agentId, direction: tail|before|after, cursor?: {epoch, seq},

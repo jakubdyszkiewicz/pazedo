@@ -417,6 +417,26 @@ there is no ring. On the real daemon a running Claude agent reported 644k of 1M 
 cost mid-turn. Verified 2026-11-16 in a dev build with a mock agent ("emit 50 agent stream
 updates", which reports 50 of 128k tokens): the ring showed "Context 0% • 50 / 128k".
 
+### Agent notifications
+
+An agent tab is Zed's conversation view, so Zed's "agent finished" popup (upper right, per
+`agent.notify_when_agent_waiting`) appears when the agent's thread goes idle while the tab is not
+in view. The thread follows the agent's turns (`turn_started`, `turn_completed`,
+`turn_canceled`, `turn_failed`), but a turn's end does not mean the agent stopped: a message that
+interrupts a running agent cancels its turn and starts the next (both events arrive together), and
+Claude ends its turn before taking a steered message or when it wakes up after background work.
+So the thread goes idle only if no turn starts within a second (`TURN_END_GRACE`), and the end of
+a turn that a newer turn replaced is ignored. A stop from the tab goes idle at once. A collapsed
+project's dot in the sidebar counts only workspaces that need the user (unread, failed, waiting
+for input), no longer running ones.
+
+Verified 2026-11-21 in a dev build against the test daemon, with a `ten-second-stream` mock
+agent's tab open and the window inactive: a message and two interrupting messages 3 s apart
+(`paseo-test send --behavior interrupt`) showed one popup, a second after the last turn ended.
+The build without the fix showed the popup right after the first interrupt. Not verified: Claude's
+steered and background turns (the mock provider has neither; the behaviour is from Paseo's
+`providers/claude/agent.ts`) and how quickly Stop goes idle.
+
 ### Commands in agent threads
 
 A finished shell command is one line, the command's first line in code style, that expands to
