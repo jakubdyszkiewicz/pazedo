@@ -112,8 +112,12 @@ upload step then failed, because `/bin/sh`'s `echo` expanded the `\n` escapes in
 reply (fixed: the script uses `printf`), so the zip was attached by hand with the same API call.
 The zip, unpacked with `ditto`, passes `codesign --verify --deep --strict`, reports version
 0.1.0 and holds both remote servers. The About window of a debug build reads "Pazedo 0.1.0 (Zed
-1.30.0) (debug)". Not verified: a full run of the fixed script, and downloading the release on
-another Mac and opening it after the `xattr` step.
+1.30.0) (debug)".
+
+Verified 2026-11-21 with 0.1.1 (built from `cbf967707b`): a full run of the script built the app,
+reports version 0.1.1, passes `codesign --verify --deep --strict`, and created the draft with
+the 184 MB zip uploaded, with a GitHub App installation token as `GITHUB_TOKEN`. Not verified:
+downloading a release on another Mac and opening it after the `xattr` step.
 
 ### App icon
 
