@@ -109,10 +109,8 @@ impl PaseoPanel {
                 window,
                 cx,
             );
-            pane.set_can_navigate(false, cx);
             pane.display_nav_history_buttons(None);
             pane.set_should_display_tab_bar(|_, _| true);
-            pane.set_close_pane_if_empty(false, cx);
             pane.set_zoom_out_on_close(false);
             pane.set_can_split(Some(Arc::new(|_, _, _, _| false)));
             pane.set_render_tab_bar_buttons(cx, {
