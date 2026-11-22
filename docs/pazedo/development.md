@@ -523,9 +523,12 @@ Verified 2026-11-22 in the dev build against the 0.16.2 test daemon with the moc
 three; Submit with the text empty marked it "is required"; choosing Desktop and Immediately and
 typing "Users can switch" sent `answers: {surface: "Desktop", rollout: "Immediately", success:
 "Users can switch"}` (seen in the daemon's `permission_resolved` with `paseo_debug watch`), and
-the turn finished. Decline sent `deny` with "Dismissed by user". Multiple choice and the "Other"
-field (the mock sets no `allowOther`) are covered by unit tests only, and no real Claude question
-has been answered from Pazedo yet.
+the turn finished. Decline sent `deny` with "Dismissed by user". The same day a Claude Haiku 5.5 agent on the
+test daemon (in `~/dev/pazedo-sandbox`) was asked to call AskUserQuestion with a single-choice
+question with descriptions and a multiple-choice one. The form showed both, with the
+descriptions and an "Other" field under each. Choosing Blue, then Monday and Wednesday with
+"Friday" typed under Other, sent `answers: {Color: "Blue", Days: "Monday, Wednesday, Friday"}`,
+and Claude replied with those answers keyed by the question texts.
 
 ### Commands in agent threads
 
