@@ -119,6 +119,12 @@ reports version 0.1.1, passes `codesign --verify --deep --strict`, and created t
 the 184 MB zip uploaded, with a GitHub App installation token as `GITHUB_TOKEN`. Not verified:
 downloading a release on another Mac and opening it after the `xattr` step.
 
+0.1.2 (2026-11-22, built from `32d16462b2`) was built first with `bundle` (39 min after a merge
+of upstream, which rebuilt nearly everything), then released with `release --skip-build`: an
+installation token lasts an hour, less than a build plus upload can take. The app reports 0.1.2
+and passes `codesign --verify --deep --strict`, and the draft has the 185 MB zip. A debug build
+of 181 GB had filled the 238 GB build disk during the merge; deleting `target/debug` freed it.
+
 ### App icon
 
 The icon is the folded "P" in `docs/pazedo/design/`, a generated concept image on a pale
