@@ -1,12 +1,41 @@
 # Paseo daemon protocol notes
 
 What `crates/paseo_client` relies on, written against Paseo **0.15.4** (2026-11-14) and
-checked against **0.16.2** (2026-11-21, see "Changes in 0.16" below). Sources: the Zod schemas
+checked against **0.16.2** (2026-11-21) and **0.17.3** (2026-11-22, see "Changes in 0.17" and
+"Changes in 0.16" below). Sources: the Zod schemas
 in npm `@getpaseo/protocol` (`dist/messages.js`), `@getpaseo/client` (`dist/daemon-client.js`),
 and the getpaseo/paseo repository at `42c7b7f` (a 0.15 checkout). "Verified" means observed
 against the isolated test daemon (see [development.md](./development.md)) with `paseo_debug` or
 the live tests; everything else is read from the sources. Unless a section says otherwise,
 what was verified was verified on 0.15.4.
+
+## Changes in 0.17
+
+Compared from the 0.16.2 and 0.17.3 npm packages of `@getpaseo/protocol` and
+`@getpaseo/client`. `protocolVersion` in `hello` is still 1. Everything is additive, and nothing
+pazedo decodes changed shape.
+
+- What affected pazedo: Paseo's client no longer times out archive, restore and worktree
+  requests, because an archive can wait behind other checkout work on the daemon (each daemon
+  stage has its own deadline). pazedo waited 30 s for `archive_workspace_request` and 120 s for
+  `project.remove.request`; both now wait 10 minutes.
+- `backgroundWork` is `{count, runningCount?}`; an agent counts as running only while
+  `runningCount` (else `count`) is above zero. The daemon computes workspace status itself, and
+  pazedo shows the background-work list, so nothing changed in pazedo.
+- New, none used by pazedo yet: `metrics` on providers' agent rows, `sessionMetrics` on agents
+  and `turnMetrics` on timeline rows (provider-formatted label/value pairs); a `queue`
+  `activeTurnBehavior` for messages sent by an agent (behind the `agentActiveTurnBehaviors`
+  feature and client capability; pazedo sends as a user, so it does not apply);
+  `provider.installation.{inspect,check_updates,update,update.subscribe}` (feature
+  `providerInstallation`); `checkout.worktrees.list` (feature `checkoutWorktreeList`);
+  `docsUrl` on providers; `durationSeconds` on usage windows, `observedAt` and `defaultEnabled`
+  on usage reports; `label` and `instanceId` on browser hosts; a `gooseProvider` feature.
+
+Verified 2026-11-22 on a 0.17.3 test daemon (its 0.16.2 home migrated in place; backup in
+`~/.paseo-pazedo-test-0.16.2-backup`): the live tests pass, and a dev build loaded the sidebar,
+showed a mock agent's question form, sent its answers (the daemon's `permission_resolved` held
+them), and archived the agent when its tab closed, with no Paseo warnings in its log. The longer
+archive timeout was not exercised: no archive took longer than 30 s.
 
 ## Changes in 0.16
 

@@ -11,7 +11,7 @@ use collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-pub const PASEO_PROTOCOL_PACKAGE_VERSION: &str = "0.16.2";
+pub const PASEO_PROTOCOL_PACKAGE_VERSION: &str = "0.17.3";
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// A session request that the daemon answers with exactly one correlated response.
@@ -1886,10 +1886,15 @@ pub struct ArchiveWorkspaceResponse {
     pub canceled: bool,
 }
 
+/// Since 0.17 an archive can wait behind other checkout work on the daemon, which bounds each
+/// stage itself; Paseo's own client waits for the response without a timeout.
+const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(600);
+
 impl Request for ArchiveWorkspace {
     const TYPE: &'static str = "archive_workspace_request";
     const RESPONSE_TYPE: &'static str = "archive_workspace_response";
     type Response = ArchiveWorkspaceResponse;
+    const TIMEOUT: Option<Duration> = Some(ARCHIVE_TIMEOUT);
 }
 
 /// Sets a workspace's title; `None` reverts its name to the one derived from its branch or
@@ -2098,7 +2103,7 @@ impl Request for RemoveProject {
     const RESPONSE_TYPE: &'static str = "project.remove.response";
     type Response = RemoveProjectResponse;
     // The daemon archives every workspace of the project first.
-    const TIMEOUT: Option<Duration> = Some(Duration::from_secs(120));
+    const TIMEOUT: Option<Duration> = Some(ARCHIVE_TIMEOUT);
 }
 
 /// The daemon machine's GitHub repositories matching `query`, through its `gh` CLI.
