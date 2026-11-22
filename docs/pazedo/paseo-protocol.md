@@ -189,6 +189,16 @@ holds the next chunk of text (verified; history entries are merged). Other strea
   selectedActionId?}}` has no response message; `requestId` is the permission request's own id.
   The daemon then pushes `permission_resolved {requestId, resolution}` on the timeline and the
   turn continues (`turn_completed` for the mock plan approval).
+- A `question` request (Claude's AskUserQuestion, Paseo's mock "emit synthetic questions")
+  holds `input.questions: [{question, header, options: [{label, description?, preview?}],
+  multiSelect, allowOther?, allowEmpty?, placeholder?}]`. The daemon sets `allowOther` on every
+  Claude question, for a typed answer. Paseo's app answers with `{behavior: allow, updatedInput:
+  {...input, answers: {<header>: <answer>}}}`: the chosen labels joined with ", ", or the typed
+  text (replacing a single choice, appended to multiple ones). The Claude provider rekeys answers
+  to the full question text and rejects an allow without a non-empty answer, leaving the request
+  pending. Dismiss is `{behavior: deny, message: "Dismissed by user"}`. From the 0.16 app
+  bundle and Paseo's `question-form-card-core.ts`; the response shape was verified 2026-11-22 on
+  the 0.16.2 test daemon (its `permission_resolved` echoes the resolution).
 - While a permission is pending the agent's `status` stays `running` with
   `requiresAttention: false`; the pending permission itself is the signal.
 

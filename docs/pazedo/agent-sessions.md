@@ -138,7 +138,6 @@ while it is still closed the tab shows a "Reload Agent" notice that calls
 
 ## Known gaps
 
-- Questions (`kind: question` permission requests) are shown as allow/deny.
 - No images or file attachments in prompts (mentions are sent as plain text).
 - "Load Full History" reloads everything at once; there is no incremental paging.
 - A timeline gap is only logged; it should reload the session.

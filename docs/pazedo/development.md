@@ -497,6 +497,36 @@ the daemon's update removed the bar, the list request then returned no items, an
 workspace's sidebar row stopped showing as running. The dev build also synced read-only with the
 user's 0.15.4 daemon without errors (no feature, so no extra subscription and no bar).
 
+### Questions
+
+An agent's questions (`question` permission requests, such as Claude's AskUserQuestion) show as
+a form in the thread, like Paseo's question card: each question with its options as radio
+buttons or checkboxes with their descriptions, an "Other" field where the question takes a typed
+answer, and a text field for a question without options. Submit sends the answers keyed by each
+question's header, as Paseo's app does (see "Creating agents and answering permissions" in
+paseo-protocol.md); Decline and Cancel dismiss the question. Before this, questions were
+Allow/Deny prompts whose Allow carried no answers, so Claude never got one.
+
+- The form is Zed's own ACP elicitation card (`AcpThread::request_elicitation_with_id`), so no
+  Zed code changed. Fields are named `question_00`, `question_00_text`, ... because Zed orders a
+  form's fields by name.
+- Options are never marked required: Zed preselects the first option of a required choice, and
+  Paseo preselects nothing. A form submitted with a question unanswered comes back with the
+  values kept and "Answer every question." A question with neither options nor `allowEmpty`
+  marks its text field required, so Zed flags it in place.
+- A question answered elsewhere (Paseo's app, another Pazedo) withdraws the form when
+  `permission_resolved` arrives. A request whose `questions` don't parse stays an Allow/Deny prompt.
+- Option previews (`preview`) and placeholders are not shown: Zed's form has no place for them.
+
+Verified 2026-11-22 in the dev build against the 0.16.2 test daemon with the mock provider's
+"emit synthetic questions" (two single-choice questions and a text one): the form showed all
+three; Submit with the text empty marked it "is required"; choosing Desktop and Immediately and
+typing "Users can switch" sent `answers: {surface: "Desktop", rollout: "Immediately", success:
+"Users can switch"}` (seen in the daemon's `permission_resolved` with `paseo_debug watch`), and
+the turn finished. Decline sent `deny` with "Dismissed by user". Multiple choice and the "Other"
+field (the mock sets no `allowOther`) are covered by unit tests only, and no real Claude question
+has been answered from Pazedo yet.
+
 ### Commands in agent threads
 
 A finished shell command is one line, the command's first line in code style, that expands to

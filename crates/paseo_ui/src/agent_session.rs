@@ -8,8 +8,8 @@
 //! started here.
 
 use acp_thread::{
-    AcpThread, AgentConnection, AgentSessionConfigOptions, MessageKind, PermissionRequestId,
-    ReceiptSessionSubmissions, ReceiptSubmission, SubmissionDisconnected,
+    AcpThread, AgentConnection, AgentSessionConfigOptions, ElicitationEntryId, MessageKind,
+    PermissionRequestId, ReceiptSessionSubmissions, ReceiptSubmission, SubmissionDisconnected,
 };
 use action_log::ActionLog;
 use agent_client_protocol::{schema::MaybeUndefined, v2::schema as acp_v2};
@@ -27,7 +27,7 @@ use paseo_client::{
         AgentMessage, AgentMessageEvent, AgentSessionConfig, AgentSlashCommand, AgentStatus,
         AgentStream, AgentStreamEvent, CancelAgent, CreateAgent, FetchAgentTimeline,
         FetchAgentTimelineResponse, ImageAttachment, ListCommands, PermissionBehavior,
-        PermissionRequest, PermissionResponse, ReleaseSubscription, RespondToPermission,
+        PermissionRequest, PermissionResponse, Question, ReleaseSubscription, RespondToPermission,
         SendAgentMessage, SetAgentMode, SetAgentModel, SetAgentThinking,
         SetAgentTimelineSubscription, TimelineDirection, TimelineItem, TimelineProjection,
         TodoItem, ToolCall, ToolCallDetail, ToolCallStatus,
@@ -160,7 +160,7 @@ struct Session {
     last_seq: Option<u64>,
     timeline_subscription: Option<String>,
     /// Paseo permission request id → the prompt shown in the thread.
-    permissions: HashMap<String, PermissionRequestId>,
+    permissions: HashMap<String, ShownPermission>,
     /// Counts changes to the thread's running state, so that an ended turn going idle after
     /// `TURN_END_GRACE` knows whether something happened since.
     state_generation: u64,
@@ -1204,12 +1204,24 @@ fn apply_stream(
                 .borrow_mut()
                 .get_mut(&stream.agent_id)
                 .and_then(|session| session.permissions.remove(&request_id));
-            if let Some(local) = local {
-                thread.update(cx, |thread, cx| thread.cancel_permission_request(local, cx));
+            match local {
+                Some(ShownPermission::Prompt(local)) => {
+                    thread.update(cx, |thread, cx| thread.cancel_permission_request(local, cx));
+                }
+                Some(ShownPermission::Form(local)) => {
+                    thread.update(cx, |thread, cx| thread.cancel_elicitation(&local, cx));
+                }
+                None => {}
             }
         }
         _ => {}
     }
+}
+
+/// How a Paseo permission request is shown: questions are forms, the rest are prompts.
+enum ShownPermission {
+    Prompt(PermissionRequestId),
+    Form(ElicitationEntryId),
 }
 
 fn raise_permission(
@@ -1227,6 +1239,12 @@ fn raise_permission(
     if already_shown {
         return;
     }
+    if let Some(questions) = request.questions() {
+        raise_questions(
+            sessions, store, agent_id, thread, request, questions, None, cx,
+        );
+        return;
+    }
     let (wire_request, actions) = permission_request(agent_id, &request);
     let raised = thread.update(cx, |thread, cx| thread.request_permission(wire_request, cx));
     let (local_id, outcome) = match raised {
@@ -1240,7 +1258,9 @@ fn raise_permission(
         }
     };
     if let Some(session) = sessions.borrow_mut().get_mut(agent_id) {
-        session.permissions.insert(request.id.clone(), local_id);
+        session
+            .permissions
+            .insert(request.id.clone(), ShownPermission::Prompt(local_id));
     }
 
     let sessions = sessions.clone();
@@ -1271,6 +1291,239 @@ fn raise_permission(
         })
     })
     .detach_and_log_err(cx);
+}
+
+/// Shows a question request as a form, the way Paseo's app does: each question's options as
+/// radio buttons or checkboxes, and a text field for an answer of one's own. `previous` holds
+/// the values of a submitted form that left a question unanswered, to ask again with them.
+#[allow(clippy::too_many_arguments)]
+fn raise_questions(
+    sessions: &Sessions,
+    store: &Entity<PaseoStore>,
+    agent_id: &str,
+    thread: &Entity<AcpThread>,
+    request: PermissionRequest,
+    questions: Vec<Question>,
+    previous: Option<&QuestionFormContent>,
+    cx: &mut App,
+) {
+    let form = question_form(agent_id, &questions, previous);
+    let raised = thread.update(cx, |thread, cx| {
+        thread.request_elicitation_with_id(form, cx)
+    });
+    let (local_id, response) = match raised {
+        Ok(raised) => raised,
+        Err(error) => {
+            log::error!(
+                "could not show Paseo question {}: {}",
+                request.id,
+                error.message
+            );
+            return;
+        }
+    };
+    if let Some(session) = sessions.borrow_mut().get_mut(agent_id) {
+        session
+            .permissions
+            .insert(request.id.clone(), ShownPermission::Form(local_id));
+    }
+
+    let sessions = sessions.clone();
+    let store = store.downgrade();
+    let thread = thread.downgrade();
+    let agent_id = agent_id.to_string();
+    cx.spawn(async move |cx| {
+        let response = response.await;
+        let still_ours = sessions
+            .borrow_mut()
+            .get_mut(&agent_id)
+            .and_then(|session| session.permissions.remove(&request.id))
+            .is_some();
+        if !still_ours {
+            return anyhow::Ok(());
+        }
+        let response = match response.action {
+            acp_v2::ElicitationAction::Accept(accept) => {
+                let content = accept.content.unwrap_or_default();
+                let Some(answers) = question_answers(&questions, &content) else {
+                    cx.update(|cx| {
+                        if let (Some(store), Some(thread)) = (store.upgrade(), thread.upgrade()) {
+                            raise_questions(
+                                &sessions,
+                                &store,
+                                &agent_id,
+                                &thread,
+                                request,
+                                questions,
+                                Some(&content),
+                                cx,
+                            );
+                        }
+                    });
+                    return Ok(());
+                };
+                let mut updated_input = match request.input.clone() {
+                    Some(Value::Object(input)) => input,
+                    _ => serde_json::Map::new(),
+                };
+                updated_input.insert("answers".into(), Value::Object(answers));
+                PermissionResponse::Allow {
+                    selected_action_id: None,
+                    updated_input: Some(Value::Object(updated_input)),
+                }
+            }
+            _ => PermissionResponse::Deny {
+                selected_action_id: None,
+                message: Some("Dismissed by user".into()),
+                interrupt: None,
+            },
+        };
+        let client = cx
+            .update(|cx| store.upgrade().and_then(|store| store.read(cx).client()))
+            .context("Not connected to Paseo")?;
+        client.notify(&RespondToPermission {
+            agent_id,
+            request_id: request.id,
+            response,
+        })
+    })
+    .detach_and_log_err(cx);
+}
+
+type QuestionFormContent = std::collections::BTreeMap<String, acp_v2::ElicitationContentValue>;
+
+fn question_choice_field(index: usize) -> String {
+    format!("question_{index:02}")
+}
+
+fn question_text_field(index: usize) -> String {
+    format!("question_{index:02}_text")
+}
+
+/// The form for a question request. Zed orders a form's fields by name, so the names number the
+/// questions. Options are never required, because Zed preselects the first option of a required
+/// choice; whether each question is answered is checked on submit instead.
+fn question_form(
+    agent_id: &str,
+    questions: &[Question],
+    previous: Option<&QuestionFormContent>,
+) -> acp_v2::CreateElicitationRequest {
+    let previous_value = |field: &str| previous.and_then(|previous| previous.get(field));
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        if !question.options.is_empty() {
+            let field = question_choice_field(index);
+            let options: Vec<Value> = question
+                .options
+                .iter()
+                .map(|option| {
+                    json!({
+                        "const": option.label,
+                        "title": option.label,
+                        "description": option.description,
+                    })
+                })
+                .collect();
+            let mut property = if question.multi_select {
+                json!({
+                    "type": "array",
+                    "title": question.question,
+                    "items": {"anyOf": options},
+                })
+            } else {
+                json!({
+                    "type": "string",
+                    "title": question.question,
+                    "oneOf": options,
+                })
+            };
+            let is_option =
+                |label: &str| question.options.iter().any(|option| option.label == label);
+            match previous_value(&field) {
+                Some(acp_v2::ElicitationContentValue::String(label)) if is_option(label) => {
+                    property["default"] = json!(label);
+                }
+                Some(acp_v2::ElicitationContentValue::StringArray(labels))
+                    if question.multi_select && labels.iter().all(|label| is_option(label)) =>
+                {
+                    property["default"] = json!(labels);
+                }
+                _ => {}
+            }
+            properties.insert(field, property);
+        }
+        if question.accepts_text() {
+            let field = question_text_field(index);
+            let title = if question.options.is_empty() {
+                question.question.as_str()
+            } else {
+                "Other"
+            };
+            let mut property = json!({"type": "string", "title": title});
+            if let Some(acp_v2::ElicitationContentValue::String(text)) = previous_value(&field) {
+                property["default"] = json!(text);
+            }
+            if question.options.is_empty() && !question.allow_empty {
+                required.push(field.clone());
+            }
+            properties.insert(field, property);
+        }
+    }
+    let headers: Vec<&str> = questions
+        .iter()
+        .map(|question| question.header.as_str())
+        .collect();
+    let mut schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    });
+    if previous.is_some() {
+        schema["description"] = json!("Answer every question.");
+    }
+    wire(json!({
+        "mode": "form",
+        "sessionId": agent_id,
+        "message": headers.join(" · "),
+        "requestedSchema": schema,
+    }))
+}
+
+/// The answers of a submitted question form, keyed by header, or `None` when a question is left
+/// unanswered. A typed answer replaces a single choice and joins multiple ones, as in Paseo's
+/// app.
+fn question_answers(
+    questions: &[Question],
+    content: &QuestionFormContent,
+) -> Option<serde_json::Map<String, Value>> {
+    let mut answers = serde_json::Map::new();
+    for (index, question) in questions.iter().enumerate() {
+        let mut parts: Vec<String> = match content.get(&question_choice_field(index)) {
+            Some(acp_v2::ElicitationContentValue::String(label)) => vec![label.clone()],
+            Some(acp_v2::ElicitationContentValue::StringArray(labels)) => labels.clone(),
+            _ => Vec::new(),
+        };
+        let text = match content.get(&question_text_field(index)) {
+            Some(acp_v2::ElicitationContentValue::String(text)) => text.trim(),
+            _ => "",
+        };
+        if question.accepts_text() && !text.is_empty() {
+            if !question.multi_select {
+                parts.clear();
+            }
+            parts.push(text.to_string());
+        }
+        let answer = if !parts.is_empty() {
+            parts.join(", ")
+        } else if question.allow_empty && question.options.is_empty() {
+            String::new()
+        } else {
+            return None;
+        };
+        answers.insert(question.header.clone(), Value::String(answer));
+    }
+    Some(answers)
 }
 
 /// The ACP prompt for a Paseo permission request, and the options it offers.
@@ -1330,6 +1583,7 @@ fn permission_response(
     match actions.iter().find(|(id, _)| id == option_id) {
         Some((_, PermissionBehavior::Allow)) => PermissionResponse::Allow {
             selected_action_id: Some(option_id.to_string()),
+            updated_input: None,
         },
         _ => PermissionResponse::Deny {
             selected_action_id: Some(option_id.to_string()),
@@ -2005,6 +2259,99 @@ mod tests {
     }
 
     #[test]
+    fn questions_become_a_form_whose_answers_are_keyed_by_header() {
+        // A Claude AskUserQuestion request as a 0.15.4 daemon sends it.
+        let request: PermissionRequest = serde_json::from_value(json!({
+            "id": "permission-1", "provider": "claude", "name": "AskUserQuestion",
+            "kind": "question", "title": "Which old backups should I delete?",
+            "input": {"questions": [
+                {"question": "Which old backups should I delete?", "header": "Backups",
+                 "multiSelect": false, "allowOther": true, "options": [
+                    {"label": "All but yesterday's", "description": "Keep the newest."},
+                    {"label": "All six", "description": "Delete everything."},
+                 ]},
+                {"question": "Which hosts?", "header": "Hosts", "multiSelect": true,
+                 "allowOther": true, "options": [{"label": "nas"}, {"label": "pi"}]},
+                {"question": "Anything else?", "header": "Notes", "options": [],
+                 "allowEmpty": true},
+            ]},
+        }))
+        .unwrap();
+        let questions = request.questions().unwrap();
+        assert_eq!(questions.len(), 3);
+
+        let form = serde_json::to_value(question_form("agent-1", &questions, None)).unwrap();
+        assert_eq!(form["mode"], "form");
+        assert_eq!(form["message"], "Backups · Hosts · Notes");
+        let properties = &form["requestedSchema"]["properties"];
+        assert_eq!(
+            properties["question_00"]["title"],
+            "Which old backups should I delete?"
+        );
+        assert_eq!(
+            properties["question_00"]["oneOf"][0],
+            json!({"const": "All but yesterday's", "title": "All but yesterday's",
+                   "description": "Keep the newest."})
+        );
+        assert_eq!(properties["question_00_text"]["title"], "Other");
+        assert_eq!(properties["question_01"]["type"], "array");
+        assert_eq!(properties["question_02_text"]["title"], "Anything else?");
+        assert!(properties.get("question_02").is_none());
+        assert_eq!(form["requestedSchema"]["required"], json!([]));
+
+        let content =
+            |value: Value| -> QuestionFormContent { serde_json::from_value(value).unwrap() };
+        assert_eq!(
+            question_answers(
+                &questions,
+                &content(json!({
+                    "question_00": "All six",
+                    "question_01": ["nas", "pi"],
+                    "question_01_text": " router ",
+                })),
+            ),
+            Some(serde_json::Map::from_iter([
+                ("Backups".to_string(), json!("All six")),
+                ("Hosts".to_string(), json!("nas, pi, router")),
+                ("Notes".to_string(), json!("")),
+            ]))
+        );
+        let typed_over_choice = question_answers(
+            &questions,
+            &content(json!({
+                "question_00": "All six",
+                "question_00_text": "None of them",
+                "question_01": ["pi"],
+            })),
+        )
+        .unwrap();
+        assert_eq!(typed_over_choice["Backups"], "None of them");
+
+        let unanswered = content(json!({"question_00": "All six", "question_01_text": "  "}));
+        assert_eq!(question_answers(&questions, &unanswered), None);
+        let again =
+            serde_json::to_value(question_form("agent-1", &questions, Some(&unanswered))).unwrap();
+        assert_eq!(
+            again["requestedSchema"]["properties"]["question_00"]["default"],
+            "All six"
+        );
+        assert_eq!(
+            again["requestedSchema"]["description"],
+            "Answer every question."
+        );
+    }
+
+    #[test]
+    fn a_question_without_a_question_list_stays_a_permission_prompt() {
+        let request: PermissionRequest = serde_json::from_value(json!({
+            "id": "p", "provider": "mock", "name": "ask", "kind": "question",
+            "input": {"questions": []},
+        }))
+        .unwrap();
+        assert_eq!(request.questions(), None);
+    }
+
+    #[test]
     fn commands_keep_their_argument_hint() {
         let command = |value: Value| {
             serde_json::to_value(available_command(
@@ -2295,7 +2642,8 @@ mod tests {
         assert_eq!(
             permission_response(&actions, "implement"),
             PermissionResponse::Allow {
-                selected_action_id: Some("implement".into())
+                selected_action_id: Some("implement".into()),
+                updated_input: None,
             }
         );
     }

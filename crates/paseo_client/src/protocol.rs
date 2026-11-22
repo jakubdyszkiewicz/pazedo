@@ -443,6 +443,50 @@ pub struct PermissionRequest {
     pub actions: Vec<PermissionAction>,
 }
 
+impl PermissionRequest {
+    /// The questions of a `question` request (Claude's AskUserQuestion), or `None` when its
+    /// input doesn't hold a well-formed, non-empty question list.
+    pub fn questions(&self) -> Option<Vec<Question>> {
+        if self.kind != PermissionKind::Question {
+            return None;
+        }
+        let questions = self.input.as_ref()?.get("questions")?;
+        let questions: Vec<Question> = serde_json::from_value(questions.clone()).ok()?;
+        (!questions.is_empty()).then_some(questions)
+    }
+}
+
+/// One question of a `question` permission request. Its answer goes in the response's
+/// `updatedInput.answers`, keyed by `header`; the daemon rekeys it for the provider.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Whether a typed answer is accepted besides the options. Paseo sets it on every Claude
+    /// question; some providers call it `isOther`.
+    #[serde(default, alias = "isOther")]
+    pub allow_other: bool,
+    #[serde(default)]
+    pub allow_empty: bool,
+}
+
+impl Question {
+    pub fn accepts_text(&self) -> bool {
+        self.options.is_empty() || self.allow_other
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PermissionAction {
     pub id: String,
@@ -826,6 +870,9 @@ pub enum PermissionResponse {
     Allow {
         #[serde(skip_serializing_if = "Option::is_none")]
         selected_action_id: Option<String>,
+        /// Replaces the tool's input: a question's answers go in its `answers`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        updated_input: Option<Value>,
     },
     Deny {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2654,10 +2701,19 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_value(PermissionResponse::Allow {
-                selected_action_id: Some("approve".into())
+                selected_action_id: Some("approve".into()),
+                updated_input: None,
             })
             .unwrap(),
             json!({"behavior": "allow", "selectedActionId": "approve"})
+        );
+        assert_eq!(
+            serde_json::to_value(PermissionResponse::Allow {
+                selected_action_id: None,
+                updated_input: Some(json!({"answers": {"Backups": "All six"}})),
+            })
+            .unwrap(),
+            json!({"behavior": "allow", "updatedInput": {"answers": {"Backups": "All six"}}})
         );
     }
 

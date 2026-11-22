@@ -115,6 +115,7 @@ fn main() -> Result<()> {
                     request_id,
                     response: PermissionResponse::Allow {
                         selected_action_id: action_id,
+                        updated_input: None,
                     },
                 })?;
                 // Give the notification time to be written before the process exits.
